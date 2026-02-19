@@ -17,7 +17,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          registry-url: https://registry.npmjs.org
       - run: npm ci
       - run: npm run check
       - run: npm test
+      - run: sed -i '/_authToken/d' ~/.npmrc
       - run: npm publish --provenance --access public
