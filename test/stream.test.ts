@@ -174,11 +174,7 @@ describe("Feature 9: Streaming Integration", () => {
   // =========================================================================
 
   it("emits complete text_start -> text_delta -> text_end sequence", async () => {
-    const mockFetch = mockFetchChunked([
-      '{"content":"Hello "}',
-      '{"content":"world"}',
-      '{"contextUsagePercentage":5}',
-    ]);
+    const mockFetch = mockFetchChunked(['{"content":"Hello "}', '{"content":"world"}', '{"contextUsagePercentage":5}']);
     vi.stubGlobal("fetch", mockFetch);
 
     const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
@@ -556,11 +552,7 @@ describe("Feature 9: Streaming Integration", () => {
     };
     const context: Context = {
       systemPrompt: "You are helpful",
-      messages: [
-        { role: "user", content: "Calculate 2+2", timestamp: ts },
-        assistantWithTool,
-        toolResult,
-      ],
+      messages: [{ role: "user", content: "Calculate 2+2", timestamp: ts }, assistantWithTool, toolResult],
       tools: [{ name: "calc", description: "Calculate", parameters: { type: "object", properties: {} } }],
     };
     const mockFetch = mockFetchOk('{"content":"The answer is 4."}{"contextUsagePercentage":8}');
