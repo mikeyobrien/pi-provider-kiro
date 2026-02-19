@@ -1,9 +1,14 @@
 // Feature 3: OAuth — AWS Builder ID Device Code Flow
+//
+// Supports two auth methods:
+//   - "idc": AWS Builder ID or IAM Identity Center (SSO) via device code flow
+//   - "desktop": Kiro desktop app credentials (refresh via Kiro auth service)
 
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@mariozechner/pi-ai";
 
 export const SSO_OIDC_ENDPOINT = "https://oidc.us-east-1.amazonaws.com";
 export const BUILDER_ID_START_URL = "https://view.awsapps.com/start";
+export const KIRO_DESKTOP_REFRESH_URL = "https://prod.{region}.auth.desktop.kiro.dev/refreshToken";
 export const SSO_SCOPES = [
   "codewhisperer:completions",
   "codewhisperer:analysis",
@@ -12,10 +17,13 @@ export const SSO_SCOPES = [
   "codewhisperer:taskassist",
 ];
 
+export type KiroAuthMethod = "idc" | "desktop";
+
 export interface KiroCredentials extends OAuthCredentials {
   clientId: string;
   clientSecret: string;
   region: string;
+  authMethod: KiroAuthMethod;
 }
 
 export async function loginKiroBuilderID(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
@@ -100,6 +108,7 @@ export async function loginKiroBuilderID(callbacks: OAuthLoginCallbacks): Promis
         clientId,
         clientSecret,
         region: "us-east-1",
+        authMethod: "idc" as KiroAuthMethod,
       };
     }
   }
@@ -109,9 +118,36 @@ export async function loginKiroBuilderID(callbacks: OAuthLoginCallbacks): Promis
 export async function refreshKiroToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
   const parts = credentials.refresh.split("|");
   const refreshToken = parts[0] ?? "";
+  const authMethod = (parts[parts.length - 1] ?? "idc") as KiroAuthMethod;
+  const region = (credentials as KiroCredentials).region || "us-east-1";
+
+  if (authMethod === "desktop") {
+    // Kiro desktop app tokens use a different refresh endpoint
+    const url = KIRO_DESKTOP_REFRESH_URL.replace("{region}", region);
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "User-Agent": "pi-cli" },
+      body: JSON.stringify({ refreshToken }),
+    });
+    if (!response.ok) throw new Error(`Desktop token refresh failed: ${response.status}`);
+    const data = (await response.json()) as { accessToken: string; refreshToken?: string; expiresIn: number };
+    if (!data.accessToken) throw new Error("Desktop token refresh: missing accessToken");
+    return {
+      refresh: `${data.refreshToken || refreshToken}|desktop`,
+      access: data.accessToken,
+      expires: Date.now() + data.expiresIn * 1000 - 5 * 60 * 1000,
+      clientId: "",
+      clientSecret: "",
+      region,
+      authMethod: "desktop" as KiroAuthMethod,
+    };
+  }
+
+  // IDC auth method — SSO OIDC refresh
   const clientId = parts[1] ?? "";
   const clientSecret = parts[2] ?? "";
-  const response = await fetch(`${SSO_OIDC_ENDPOINT}/token`, {
+  const ssoEndpoint = `https://oidc.${region}.amazonaws.com`;
+  const response = await fetch(`${ssoEndpoint}/token`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "User-Agent": "pi-cli" },
     body: JSON.stringify({ clientId, clientSecret, refreshToken, grantType: "refresh_token" }),
@@ -124,6 +160,7 @@ export async function refreshKiroToken(credentials: OAuthCredentials): Promise<O
     expires: Date.now() + data.expiresIn * 1000 - 5 * 60 * 1000,
     clientId: clientId,
     clientSecret: clientSecret,
-    region: (credentials as KiroCredentials).region || "us-east-1",
+    region,
+    authMethod: "idc" as KiroAuthMethod,
   };
 }

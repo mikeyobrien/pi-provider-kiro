@@ -352,6 +352,13 @@ export function streamKiro(
       stream.push({ type: "error", reason: output.stopReason, error: output });
       stream.end();
     }
-  })();
+  })().catch(() => {
+    // Safety net: catch any rejection that escapes the inner try/catch
+    // (e.g., AbortError during signal teardown). Without this, the
+    // fire-and-forget IIFE produces an unhandled rejection that crashes pi.
+    try {
+      stream.end();
+    } catch {}
+  });
   return stream;
 }

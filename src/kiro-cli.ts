@@ -4,7 +4,7 @@ import { execSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
-import type { KiroCredentials } from "./oauth.js";
+import type { KiroAuthMethod, KiroCredentials } from "./oauth.js";
 
 export function getKiroCliDbPath(): string | undefined {
   const p = platform();
@@ -33,38 +33,65 @@ export function getKiroCliCredentials(): KiroCredentials | undefined {
   const dbPath = getKiroCliDbPath();
   if (!dbPath) return undefined;
   try {
-    const tokenResult = queryKiroCliDb(dbPath, "SELECT value FROM auth_kv WHERE key = 'kirocli:odic:token'");
-    if (!tokenResult) return undefined;
-    const rows = JSON.parse(tokenResult) as Array<{ value: string }>;
-    if (!rows[0]?.value) return undefined;
-    const tokenData = JSON.parse(rows[0].value);
-    if (!tokenData.access_token || !tokenData.refresh_token) return undefined;
-    let expiresAt = Date.now() + 3600000;
-    if (tokenData.expires_at) expiresAt = new Date(tokenData.expires_at).getTime();
-    if (Date.now() >= expiresAt - 2 * 60 * 1000) return undefined;
-    const region = tokenData.region || "us-east-1";
-    let clientId = "",
-      clientSecret = "";
-    const deviceResult = queryKiroCliDb(
-      dbPath,
-      "SELECT value FROM auth_kv WHERE key LIKE '%device-registration%' LIMIT 1",
-    );
-    if (deviceResult) {
-      try {
-        const d = JSON.parse(JSON.parse(deviceResult)[0]?.value);
-        clientId = d.clientId || "";
-        clientSecret = d.clientSecret || "";
-      } catch {}
-    }
-    return {
-      refresh: `${tokenData.refresh_token}|${clientId}|${clientSecret}|idc`,
-      access: tokenData.access_token,
-      expires: expiresAt,
-      clientId,
-      clientSecret,
-      region,
-    };
+    // Try IDC token first (preferred — has clientId/clientSecret for refresh)
+    const idcCreds = tryKiroCliToken(dbPath, "kirocli:odic:token", "idc");
+    if (idcCreds) return idcCreds;
+
+    // Fall back to desktop/social token
+    const desktopCreds = tryKiroCliToken(dbPath, "kirocli:social:token", "desktop");
+    if (desktopCreds) return desktopCreds;
+
+    return undefined;
   } catch {
     return undefined;
   }
+}
+
+function tryKiroCliToken(dbPath: string, tokenKey: string, authMethod: KiroAuthMethod): KiroCredentials | undefined {
+  const tokenResult = queryKiroCliDb(dbPath, `SELECT value FROM auth_kv WHERE key = '${tokenKey}'`);
+  if (!tokenResult) return undefined;
+  const rows = JSON.parse(tokenResult) as Array<{ value: string }>;
+  if (!rows[0]?.value) return undefined;
+  const tokenData = JSON.parse(rows[0].value);
+  if (!tokenData.access_token || !tokenData.refresh_token) return undefined;
+  let expiresAt = Date.now() + 3600000;
+  if (tokenData.expires_at) expiresAt = new Date(tokenData.expires_at).getTime();
+  if (Date.now() >= expiresAt - 2 * 60 * 1000) return undefined;
+  const region = tokenData.region || "us-east-1";
+
+  if (authMethod === "desktop") {
+    return {
+      refresh: `${tokenData.refresh_token}|desktop`,
+      access: tokenData.access_token,
+      expires: expiresAt,
+      clientId: "",
+      clientSecret: "",
+      region,
+      authMethod: "desktop",
+    };
+  }
+
+  // IDC — need device registration credentials for refresh
+  let clientId = "";
+  let clientSecret = "";
+  const deviceResult = queryKiroCliDb(
+    dbPath,
+    "SELECT value FROM auth_kv WHERE key LIKE '%device-registration%' LIMIT 1",
+  );
+  if (deviceResult) {
+    try {
+      const d = JSON.parse(JSON.parse(deviceResult)[0]?.value);
+      clientId = d.clientId || "";
+      clientSecret = d.clientSecret || "";
+    } catch {}
+  }
+  return {
+    refresh: `${tokenData.refresh_token}|${clientId}|${clientSecret}|idc`,
+    access: tokenData.access_token,
+    expires: expiresAt,
+    clientId,
+    clientSecret,
+    region,
+    authMethod: "idc",
+  };
 }

@@ -52,6 +52,7 @@ describe("Feature 3: OAuth — AWS Builder ID", () => {
       expect(authCall.url).toContain("device.sso");
       expect(creds.access).toBe("at");
       expect(creds.refresh).toContain("rt|cid|csec|idc");
+      expect((creds as any).authMethod).toBe("idc");
 
       vi.unstubAllGlobals();
     });
@@ -136,6 +137,86 @@ describe("Feature 3: OAuth — AWS Builder ID", () => {
     it("throws on failed refresh", async () => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce({ ok: false, status: 401 }));
       await expect(refreshKiroToken({ refresh: "rt|c|s|idc", access: "x", expires: 0 })).rejects.toThrow();
+      vi.unstubAllGlobals();
+    });
+
+    it("refreshes desktop tokens via Kiro auth service", async () => {
+      const mockFetch = vi.fn().mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ accessToken: "desk_at", expiresIn: 3600 }),
+      });
+      vi.stubGlobal("fetch", mockFetch);
+
+      const creds = await refreshKiroToken({
+        refresh: "desk_rt|desktop",
+        access: "old",
+        expires: 0,
+        region: "us-east-1",
+      } as any);
+      expect(creds.access).toBe("desk_at");
+      expect(creds.refresh).toContain("desk_rt|desktop");
+      expect((creds as any).authMethod).toBe("desktop");
+
+      const url = mockFetch.mock.calls[0][0];
+      expect(url).toContain("auth.desktop.kiro.dev/refreshToken");
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.refreshToken).toBe("desk_rt");
+      expect(body.clientId).toBeUndefined();
+      vi.unstubAllGlobals();
+    });
+
+    it("throws on desktop token refresh failure", async () => {
+      const mockFetch = vi.fn().mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+      });
+      vi.stubGlobal("fetch", mockFetch);
+
+      await expect(
+        refreshKiroToken({
+          refresh: "desk_rt|desktop",
+          access: "old",
+          expires: 0,
+          region: "us-east-1",
+        } as any),
+      ).rejects.toThrow("Desktop token refresh failed: 401");
+      vi.unstubAllGlobals();
+    });
+
+    it("throws on desktop token refresh with missing accessToken", async () => {
+      const mockFetch = vi.fn().mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ expiresIn: 3600 }),
+      });
+      vi.stubGlobal("fetch", mockFetch);
+
+      await expect(
+        refreshKiroToken({
+          refresh: "desk_rt|desktop",
+          access: "old",
+          expires: 0,
+          region: "us-east-1",
+        } as any),
+      ).rejects.toThrow("Desktop token refresh: missing accessToken");
+      vi.unstubAllGlobals();
+    });
+
+    it("uses region from credentials for IDC refresh", async () => {
+      const mockFetch = vi.fn().mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ accessToken: "new_at", refreshToken: "new_rt", expiresIn: 3600 }),
+      });
+      vi.stubGlobal("fetch", mockFetch);
+
+      await refreshKiroToken({
+        refresh: "old_rt|cid|csec|idc",
+        access: "old_at",
+        expires: 0,
+        region: "us-west-2",
+      } as any);
+
+      const url = mockFetch.mock.calls[0][0];
+      expect(url).toContain("oidc.us-west-2.amazonaws.com");
       vi.unstubAllGlobals();
     });
   });

@@ -46,8 +46,12 @@ Raw bytes → `parseKiroEvents()` → typed `KiroStreamEvent` → `ThinkingTagPa
 On 413/too-large: up to 3 retries, each multiplying `reductionFactor` by 0.7. Affects history limit, system prompt length, tool result size, and tool count.
 
 ### Credential Cascade
-1. kiro-cli SQLite DB (fast, no user interaction)
+1. kiro-cli SQLite DB — tries IDC token first, then desktop/social token
 2. OAuth device code flow (interactive, opens browser)
+
+### Auth Methods
+- `idc`: AWS Builder ID or IAM Identity Center (SSO). Refresh via SSO OIDC endpoint. Token format: `refreshToken|clientId|clientSecret|idc`. Preferred — has clientId/clientSecret for refresh.
+- `desktop`: Kiro desktop app credentials. Refresh via `prod.{region}.auth.desktop.kiro.dev`. Token format: `refreshToken|desktop`
 
 ## Development
 
