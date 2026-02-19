@@ -21,5 +21,6 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm test
-      - run: sed -i '/_authToken/d' "$NPM_CONFIG_USERCONFIG"
+      - run: npm --version
+      - run: cat "$NPM_CONFIG_USERCONFIG"
       - run: npm publish --provenance --access public
