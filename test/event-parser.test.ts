@@ -181,8 +181,7 @@ describe("Feature 8: Stream Event Parsing", () => {
     });
 
     it("handles multiple events with binary framing between them", () => {
-      const buf =
-        '\x00{  framing{"content":"a"}\x00{  framing{"content":"b"}\x00';
+      const buf = '\x00{  framing{"content":"a"}\x00{  framing{"content":"b"}\x00';
       const { events } = parseKiroEvents(buf);
       expect(events).toHaveLength(2);
       expect(events[0]).toEqual({ type: "content", data: "a" });
