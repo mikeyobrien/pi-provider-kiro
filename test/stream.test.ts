@@ -7,6 +7,7 @@ import type {
   ToolResultMessage,
 } from "@mariozechner/pi-ai";
 import { describe, expect, it, vi } from "vitest";
+import { retryConfig } from "../src/retry.js";
 import { streamKiro } from "../src/stream.js";
 
 const ts = Date.now();
@@ -599,22 +600,36 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
-  it("emits error on 500 server error", async () => {
-    const mockFetch = vi.fn().mockResolvedValueOnce({
-      ok: false,
-      status: 500,
-      statusText: "Internal Server Error",
-      text: () => Promise.resolve("Something went wrong"),
-    });
+  it("retries on 500 then succeeds", async () => {
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: "Internal Server Error",
+        text: () => Promise.resolve("Something went wrong"),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({
+                done: false,
+                value: new TextEncoder().encode('{"content":"ok"}{"contextUsagePercentage":5}'),
+              })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+          }),
+        },
+      });
     vi.stubGlobal("fetch", mockFetch);
 
     const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
     const events = await collect(stream);
 
-    expect(mockFetch).toHaveBeenCalledOnce();
-    const error = events.find((e) => e.type === "error");
-    expect(error).toBeDefined();
-    expect(error?.type === "error" && error.error.errorMessage).toContain("500");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(events.find((e) => e.type === "done")).toBeDefined();
 
     vi.unstubAllGlobals();
   });
@@ -720,6 +735,135 @@ describe("Feature 9: Streaming Integration", () => {
   // No system prompt
   // =========================================================================
 
+  // =========================================================================
+  // Non-standard key ordering in tool calls
+  // =========================================================================
+
+  it("handles tool call events where toolUseId comes before name", async () => {
+    // Kiro sometimes sends toolUseId before name — the parser must handle this
+    const toolPayload = '{"toolUseId":"tc1","name":"write","input":"{\\"path\\":\\"f.txt\\"}","stop":true}';
+    const mockFetch = mockFetchOk(`${toolPayload}{"contextUsagePercentage":10}`);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    const tcEnd = events.find((e) => e.type === "toolcall_end");
+    expect(tcEnd).toBeDefined();
+    expect(tcEnd?.type === "toolcall_end" && tcEnd.toolCall.name).toBe("write");
+    expect(tcEnd?.type === "toolcall_end" && tcEnd.toolCall.id).toBe("tc1");
+    expect(tcEnd?.type === "toolcall_end" && (tcEnd.toolCall.arguments as any).path).toBe("f.txt");
+
+    const done = events.find((e) => e.type === "done");
+    expect(done?.type === "done" && done.reason).toBe("toolUse");
+
+    vi.unstubAllGlobals();
+  });
+
+  // =========================================================================
+  // Chunked tool input across multiple stream chunks
+  // =========================================================================
+
+  it("handles chunked tool input across multiple stream chunks", async () => {
+    const mockFetch = mockFetchChunked([
+      '{"name":"write","toolUseId":"tc1","input":"{\\"path\\":"}',
+      '{"input":"\\"hello.txt\\"}"}',
+      '{"stop":true}',
+      '{"contextUsagePercentage":10}',
+    ]);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    const tcEnd = events.find((e) => e.type === "toolcall_end");
+    expect(tcEnd).toBeDefined();
+    expect(tcEnd?.type === "toolcall_end" && tcEnd.toolCall.name).toBe("write");
+    expect(tcEnd?.type === "toolcall_end" && (tcEnd.toolCall.arguments as any).path).toBe("hello.txt");
+
+    vi.unstubAllGlobals();
+  });
+
+  // =========================================================================
+  // Empty object input placeholder + toolUseInput accumulation
+  // =========================================================================
+
+  it("handles toolUse with input:{} placeholder followed by toolUseInput events", async () => {
+    // Kiro sometimes sends input:{} (object) as a placeholder, then fills it via toolUseInput events.
+    // The empty object must NOT be stringified to "{}" or it corrupts concatenation.
+    const mockFetch = mockFetchChunked([
+      '{"name":"write","toolUseId":"tc1","input":{}}',
+      '{"input":"{\\"path\\":\\"file.md\\",\\"content\\":\\"hello\\"}"}',
+      '{"stop":true}',
+      '{"contextUsagePercentage":10}',
+    ]);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    const tcEnd = events.find((e) => e.type === "toolcall_end");
+    expect(tcEnd).toBeDefined();
+    expect(tcEnd?.type === "toolcall_end" && tcEnd.toolCall.name).toBe("write");
+    expect(tcEnd?.type === "toolcall_end" && (tcEnd.toolCall.arguments as any).path).toBe("file.md");
+    expect(tcEnd?.type === "toolcall_end" && (tcEnd.toolCall.arguments as any).content).toBe("hello");
+
+    vi.unstubAllGlobals();
+  });
+
+  // =========================================================================
+  // Parse failure logging
+  // =========================================================================
+
+  it("logs warning when tool input JSON.parse fails", async () => {
+    const toolPayload = '{"name":"bash","toolUseId":"tc1","input":"not-valid-json","stop":true}';
+    const mockFetch = mockFetchOk(`${toolPayload}{"contextUsagePercentage":10}`);
+    vi.stubGlobal("fetch", mockFetch);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    expect(warnSpy).toHaveBeenCalledOnce();
+    const msg = warnSpy.mock.calls[0][0] as string;
+    expect(msg).toContain("[pi-provider-kiro]");
+    expect(msg).toContain("bash");
+    expect(msg).toContain("tc1");
+    expect(msg).toContain("not-valid-json");
+
+    // Tool call should still be emitted with {} fallback
+    const tcEnd = events.find((e) => e.type === "toolcall_end");
+    expect(tcEnd).toBeDefined();
+    expect(tcEnd?.type === "toolcall_end" && tcEnd.toolCall.arguments).toEqual({});
+
+    warnSpy.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
+  it("handles tool call with empty input string", async () => {
+    const toolPayload = '{"name":"bash","toolUseId":"tc1","input":"","stop":true}';
+    const mockFetch = mockFetchOk(`${toolPayload}{"contextUsagePercentage":10}`);
+    vi.stubGlobal("fetch", mockFetch);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    // Empty string fails JSON.parse, so should warn and fallback to {}
+    expect(warnSpy).toHaveBeenCalledOnce();
+
+    const tcEnd = events.find((e) => e.type === "toolcall_end");
+    expect(tcEnd).toBeDefined();
+    expect(tcEnd?.type === "toolcall_end" && tcEnd.toolCall.arguments).toEqual({});
+
+    warnSpy.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
+  // =========================================================================
+  // No system prompt
+  // =========================================================================
+
   it("works without system prompt", async () => {
     const context: Context = {
       messages: [{ role: "user", content: "Hi", timestamp: ts }],
@@ -732,6 +876,382 @@ describe("Feature 9: Streaming Integration", () => {
     const done = events.find((e) => e.type === "done");
     expect(done).toBeDefined();
     expect(done?.type === "done" && done.message.stopReason).toBe("stop");
+
+    vi.unstubAllGlobals();
+  });
+
+  // =========================================================================
+  // First-token timeout (Task 1.2)
+  // =========================================================================
+
+  it("retries when first token times out then succeeds on second attempt", async () => {
+    const originalTimeout = retryConfig.firstTokenTimeoutMs;
+    retryConfig.firstTokenTimeoutMs = 100;
+
+    let callCount = 0;
+    const mockFetch = vi.fn().mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        // First attempt: reader that never resolves (simulates timeout)
+        return {
+          ok: true,
+          body: {
+            getReader: () => ({
+              read: () => new Promise(() => {}), // never resolves
+              cancel: vi.fn(),
+            }),
+          },
+        };
+      }
+      // Second attempt: succeeds
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({
+                done: false,
+                value: new TextEncoder().encode('{"content":"ok"}{"contextUsagePercentage":5}'),
+              })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+          }),
+        },
+      };
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(events.find((e) => e.type === "done")).toBeDefined();
+
+    retryConfig.firstTokenTimeoutMs = originalTimeout;
+    vi.unstubAllGlobals();
+  });
+
+  // =========================================================================
+  // 429 retry with backoff (Task 1.3)
+  // =========================================================================
+
+  it("retries on 429 with backoff delay", async () => {
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        statusText: "Too Many Requests",
+        text: () => Promise.resolve("Rate limited"),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({
+                done: false,
+                value: new TextEncoder().encode('{"content":"ok"}{"contextUsagePercentage":5}'),
+              })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+          }),
+        },
+      });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(events.find((e) => e.type === "done")).toBeDefined();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("retries on 5xx with backoff delay", async () => {
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        statusText: "Bad Gateway",
+        text: () => Promise.resolve("Bad Gateway"),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({
+                done: false,
+                value: new TextEncoder().encode('{"content":"ok"}{"contextUsagePercentage":5}'),
+              })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+          }),
+        },
+      });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(events.find((e) => e.type === "done")).toBeDefined();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("retries on 403 with shorter backoff", async () => {
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 403,
+        statusText: "Forbidden",
+        text: () => Promise.resolve("Access denied"),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({
+                done: false,
+                value: new TextEncoder().encode('{"content":"ok"}{"contextUsagePercentage":5}'),
+              })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+          }),
+        },
+      });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(events.find((e) => e.type === "done")).toBeDefined();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("gives up after max retries on repeated 429", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      statusText: "Too Many Requests",
+      text: () => Promise.resolve("Rate limited"),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    // 1 initial + 3 retries = 4 calls
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+    const error = events.find((e) => e.type === "error");
+    expect(error).toBeDefined();
+    expect(error?.type === "error" && error.error.stopReason).toBe("error");
+
+    vi.unstubAllGlobals();
+  }, 15000);
+
+  // =========================================================================
+  // Content deduplication (Task 2.2)
+  // =========================================================================
+
+  it("deduplicates consecutive identical content events", async () => {
+    const mockFetch = mockFetchChunked([
+      '{"content":"Hello"}',
+      '{"content":"Hello"}',
+      '{"content":" world"}',
+      '{"contextUsagePercentage":5}',
+    ]);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    const deltas = events.filter((e) => e.type === "text_delta").map((e) => (e as { delta: string }).delta);
+    // Second "Hello" should be deduplicated
+    expect(deltas).toEqual(["Hello", " world"]);
+
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg?.content[0].type === "text" && msg.content[0].text).toBe("Hello world");
+
+    vi.unstubAllGlobals();
+  });
+
+  // =========================================================================
+  // Token counting with tiktoken (Task 3.2)
+  // =========================================================================
+
+  it("uses tiktoken for output token counting instead of chars/4", async () => {
+    const mockFetch = mockFetchOk('{"content":"Hello there, this is a response."}{"contextUsagePercentage":8}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+
+    // tiktoken count should differ from chars/4 (which would be ~8)
+    // "Hello there, this is a response." is 8 tokens with cl100k_base
+    expect(msg!.usage.output).toBeGreaterThan(0);
+    // The old method (chars/4) would give ceil(32/4) = 8
+    // tiktoken gives an accurate count that won't be exactly chars/4 for most strings
+    expect(msg!.usage.totalTokens).toBe(msg!.usage.input + msg!.usage.output);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("prefers usage event values over tiktoken when available", async () => {
+    const mockFetch = mockFetchChunked([
+      '{"content":"Hello"}',
+      '{"usage":{"inputTokens":500,"outputTokens":200}}',
+      '{"contextUsagePercentage":10}',
+    ]);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+
+    // Usage event values should take precedence
+    expect(msg!.usage.input).toBe(500);
+    expect(msg!.usage.output).toBe(200);
+    expect(msg!.usage.totalTokens).toBe(700);
+
+    vi.unstubAllGlobals();
+  });
+
+  // =========================================================================
+  // Truncation recovery (Task 4.1)
+  // =========================================================================
+
+  it("sets stopReason to length when stream ends without contextUsage event", async () => {
+    // Stream that ends without contextUsagePercentage event
+    const mockFetch = mockFetchOk('{"content":"partial response that got cut off"}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    const done = events.find((e) => e.type === "done");
+    expect(done).toBeDefined();
+    expect(done?.type === "done" && done.message.stopReason).toBe("length");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("prepends truncation notice when previous response was truncated", async () => {
+    const truncatedAssistant: AssistantMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "partial..." }],
+      api: "kiro-api",
+      provider: "kiro",
+      model: "claude-sonnet-4-5",
+      usage: zeroUsage,
+      stopReason: "length",
+      timestamp: ts,
+    };
+
+    const context: Context = {
+      systemPrompt: "You are helpful",
+      messages: [
+        { role: "user", content: "Tell me a long story", timestamp: ts },
+        truncatedAssistant,
+        { role: "user", content: "Continue", timestamp: ts },
+      ],
+    };
+
+    const mockFetch = mockFetchOk('{"content":"...the rest of the story."}{"contextUsagePercentage":5}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), context, { apiKey: "tok" });
+    const events = await collect(stream);
+
+    const done = events.find((e) => e.type === "done");
+    expect(done).toBeDefined();
+
+    // Verify truncation notice was prepended to the user message
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    const currentMsg = body.conversationState.currentMessage.userInputMessage.content;
+    expect(currentMsg).toContain("cut off");
+    expect(currentMsg).toContain("Continue");
+
+    vi.unstubAllGlobals();
+  });
+
+  // =========================================================================
+  // Bracket-style tool call parsing (Task 4.2)
+  // =========================================================================
+
+  it("extracts bracket tool calls from content as fallback", async () => {
+    const mockFetch = mockFetchOk(
+      '{"content":"Let me run that. [Called bash with args: {\\"cmd\\": \\"ls\\"}]"}{"contextUsagePercentage":10}',
+    );
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+
+    // Should have extracted a tool call
+    const toolCalls = msg?.content.filter((b) => b.type === "toolCall");
+    expect(toolCalls).toHaveLength(1);
+    expect(toolCalls![0].type === "toolCall" && toolCalls![0].name).toBe("bash");
+
+    // Text content should have bracket pattern stripped
+    const textBlock = msg?.content.find((b) => b.type === "text");
+    expect(textBlock?.type === "text" && textBlock.text).not.toContain("[Called");
+
+    expect(done?.type === "done" && done.reason).toBe("toolUse");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("does not use bracket parsing when native tool calls exist", async () => {
+    const toolPayload = '{"name":"bash","toolUseId":"tc1","input":"{\\"cmd\\":\\"ls\\"}","stop":true}';
+    const mockFetch = mockFetchOk(
+      `{"content":"text [Called other with args: {}]"}${toolPayload}{"contextUsagePercentage":10}`,
+    );
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+
+    // Only the native tool call should be present, not the bracket one
+    const toolCalls = msg?.content.filter((b) => b.type === "toolCall");
+    expect(toolCalls).toHaveLength(1);
+    expect(toolCalls![0].type === "toolCall" && toolCalls![0].name).toBe("bash");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps non-consecutive duplicate content events", async () => {
+    const mockFetch = mockFetchChunked([
+      '{"content":"A"}',
+      '{"content":"B"}',
+      '{"content":"A"}',
+      '{"contextUsagePercentage":5}',
+    ]);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    const deltas = events.filter((e) => e.type === "text_delta").map((e) => (e as { delta: string }).delta);
+    expect(deltas).toEqual(["A", "B", "A"]);
 
     vi.unstubAllGlobals();
   });

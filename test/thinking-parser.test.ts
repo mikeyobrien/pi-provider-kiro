@@ -98,4 +98,53 @@ describe("Feature 7: Thinking Tag Parser", () => {
     parser.finalize();
     expect(parser.getTextBlockIndex()).toBe(1);
   });
+
+  // =========================================================================
+  // Additional thinking tag variants (Task 2.1)
+  // =========================================================================
+
+  it("recognizes <think> tags", async () => {
+    const events = await run(["<think>Let me think</think>\n\nAnswer"]);
+    const types = events.map((e) => e.type);
+    expect(types).toContain("thinking_start");
+    expect(types).toContain("text_start");
+    expect(deltas(events, "thinking_delta")).toContain("Let me think");
+    expect(deltas(events, "text_delta")).toContain("Answer");
+  });
+
+  it("recognizes <reasoning> tags", async () => {
+    const events = await run(["<reasoning>Step by step</reasoning>\n\nResult"]);
+    const types = events.map((e) => e.type);
+    expect(types).toContain("thinking_start");
+    expect(types).toContain("text_start");
+    expect(deltas(events, "thinking_delta")).toContain("Step by step");
+    expect(deltas(events, "text_delta")).toContain("Result");
+  });
+
+  it("recognizes <thought> tags", async () => {
+    const events = await run(["<thought>Hmm</thought>\n\nDone"]);
+    const types = events.map((e) => e.type);
+    expect(types).toContain("thinking_start");
+    expect(types).toContain("text_start");
+    expect(deltas(events, "thinking_delta")).toContain("Hmm");
+    expect(deltas(events, "text_delta")).toContain("Done");
+  });
+
+  it("handles <think> split across chunks", async () => {
+    const events = await run(["<thi", "nk>deep thought</think>\n\nText"]);
+    expect(deltas(events, "thinking_delta")).toContain("deep thought");
+    expect(deltas(events, "text_delta")).toContain("Text");
+  });
+
+  it("handles <reasoning> split across chunks", async () => {
+    const events = await run(["<reason", "ing>logic</reasoning>\n\nOutput"]);
+    expect(deltas(events, "thinking_delta")).toContain("logic");
+    expect(deltas(events, "text_delta")).toContain("Output");
+  });
+
+  it("handles close tag split across chunks for <think>", async () => {
+    const events = await run(["<think>idea</th", "ink>\n\nText"]);
+    expect(events.map((e) => e.type)).toContain("thinking_end");
+    expect(deltas(events, "text_delta")).toContain("Text");
+  });
 });

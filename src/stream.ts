@@ -1,4 +1,5 @@
-// Feature 9: Streaming Integration
+// ABOUTME: Core streaming integration for Kiro API requests and responses.
+// ABOUTME: Handles request building, retry logic, event parsing, and token counting.
 
 import type {
   Api,
@@ -13,10 +14,13 @@ import type {
   ToolResultMessage,
 } from "@mariozechner/pi-ai";
 import { calculateCost, createAssistantMessageEventStream } from "@mariozechner/pi-ai";
+import { parseBracketToolCalls } from "./bracket-tool-parser.js";
 import { parseKiroEvents } from "./event-parser.js";
 import { addPlaceholderTools, HISTORY_LIMIT, truncateHistory } from "./history.js";
 import { resolveKiroModel } from "./models.js";
+import { decideRetry, retryConfig } from "./retry.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
+import { countTokens } from "./tokenizer.js";
 import {
   buildHistory,
   convertImagesToKiro,
@@ -33,6 +37,7 @@ import {
   TOOL_RESULT_LIMIT,
   truncate,
 } from "./transform.js";
+import { TRUNCATION_NOTICE, wasPreviousResponseTruncated } from "./truncation.js";
 
 interface KiroRequest {
   conversationState: {
@@ -170,6 +175,10 @@ export function streamKiro(
           if (effectiveSystemPrompt && !systemPrepended)
             currentContent = `${effectiveSystemPrompt}\n\n${currentContent}`;
         }
+        // Prepend truncation notice if the previous assistant response was cut off
+        if (wasPreviousResponseTruncated(context.messages)) {
+          currentContent = `${TRUNCATION_NOTICE}\n\n${currentContent}`;
+        }
         let uimc: { toolResults?: KiroToolResult[]; tools?: KiroToolSpec[] } | undefined;
         if (currentToolResults.length > 0 || (context.tools && context.tools.length > 0)) {
           uimc = {};
@@ -228,13 +237,14 @@ export function streamKiro(
         });
         if (!response.ok) {
           const errText = await response.text().catch(() => "");
-          const isTooBig =
-            errText.includes("CONTENT_LENGTH_EXCEEDS_THRESHOLD") ||
-            errText.includes("Input is too long") ||
-            errText.includes("Improperly formed");
-          if ((response.status === 413 || (response.status === 400 && isTooBig)) && retryCount < maxRetries) {
+          const decision = decideRetry(response.status, errText, retryCount, maxRetries);
+          if (decision.shouldRetry) {
             retryCount++;
-            reductionFactor *= 0.7;
+            if (decision.strategy === "reduce") {
+              reductionFactor *= 0.7;
+            } else if (decision.delayMs > 0) {
+              await new Promise((r) => setTimeout(r, decision.delayMs));
+            }
             continue;
           }
           throw new Error(`Kiro API error: ${response.status} ${response.statusText} ${errText}`);
@@ -245,6 +255,9 @@ export function streamKiro(
         const decoder = new TextDecoder();
         let buffer = "";
         let totalContent = "";
+        let lastContentData = "";
+        let usageEvent: { inputTokens?: number; outputTokens?: number } | null = null;
+        let receivedContextUsage = false;
         const thinkingParser = thinkingEnabled ? new ThinkingTagParser(output, stream) : null;
         let textBlockIndex: number | null = null;
         const toolCalls: KiroToolCallState[] = [];
@@ -259,20 +272,48 @@ export function streamKiro(
             } catch {}
           }, IDLE_TIMEOUT);
         };
+        let gotFirstToken = false;
+        let firstTokenTimedOut = false;
+        const FIRST_TOKEN_SENTINEL = Symbol("firstTokenTimeout");
         while (true) {
-          const { done, value } = await reader.read();
+          let readResult: ReadableStreamReadResult<Uint8Array>;
+          if (!gotFirstToken) {
+            // First-token timeout: race the first read against a deadline
+            const result = await Promise.race([
+              reader.read(),
+              new Promise<typeof FIRST_TOKEN_SENTINEL>((resolve) =>
+                setTimeout(() => resolve(FIRST_TOKEN_SENTINEL), retryConfig.firstTokenTimeoutMs),
+              ),
+            ]);
+            if (result === FIRST_TOKEN_SENTINEL) {
+              try {
+                reader.cancel();
+              } catch {}
+              firstTokenTimedOut = true;
+              break;
+            }
+            readResult = result as ReadableStreamReadResult<Uint8Array>;
+            gotFirstToken = true;
+          } else {
+            readResult = await reader.read();
+          }
+          const { done, value } = readResult;
           if (done) break;
           resetIdle();
           buffer += decoder.decode(value, { stream: true });
           const { events, remaining } = parseKiroEvents(buffer);
           buffer = remaining;
-          let streamComplete = false;
           for (const event of events) {
             if (event.type === "contextUsage") {
               const pct = event.data.contextUsagePercentage;
               output.usage.input = Math.round((pct / 100) * model.contextWindow);
-              streamComplete = true;
+              receivedContextUsage = true;
+              // Don't break the reader loop here — tool call input chunks
+              // may still be pending in subsequent network packets. The
+              // stream will close naturally when the server ends it.
             } else if (event.type === "content") {
+              if (event.data === lastContentData) continue;
+              lastContentData = event.data;
               totalContent += event.data;
               if (thinkingParser) thinkingParser.processChunk(event.data);
               else {
@@ -303,15 +344,42 @@ export function streamKiro(
                 toolCalls.push(currentToolCall);
                 currentToolCall = null;
               }
+            } else if (event.type === "usage") {
+              usageEvent = event.data;
             }
+            // followupPrompt events are intentionally ignored
           }
-          if (streamComplete) break;
         }
         if (idleTimer) clearTimeout(idleTimer);
+        if (firstTokenTimedOut) {
+          // First-token timeout: retry with backoff (no size reduction)
+          if (retryCount < maxRetries) {
+            retryCount++;
+            const delayMs = 1000 * 2 ** (retryCount - 1);
+            await new Promise((r) => setTimeout(r, delayMs));
+            continue;
+          }
+          throw new Error("Kiro API error: first token timeout after max retries");
+        }
         if (currentToolCall) toolCalls.push(currentToolCall);
         if (thinkingParser) {
           thinkingParser.finalize();
           textBlockIndex = thinkingParser.getTextBlockIndex();
+        }
+        // Fallback: extract bracket-style tool calls from content if no native tool calls
+        if (toolCalls.length === 0 && textBlockIndex !== null) {
+          const textBlock = output.content[textBlockIndex] as TextContent;
+          const bracketResult = parseBracketToolCalls(textBlock.text);
+          if (bracketResult.toolCalls.length > 0) {
+            textBlock.text = bracketResult.cleanedText;
+            for (const btc of bracketResult.toolCalls) {
+              toolCalls.push({
+                toolUseId: btc.toolUseId,
+                name: btc.name,
+                input: JSON.stringify(btc.arguments),
+              });
+            }
+          }
         }
         if (textBlockIndex !== null)
           stream.push({
@@ -325,23 +393,36 @@ export function streamKiro(
           let args: Record<string, unknown> = {};
           try {
             args = JSON.parse(tc.input);
-          } catch {}
+          } catch (e) {
+            console.warn(
+              `[pi-provider-kiro] Failed to parse tool input for "${tc.name}" (toolUseId: ${tc.toolUseId}): ${e instanceof Error ? e.message : String(e)}. Raw input (${tc.input.length} chars): ${tc.input.substring(0, 200)}`,
+            );
+          }
           const toolCall: ToolCall = { type: "toolCall", id: tc.toolUseId, name: tc.name, arguments: args };
           output.content.push(toolCall);
           stream.push({ type: "toolcall_start", contentIndex: idx, partial: output });
           stream.push({ type: "toolcall_delta", contentIndex: idx, delta: tc.input, partial: output });
           stream.push({ type: "toolcall_end", contentIndex: idx, toolCall, partial: output });
         }
-        const outTok = Math.ceil(totalContent.length / 4);
-        output.usage.output = outTok;
-        output.usage.totalTokens = output.usage.input + outTok;
+        // Prefer usage event values when available, fall back to tiktoken
+        if (usageEvent) {
+          if (usageEvent.inputTokens !== undefined) output.usage.input = usageEvent.inputTokens;
+          if (usageEvent.outputTokens !== undefined) output.usage.output = usageEvent.outputTokens;
+        } else {
+          output.usage.output = countTokens(totalContent);
+        }
+        output.usage.totalTokens = output.usage.input + output.usage.output;
         try {
           calculateCost(model, output.usage);
         } catch {
           // Model might not have cost info, use zeros
           output.usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
         }
-        output.stopReason = toolCalls.length > 0 ? "toolUse" : "stop";
+        if (!receivedContextUsage && toolCalls.length === 0) {
+          output.stopReason = "length";
+        } else {
+          output.stopReason = toolCalls.length > 0 ? "toolUse" : "stop";
+        }
         stream.push({ type: "done", reason: output.stopReason as "stop" | "toolUse", message: output });
         stream.end();
         break;

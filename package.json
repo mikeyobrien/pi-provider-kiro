@@ -41,5 +41,8 @@
     "@mariozechner/pi-coding-agent": "^0.53.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
+  },
+  "dependencies": {
+    "js-tiktoken": "^1.0.21"
   }
 }
