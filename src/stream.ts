@@ -267,6 +267,7 @@ export function streamKiro(
         const resetIdle = () => {
           if (idleTimer) clearTimeout(idleTimer);
           idleTimer = setTimeout(() => {
+            idleCancelled = true;
             try {
               reader.cancel();
             } catch {}
@@ -274,6 +275,7 @@ export function streamKiro(
         };
         let gotFirstToken = false;
         let firstTokenTimedOut = false;
+        let idleCancelled = false;
         const FIRST_TOKEN_SENTINEL = Symbol("firstTokenTimeout");
         while (true) {
           let readResult: ReadableStreamReadResult<Uint8Array>;
@@ -351,15 +353,15 @@ export function streamKiro(
           }
         }
         if (idleTimer) clearTimeout(idleTimer);
-        if (firstTokenTimedOut) {
-          // First-token timeout: retry with backoff (no size reduction)
+        if (firstTokenTimedOut || idleCancelled) {
+          // Timed out waiting for tokens: retry with backoff (no size reduction)
           if (retryCount < maxRetries) {
             retryCount++;
             const delayMs = 1000 * 2 ** (retryCount - 1);
             await new Promise((r) => setTimeout(r, delayMs));
             continue;
           }
-          throw new Error("Kiro API error: first token timeout after max retries");
+          throw new Error(`Kiro API error: ${firstTokenTimedOut ? "first token" : "idle"} timeout after max retries`);
         }
         if (currentToolCall) toolCalls.push(currentToolCall);
         if (thinkingParser) {
@@ -389,6 +391,12 @@ export function streamKiro(
             partial: output,
           });
         for (const tc of toolCalls) {
+          if (!tc.input.trim()) {
+            console.warn(
+              `[pi-provider-kiro] Skipping tool call "${tc.name}" (toolUseId: ${tc.toolUseId}): empty input — stream likely truncated`,
+            );
+            continue;
+          }
           const idx = output.content.length;
           let args: Record<string, unknown> = {};
           try {
@@ -397,6 +405,7 @@ export function streamKiro(
             console.warn(
               `[pi-provider-kiro] Failed to parse tool input for "${tc.name}" (toolUseId: ${tc.toolUseId}): ${e instanceof Error ? e.message : String(e)}. Raw input (${tc.input.length} chars): ${tc.input.substring(0, 200)}`,
             );
+            continue;
           }
           const toolCall: ToolCall = { type: "toolCall", id: tc.toolUseId, name: tc.name, arguments: args };
           output.content.push(toolCall);

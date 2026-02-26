@@ -831,10 +831,9 @@ describe("Feature 9: Streaming Integration", () => {
     expect(msg).toContain("tc1");
     expect(msg).toContain("not-valid-json");
 
-    // Tool call should still be emitted with {} fallback
+    // Tool call with unparseable JSON should be skipped entirely
     const tcEnd = events.find((e) => e.type === "toolcall_end");
-    expect(tcEnd).toBeDefined();
-    expect(tcEnd?.type === "toolcall_end" && tcEnd.toolCall.arguments).toEqual({});
+    expect(tcEnd).toBeUndefined();
 
     warnSpy.mockRestore();
     vi.unstubAllGlobals();
@@ -849,12 +848,11 @@ describe("Feature 9: Streaming Integration", () => {
     const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
     const events = await collect(stream);
 
-    // Empty string fails JSON.parse, so should warn and fallback to {}
+    // Empty string fails JSON.parse, so should warn and skip the tool call
     expect(warnSpy).toHaveBeenCalledOnce();
 
     const tcEnd = events.find((e) => e.type === "toolcall_end");
-    expect(tcEnd).toBeDefined();
-    expect(tcEnd?.type === "toolcall_end" && tcEnd.toolCall.arguments).toEqual({});
+    expect(tcEnd).toBeUndefined();
 
     warnSpy.mockRestore();
     vi.unstubAllGlobals();
