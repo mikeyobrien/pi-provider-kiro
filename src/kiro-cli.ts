@@ -1,4 +1,5 @@
-// Feature 4: kiro-cli Credential Fallback
+// ABOUTME: Reads and writes credentials from the kiro-cli SQLite database.
+// ABOUTME: Provides fallback auth and write-back to keep kiro-cli in sync after refresh.
 
 import { execSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -26,6 +27,20 @@ function queryKiroCliDb(dbPath: string, sql: string): string | undefined {
     return result || undefined;
   } catch {
     return undefined;
+  }
+}
+
+function execKiroCliDb(dbPath: string, sql: string): boolean {
+  try {
+    execSync(`sqlite3 "${dbPath}"`, {
+      input: sql,
+      encoding: "utf-8",
+      timeout: 5000,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -94,4 +109,41 @@ function tryKiroCliToken(dbPath: string, tokenKey: string, authMethod: KiroAuthM
     region,
     authMethod: "idc",
   };
+}
+
+const TOKEN_KEY_BY_AUTH_METHOD: Record<KiroAuthMethod, string[]> = {
+  idc: ["kirocli:odic:token", "codewhisperer:odic:token"],
+  desktop: ["kirocli:social:token"],
+};
+
+export function saveKiroCliCredentials(creds: KiroCredentials): void {
+  const dbPath = getKiroCliDbPath();
+  if (!dbPath) return;
+
+  const rawRefreshToken = creds.refresh.split("|")[0] ?? "";
+  // Our expires has a 5-min buffer subtracted; restore approximate actual expiry for kiro-cli
+  const expiresAt = new Date(creds.expires + 5 * 60 * 1000).toISOString();
+  const tokenKeys = TOKEN_KEY_BY_AUTH_METHOD[creds.authMethod] ?? [];
+
+  for (const key of tokenKeys) {
+    const existing = queryKiroCliDb(dbPath, `SELECT value FROM auth_kv WHERE key = '${key}'`);
+    if (!existing) continue;
+
+    try {
+      const rows = JSON.parse(existing) as Array<{ value: string }>;
+      if (!rows[0]?.value) continue;
+      const tokenData = JSON.parse(rows[0].value);
+
+      tokenData.access_token = creds.access;
+      tokenData.refresh_token = rawRefreshToken;
+      tokenData.expires_at = expiresAt;
+      if (creds.region) tokenData.region = creds.region;
+
+      const escaped = JSON.stringify(tokenData).replace(/'/g, "''");
+      const sql = `UPDATE auth_kv SET value = '${escaped}' WHERE key = '${key}';`;
+      if (execKiroCliDb(dbPath, sql)) return;
+    } catch {
+      continue;
+    }
+  }
 }

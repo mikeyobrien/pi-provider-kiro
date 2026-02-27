@@ -115,7 +115,47 @@ export async function loginKiroBuilderID(callbacks: OAuthLoginCallbacks): Promis
   throw new Error("Authorization timed out");
 }
 
+// Token refresh buffer (5 minutes) baked into our expires timestamps at creation time.
+// The actual AWS token is valid for this much longer than credentials.expires indicates.
+const EXPIRES_BUFFER_MS = 5 * 60 * 1000;
+
 export async function refreshKiroToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
+  const { getKiroCliCredentials, saveKiroCliCredentials } = await import("./kiro-cli.js");
+
+  // Layer 1: Pre-refresh check — kiro-cli may already have a fresh token,
+  // avoiding a doomed network refresh with a stale token.
+  const preCheckCreds = getKiroCliCredentials();
+  if (preCheckCreds) {
+    return preCheckCreds;
+  }
+
+  try {
+    const refreshed = await refreshKiroTokenDirect(credentials);
+
+    // Layer 4: Write refreshed tokens back to kiro-cli's SQLite DB so both stay in sync.
+    saveKiroCliCredentials(refreshed as KiroCredentials);
+
+    return refreshed;
+  } catch (refreshError) {
+    // Layer 2: Refresh token may have been rotated by kiro-cli between our
+    // Layer 1 check and the network call. Re-read kiro-cli's DB.
+    const retryCreds = getKiroCliCredentials();
+    if (retryCreds) {
+      return retryCreds;
+    }
+
+    // Layer 3: Graceful degradation — our expires has a 5-min buffer, so the
+    // actual AWS token may still be valid. Return it to buy time.
+    const actualExpiry = credentials.expires + EXPIRES_BUFFER_MS;
+    if (credentials.access && Date.now() < actualExpiry) {
+      return { ...credentials, expires: actualExpiry };
+    }
+
+    throw refreshError;
+  }
+}
+
+async function refreshKiroTokenDirect(credentials: OAuthCredentials): Promise<OAuthCredentials> {
   const parts = credentials.refresh.split("|");
   const refreshToken = parts[0] ?? "";
   const authMethod = (parts[parts.length - 1] ?? "idc") as KiroAuthMethod;

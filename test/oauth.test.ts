@@ -5,6 +5,7 @@ import { loginKiroBuilderID, refreshKiroToken } from "../src/oauth.js";
 // Mock kiro-cli to prevent fallback to real credentials
 vi.mock("../src/kiro-cli.js", () => ({
   getKiroCliCredentials: vi.fn(() => undefined),
+  saveKiroCliCredentials: vi.fn(),
 }));
 
 function makeCallbacks(overrides?: Partial<OAuthLoginCallbacks>): OAuthLoginCallbacks & {
