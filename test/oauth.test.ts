@@ -6,6 +6,7 @@ import { loginKiroBuilderID, refreshKiroToken } from "../src/oauth.js";
 vi.mock("../src/kiro-cli.js", () => ({
   getKiroCliCredentials: vi.fn(() => undefined),
   saveKiroCliCredentials: vi.fn(),
+  refreshViaKiroCli: vi.fn(() => undefined),
 }));
 
 function makeCallbacks(overrides?: Partial<OAuthLoginCallbacks>): OAuthLoginCallbacks & {
@@ -218,6 +219,49 @@ describe("Feature 3: OAuth — AWS Builder ID", () => {
 
       const url = mockFetch.mock.calls[0][0];
       expect(url).toContain("oidc.us-west-2.amazonaws.com");
+      vi.unstubAllGlobals();
+    });
+
+    it("uses refreshViaKiroCli when DB tokens are expired", async () => {
+      const { refreshViaKiroCli } = await import("../src/kiro-cli.js");
+      const mockRefresh = vi.mocked(refreshViaKiroCli);
+      mockRefresh.mockReturnValueOnce({
+        refresh: "cli_rt|cli_cid|cli_csec|idc",
+        access: "cli_at",
+        expires: Date.now() + 3600000,
+        clientId: "cli_cid",
+        clientSecret: "cli_csec",
+        region: "us-east-1",
+        authMethod: "idc",
+      });
+
+      const callsBefore = mockRefresh.mock.calls.length;
+      const creds = await refreshKiroToken({
+        refresh: "stale_rt|cid|csec|idc",
+        access: "stale_at",
+        expires: 0,
+      });
+      expect(creds.access).toBe("cli_at");
+      expect(mockRefresh.mock.calls.length - callsBefore).toBe(1);
+    });
+
+    it("falls through to direct refresh when refreshViaKiroCli returns undefined", async () => {
+      const { refreshViaKiroCli } = await import("../src/kiro-cli.js");
+      vi.mocked(refreshViaKiroCli).mockReturnValueOnce(undefined);
+
+      const mockFetch = vi.fn().mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ accessToken: "direct_at", refreshToken: "direct_rt", expiresIn: 3600 }),
+      });
+      vi.stubGlobal("fetch", mockFetch);
+
+      const creds = await refreshKiroToken({
+        refresh: "old_rt|cid|csec|idc",
+        access: "old_at",
+        expires: 0,
+      });
+      expect(creds.access).toBe("direct_at");
+      expect(mockFetch).toHaveBeenCalledOnce();
       vi.unstubAllGlobals();
     });
   });

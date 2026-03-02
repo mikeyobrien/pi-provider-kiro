@@ -1,7 +1,7 @@
 // ABOUTME: Reads and writes credentials from the kiro-cli SQLite database.
 // ABOUTME: Provides fallback auth and write-back to keep kiro-cli in sync after refresh.
 
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
@@ -145,5 +145,26 @@ export function saveKiroCliCredentials(creds: KiroCredentials): void {
     } catch {
       continue;
     }
+  }
+}
+
+/**
+ * Ask kiro-cli to refresh its own tokens via `kiro-cli debug refresh-auth-token`,
+ * then re-read the SQLite DB for fresh credentials.
+ *
+ * Returns refreshed credentials on success, or undefined if kiro-cli is not
+ * installed, the command fails, or the DB still has no valid tokens afterward.
+ */
+export function refreshViaKiroCli(): KiroCredentials | undefined {
+  try {
+    execFileSync("kiro-cli", ["debug", "refresh-auth-token"], {
+      timeout: 15000,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return getKiroCliCredentials();
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.warn(`[pi-provider-kiro] kiro-cli refresh failed: ${msg}`);
+    return undefined;
   }
 }
