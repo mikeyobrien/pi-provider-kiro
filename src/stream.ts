@@ -262,7 +262,7 @@ export function streamKiro(
         let textBlockIndex: number | null = null;
         const toolCalls: KiroToolCallState[] = [];
         let currentToolCall: KiroToolCallState | null = null;
-        const IDLE_TIMEOUT = 30_000;
+        const IDLE_TIMEOUT = 120_000;
         let idleTimer: ReturnType<typeof setTimeout> | null = null;
         const resetIdle = () => {
           if (idleTimer) clearTimeout(idleTimer);
