@@ -17,6 +17,7 @@ import { calculateCost, createAssistantMessageEventStream } from "@mariozechner/
 import { parseBracketToolCalls } from "./bracket-tool-parser.js";
 import { parseKiroEvents } from "./event-parser.js";
 import { addPlaceholderTools, HISTORY_LIMIT, truncateHistory } from "./history.js";
+import { getKiroCliCredentials } from "./kiro-cli.js";
 import { resolveKiroModel } from "./models.js";
 import { decideRetry, retryConfig } from "./retry.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
@@ -78,7 +79,7 @@ export function streamKiro(
       timestamp: Date.now(),
     };
     try {
-      const accessToken = options?.apiKey;
+      let accessToken = options?.apiKey;
       if (!accessToken) throw new Error("Kiro credentials not set. Run /login kiro or install kiro-cli.");
       const region = "us-east-1";
       const endpoint = `https://q.${region}.amazonaws.com/generateAssistantResponse`;
@@ -240,6 +241,12 @@ export function streamKiro(
           const decision = decideRetry(response.status, errText, retryCount, maxRetries);
           if (decision.shouldRetry) {
             retryCount++;
+            // On 403, try to get a fresh token before retrying — the current
+            // one may have been rotated by kiro-cli or another session.
+            if (response.status === 403) {
+              const freshCreds = getKiroCliCredentials();
+              if (freshCreds?.access) accessToken = freshCreds.access;
+            }
             if (decision.strategy === "reduce") {
               reductionFactor *= 0.7;
             } else if (decision.delayMs > 0) {

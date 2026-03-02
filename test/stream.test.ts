@@ -1035,6 +1035,57 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
+  it("refreshes token from kiro-cli on 403 before retrying", async () => {
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 403,
+        statusText: "Forbidden",
+        text: () => Promise.resolve('{"message":"The bearer token included in the request is invalid."}'),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({
+                done: false,
+                value: new TextEncoder().encode('{"content":"ok"}{"contextUsagePercentage":5}'),
+              })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+          }),
+        },
+      });
+    vi.stubGlobal("fetch", mockFetch);
+
+    // Mock kiro-cli to return a fresh token
+    const kiroCliModule = await import("../src/kiro-cli.js");
+    const getCredsSpy = vi.spyOn(kiroCliModule, "getKiroCliCredentials").mockReturnValue({
+      refresh: "fresh-refresh|client|secret|idc",
+      access: "fresh-access-token",
+      expires: Date.now() + 3600000,
+      clientId: "client",
+      clientSecret: "secret",
+      region: "us-east-1",
+      authMethod: "idc",
+    });
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "stale-token" });
+    const events = await collect(stream);
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    // First call used the stale token
+    expect(mockFetch.mock.calls[0][1].headers.Authorization).toBe("Bearer stale-token");
+    // Second call used the fresh token from kiro-cli
+    expect(mockFetch.mock.calls[1][1].headers.Authorization).toBe("Bearer fresh-access-token");
+    expect(events.find((e) => e.type === "done")).toBeDefined();
+
+    getCredsSpy.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
   it("gives up after max retries on repeated 429", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: false,
