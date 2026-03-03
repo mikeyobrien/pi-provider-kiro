@@ -89,15 +89,17 @@ function tryKiroCliToken(dbPath: string, tokenKey: string, authMethod: KiroAuthM
   // IDC — need device registration credentials for refresh
   let clientId = "";
   let clientSecret = "";
+  // Match the device-registration key to the same prefix as the token key
+  const keyPrefix = tokenKey.split(":")[0]; // "kirocli" or "codewhisperer"
   const deviceResult = queryKiroCliDb(
     dbPath,
-    "SELECT value FROM auth_kv WHERE key LIKE '%device-registration%' LIMIT 1",
+    `SELECT value FROM auth_kv WHERE key = '${keyPrefix}:odic:device-registration'`,
   );
   if (deviceResult) {
     try {
       const d = JSON.parse(JSON.parse(deviceResult)[0]?.value);
-      clientId = d.clientId || "";
-      clientSecret = d.clientSecret || "";
+      clientId = d.client_id || d.clientId || "";
+      clientSecret = d.client_secret || d.clientSecret || "";
     } catch {}
   }
   return {
