@@ -8,7 +8,8 @@ export type KiroStreamEvent =
   | { type: "toolUseStop"; data: { stop: boolean } }
   | { type: "contextUsage"; data: { contextUsagePercentage: number } }
   | { type: "followupPrompt"; data: string }
-  | { type: "usage"; data: { inputTokens?: number; outputTokens?: number } };
+  | { type: "usage"; data: { inputTokens?: number; outputTokens?: number } }
+  | { type: "error"; data: { error: string; message?: string } };
 
 export function findJsonEnd(text: string, start: number): number {
   let braceCount = 0;
@@ -71,6 +72,11 @@ export function parseKiroEvent(parsed: Record<string, unknown>): KiroStreamEvent
   if (parsed.contextUsagePercentage !== undefined)
     return { type: "contextUsage", data: { contextUsagePercentage: parsed.contextUsagePercentage as number } };
   if (parsed.followupPrompt !== undefined) return { type: "followupPrompt", data: parsed.followupPrompt as string };
+  if (parsed.error !== undefined || parsed.Error !== undefined) {
+    const error = (parsed.error || parsed.Error || "unknown") as string;
+    const message = (parsed.message || parsed.Message || parsed.reason) as string | undefined;
+    return { type: "error", data: { error: typeof error === "string" ? error : JSON.stringify(error), message } };
+  }
   if (parsed.usage !== undefined) {
     const u = parsed.usage as Record<string, unknown>;
     return {
@@ -94,6 +100,9 @@ const EVENT_PATTERNS = [
   '{"usage":',
   '{"toolUseId":',
   '{"unit":',
+  '{"error":',
+  '{"Error":',
+  '{"message":',
 ];
 
 function findNextEventStart(buffer: string, from: number): number {

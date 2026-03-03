@@ -283,6 +283,7 @@ export function streamKiro(
         let gotFirstToken = false;
         let firstTokenTimedOut = false;
         let idleCancelled = false;
+        let streamError: string | null = null;
         const FIRST_TOKEN_SENTINEL = Symbol("firstTokenTimeout");
         while (true) {
           let readResult: ReadableStreamReadResult<Uint8Array>;
@@ -303,15 +304,18 @@ export function streamKiro(
             }
             readResult = result as ReadableStreamReadResult<Uint8Array>;
             gotFirstToken = true;
+            resetIdle(); // Start idle timer after first token received
           } else {
             readResult = await reader.read();
           }
           const { done, value } = readResult;
           if (done) break;
-          resetIdle();
           buffer += decoder.decode(value, { stream: true });
           const { events, remaining } = parseKiroEvents(buffer);
           buffer = remaining;
+          // Only reset idle timer when we get meaningful events, not on raw reads
+          // (the server may send keepalive data that doesn't contain content)
+          if (events.length > 0) resetIdle();
           for (const event of events) {
             if (event.type === "contextUsage") {
               const pct = event.data.contextUsagePercentage;
@@ -355,18 +359,31 @@ export function streamKiro(
               }
             } else if (event.type === "usage") {
               usageEvent = event.data;
+            } else if (event.type === "error") {
+              // API sent an error mid-stream (throttling, internal error, etc.)
+              const errMsg = event.data.message
+                ? `${event.data.error}: ${event.data.message}`
+                : event.data.error;
+              streamError = errMsg;
+              try {
+                reader.cancel();
+              } catch {}
+              break;
             }
             // followupPrompt events are intentionally ignored
           }
         }
         if (idleTimer) clearTimeout(idleTimer);
-        if (firstTokenTimedOut || idleCancelled) {
-          // Timed out waiting for tokens: retry with backoff (no size reduction)
+        if (firstTokenTimedOut || idleCancelled || streamError) {
+          // Timed out or received error mid-stream: retry with backoff
           if (retryCount < maxRetries) {
             retryCount++;
             const delayMs = 1000 * 2 ** (retryCount - 1);
             await new Promise((r) => setTimeout(r, delayMs));
             continue;
+          }
+          if (streamError) {
+            throw new Error(`Kiro API stream error after max retries: ${streamError}`);
           }
           throw new Error(`Kiro API error: ${firstTokenTimedOut ? "first token" : "idle"} timeout after max retries`);
         }
