@@ -136,9 +136,17 @@ describe("Feature 3: OAuth — AWS Builder ID", () => {
       vi.unstubAllGlobals();
     });
 
-    it("throws on failed refresh", async () => {
+    it("returns stale credentials on failed refresh when access token exists", async () => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce({ ok: false, status: 401 }));
-      await expect(refreshKiroToken({ refresh: "rt|c|s|idc", access: "x", expires: 0 })).rejects.toThrow();
+      const creds = await refreshKiroToken({ refresh: "rt|c|s|idc", access: "x", expires: 0 });
+      expect(creds.access).toBe("x");
+      expect(creds.expires).toBeGreaterThan(Date.now());
+      vi.unstubAllGlobals();
+    });
+
+    it("throws on failed refresh when no access token exists", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce({ ok: false, status: 401 }));
+      await expect(refreshKiroToken({ refresh: "rt|c|s|idc", access: "", expires: 0 })).rejects.toThrow();
       vi.unstubAllGlobals();
     });
 
@@ -167,39 +175,39 @@ describe("Feature 3: OAuth — AWS Builder ID", () => {
       vi.unstubAllGlobals();
     });
 
-    it("throws on desktop token refresh failure", async () => {
+    it("returns stale credentials on desktop token refresh failure when access token exists", async () => {
       const mockFetch = vi.fn().mockResolvedValueOnce({
         ok: false,
         status: 401,
       });
       vi.stubGlobal("fetch", mockFetch);
 
-      await expect(
-        refreshKiroToken({
-          refresh: "desk_rt|desktop",
-          access: "old",
-          expires: 0,
-          region: "us-east-1",
-        } as any),
-      ).rejects.toThrow("Desktop token refresh failed: 401");
+      const creds = await refreshKiroToken({
+        refresh: "desk_rt|desktop",
+        access: "old",
+        expires: 0,
+        region: "us-east-1",
+      } as any);
+      expect(creds.access).toBe("old");
+      expect(creds.expires).toBeGreaterThan(Date.now());
       vi.unstubAllGlobals();
     });
 
-    it("throws on desktop token refresh with missing accessToken", async () => {
+    it("returns stale credentials on desktop token refresh with missing accessToken", async () => {
       const mockFetch = vi.fn().mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ expiresIn: 3600 }),
       });
       vi.stubGlobal("fetch", mockFetch);
 
-      await expect(
-        refreshKiroToken({
-          refresh: "desk_rt|desktop",
-          access: "old",
-          expires: 0,
-          region: "us-east-1",
-        } as any),
-      ).rejects.toThrow("Desktop token refresh: missing accessToken");
+      const creds = await refreshKiroToken({
+        refresh: "desk_rt|desktop",
+        access: "old",
+        expires: 0,
+        region: "us-east-1",
+      } as any);
+      expect(creds.access).toBe("old");
+      expect(creds.expires).toBeGreaterThan(Date.now());
       vi.unstubAllGlobals();
     });
 
