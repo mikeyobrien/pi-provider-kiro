@@ -1,14 +1,15 @@
 // Feature 1: Extension Registration
 //
 // Entry point that wires all features together via pi.registerProvider().
+// Uses Kiro as primary provider with automatic Bedrock fallback on failure.
 
 import type { Api, Model, OAuthCredentials } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { streamWithFallback } from "./fallback.js";
 import { getKiroCliCredentials } from "./kiro-cli.js";
 import { kiroModels } from "./models.js";
 import type { KiroCredentials } from "./oauth.js";
 import { loginKiroBuilderID, refreshKiroToken } from "./oauth.js";
-import { streamKiro } from "./stream.js";
 
 export default function (pi: ExtensionAPI) {
   pi.registerProvider("kiro", {
@@ -29,6 +30,6 @@ export default function (pi: ExtensionAPI) {
       },
       // biome-ignore lint/suspicious/noExplicitAny: ProviderConfig.oauth doesn't include getCliCredentials but OAuthProviderInterface does
     } as any,
-    streamSimple: streamKiro,
+    streamSimple: streamWithFallback,
   });
 }
