@@ -1,5 +1,6 @@
 import type { OAuthLoginCallbacks } from "@mariozechner/pi-ai";
 import { describe, expect, it, vi } from "vitest";
+import type { KiroCredentials } from "../src/oauth.js";
 import { loginKiroBuilderID, refreshKiroToken } from "../src/oauth.js";
 
 // Mock kiro-cli to prevent fallback to real credentials
@@ -54,7 +55,7 @@ describe("Feature 3: OAuth — AWS Builder ID", () => {
       expect(authCall.url).toContain("device.sso");
       expect(creds.access).toBe("at");
       expect(creds.refresh).toContain("rt|cid|csec|idc");
-      expect((creds as any).authMethod).toBe("idc");
+      expect((creds as KiroCredentials).authMethod).toBe("idc");
 
       vi.unstubAllGlobals();
     });
@@ -154,10 +155,10 @@ describe("Feature 3: OAuth — AWS Builder ID", () => {
         access: "old",
         expires: 0,
         region: "us-east-1",
-      } as any);
+      } as KiroCredentials);
       expect(creds.access).toBe("desk_at");
       expect(creds.refresh).toContain("desk_rt|desktop");
-      expect((creds as any).authMethod).toBe("desktop");
+      expect((creds as KiroCredentials).authMethod).toBe("desktop");
 
       const url = mockFetch.mock.calls[0][0];
       expect(url).toContain("auth.desktop.kiro.dev/refreshToken");
@@ -180,7 +181,7 @@ describe("Feature 3: OAuth — AWS Builder ID", () => {
           access: "old",
           expires: 0,
           region: "us-east-1",
-        } as any),
+        } as KiroCredentials),
       ).rejects.toThrow("Desktop token refresh failed: 401");
       vi.unstubAllGlobals();
     });
@@ -198,7 +199,7 @@ describe("Feature 3: OAuth — AWS Builder ID", () => {
           access: "old",
           expires: 0,
           region: "us-east-1",
-        } as any),
+        } as KiroCredentials),
       ).rejects.toThrow("Desktop token refresh: missing accessToken");
       vi.unstubAllGlobals();
     });
@@ -215,7 +216,7 @@ describe("Feature 3: OAuth — AWS Builder ID", () => {
         access: "old_at",
         expires: 0,
         region: "us-west-2",
-      } as any);
+      } as KiroCredentials);
 
       const url = mockFetch.mock.calls[0][0];
       expect(url).toContain("oidc.us-west-2.amazonaws.com");

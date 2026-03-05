@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   addPlaceholderTools,
   extractToolNamesFromHistory,
-  historyByteBudget,
   HISTORY_LIMIT,
+  historyByteBudget,
   injectSyntheticToolCalls,
   sanitizeHistory,
   truncateHistory,
@@ -72,7 +72,7 @@ describe("Feature 6: History Management", () => {
     });
 
     it("drops assistant messages with undefined content and no tool uses", () => {
-      const errorEntry = { assistantResponseMessage: {} as any };
+      const errorEntry: KiroHistoryEntry = { assistantResponseMessage: { content: "" } };
       const h = [userEntry("hi"), errorEntry, userEntry("continue")];
       const r = sanitizeHistory(h);
       expect(

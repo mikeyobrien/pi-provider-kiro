@@ -33,7 +33,6 @@ describe("Feature 4: kiro-cli Credential Fallback", () => {
 
   describe("refreshViaKiroCli", () => {
     it("returns undefined when kiro-cli is not installed", () => {
-      const { execFileSync } = require("node:child_process");
       vi.mock("node:child_process", async (importOriginal) => {
         const actual = await importOriginal<typeof import("node:child_process")>();
         return {

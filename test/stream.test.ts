@@ -3,7 +3,9 @@ import type {
   AssistantMessage,
   AssistantMessageEvent,
   Context,
+  ImageContent,
   Model,
+  TextContent,
   ToolResultMessage,
 } from "@mariozechner/pi-ai";
 import { describe, expect, it, vi } from "vitest";
@@ -258,7 +260,7 @@ describe("Feature 9: Streaming Integration", () => {
     const tcEnd = events.find((e) => e.type === "toolcall_end");
     expect(tcEnd?.type === "toolcall_end" && tcEnd.toolCall.name).toBe("bash");
     expect(tcEnd?.type === "toolcall_end" && tcEnd.toolCall.id).toBe("tc1");
-    expect(tcEnd?.type === "toolcall_end" && (tcEnd.toolCall.arguments as any).cmd).toBe("ls");
+    expect(tcEnd?.type === "toolcall_end" && (tcEnd.toolCall.arguments as Record<string, unknown>).cmd).toBe("ls");
 
     const done = events.find((e) => e.type === "done");
     expect(done?.type === "done" && done.reason).toBe("toolUse");
@@ -306,9 +308,10 @@ describe("Feature 9: Streaming Integration", () => {
     const msg = done?.type === "done" ? done.message : undefined;
 
     expect(msg).toBeDefined();
-    expect(msg!.usage.input).toBeGreaterThan(0);
-    expect(msg!.usage.output).toBeGreaterThan(0);
-    expect(msg!.usage.totalTokens).toBe(msg!.usage.input + msg!.usage.output);
+    if (!msg) throw new Error("msg undefined");
+    expect(msg.usage.input).toBeGreaterThan(0);
+    expect(msg.usage.output).toBeGreaterThan(0);
+    expect(msg.usage.totalTokens).toBe(msg.usage.input + msg.usage.output);
 
     vi.unstubAllGlobals();
   });
@@ -433,7 +436,7 @@ describe("Feature 9: Streaming Integration", () => {
   it("handles empty content array user message", async () => {
     const context: Context = {
       systemPrompt: "You are helpful",
-      messages: [{ role: "user", content: [] as any, timestamp: ts }],
+      messages: [{ role: "user" as const, content: [] as (TextContent | ImageContent)[], timestamp: ts }],
     };
     const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":2}');
     vi.stubGlobal("fetch", mockFetch);
@@ -722,7 +725,7 @@ describe("Feature 9: Streaming Integration", () => {
     expect(tcEnd).toBeDefined();
     expect(tcEnd?.type === "toolcall_end" && tcEnd.toolCall.name).toBe("write");
     expect(tcEnd?.type === "toolcall_end" && tcEnd.toolCall.id).toBe("tc1");
-    expect(tcEnd?.type === "toolcall_end" && (tcEnd.toolCall.arguments as any).path).toBe("f.txt");
+    expect(tcEnd?.type === "toolcall_end" && (tcEnd.toolCall.arguments as Record<string, unknown>).path).toBe("f.txt");
 
     const done = events.find((e) => e.type === "done");
     expect(done?.type === "done" && done.reason).toBe("toolUse");
@@ -749,7 +752,9 @@ describe("Feature 9: Streaming Integration", () => {
     const tcEnd = events.find((e) => e.type === "toolcall_end");
     expect(tcEnd).toBeDefined();
     expect(tcEnd?.type === "toolcall_end" && tcEnd.toolCall.name).toBe("write");
-    expect(tcEnd?.type === "toolcall_end" && (tcEnd.toolCall.arguments as any).path).toBe("hello.txt");
+    expect(tcEnd?.type === "toolcall_end" && (tcEnd.toolCall.arguments as Record<string, unknown>).path).toBe(
+      "hello.txt",
+    );
 
     vi.unstubAllGlobals();
   });
@@ -775,8 +780,12 @@ describe("Feature 9: Streaming Integration", () => {
     const tcEnd = events.find((e) => e.type === "toolcall_end");
     expect(tcEnd).toBeDefined();
     expect(tcEnd?.type === "toolcall_end" && tcEnd.toolCall.name).toBe("write");
-    expect(tcEnd?.type === "toolcall_end" && (tcEnd.toolCall.arguments as any).path).toBe("file.md");
-    expect(tcEnd?.type === "toolcall_end" && (tcEnd.toolCall.arguments as any).content).toBe("hello");
+    expect(tcEnd?.type === "toolcall_end" && (tcEnd.toolCall.arguments as Record<string, unknown>).path).toBe(
+      "file.md",
+    );
+    expect(tcEnd?.type === "toolcall_end" && (tcEnd.toolCall.arguments as Record<string, unknown>).content).toBe(
+      "hello",
+    );
 
     vi.unstubAllGlobals();
   });

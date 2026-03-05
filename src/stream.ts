@@ -16,7 +16,7 @@ import type {
 import { calculateCost, createAssistantMessageEventStream } from "@mariozechner/pi-ai";
 import { parseBracketToolCalls } from "./bracket-tool-parser.js";
 import { parseKiroEvents } from "./event-parser.js";
-import { addPlaceholderTools, historyByteBudget, HISTORY_LIMIT, truncateHistory } from "./history.js";
+import { addPlaceholderTools, HISTORY_LIMIT, historyByteBudget, truncateHistory } from "./history.js";
 import { getKiroCliCredentials } from "./kiro-cli.js";
 import { resolveKiroModel } from "./models.js";
 import { decideRetry, MAX_RETRY_DELAY, retryConfig } from "./retry.js";
@@ -34,8 +34,8 @@ import {
   type KiroToolSpec,
   type KiroUserInputMessage,
   normalizeMessages,
-  sanitizeSurrogates,
   SYSTEM_PROMPT_LIMIT,
+  sanitizeSurrogates,
   TOOL_RESULT_LIMIT,
   truncate,
 } from "./transform.js";
@@ -242,7 +242,10 @@ export function streamKiro(
           signal: options?.signal,
         });
         if (!response.ok) {
-          const errText = await response.text().catch(() => "");
+          const errText = await response.text().then(
+            (t) => t,
+            () => "",
+          );
           const decision = decideRetry(response.status, errText, retryCount, maxRetries);
           if (decision.shouldRetry) {
             retryCount++;
