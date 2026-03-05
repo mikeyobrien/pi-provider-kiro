@@ -235,7 +235,6 @@ export function streamKiro(
             "x-amzn-kiro-agent-mode": "vibe",
             "x-amz-user-agent": ua,
             "user-agent": ua,
-            Connection: "close",
           },
           body: JSON.stringify(request),
           signal: options?.signal,
@@ -318,9 +317,10 @@ export function streamKiro(
           buffer += decoder.decode(value, { stream: true });
           const { events, remaining } = parseKiroEvents(buffer);
           buffer = remaining;
-          // Only reset idle timer when we get meaningful events, not on raw reads
-          // (the server may send keepalive data that doesn't contain content)
-          if (events.length > 0) resetIdle();
+          // Reset idle timer on any bytes received — large tool call inputs
+          // span many chunks that parse as zero events (incomplete JSON) but
+          // the stream is still actively flowing.
+          resetIdle();
           for (const event of events) {
             if (event.type === "contextUsage") {
               const pct = event.data.contextUsagePercentage;
