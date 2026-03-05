@@ -223,7 +223,7 @@ export function streamKiro(
           },
         };
         const mid = crypto.randomUUID().replace(/-/g, "");
-        const ua = `aws-sdk-js/1.0.0 ua/2.1 os/nodejs lang/js api/codewhispererruntime#1.0.0 m/E KiroIDE-${mid}`;
+        const ua = `aws-sdk-js/1.0.0 ua/2.1 os/nodejs lang/js api/codewhispererruntime#1.0.0 m/E KiroIDE-0.75.0-${mid}`;
         const response = await fetch(endpoint, {
           method: "POST",
           headers: {
