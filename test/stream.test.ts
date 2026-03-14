@@ -240,6 +240,19 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
+  it("does not withhold the tail of plain text in reasoning mode", async () => {
+    const mockFetch = mockFetchChunked(['{"content":"Hello world"}', '{"contextUsagePercentage":5}']);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel({ reasoning: true }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const firstTextDelta = events.find((e) => e.type === "text_delta");
+
+    expect(firstTextDelta?.type === "text_delta" && firstTextDelta.delta).toBe("Hello world");
+
+    vi.unstubAllGlobals();
+  });
+
   // =========================================================================
   // Tool call streaming events (pi-mono: stream.test.ts handleToolCall)
   // =========================================================================
@@ -264,6 +277,34 @@ describe("Feature 9: Streaming Integration", () => {
 
     const done = events.find((e) => e.type === "done");
     expect(done?.type === "done" && done.reason).toBe("toolUse");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("emits tool calls as they arrive instead of waiting for stream end", async () => {
+    const mockFetch = mockFetchChunked([
+      '{"content":"I\'ll inspect the file."}',
+      '{"name":"read","toolUseId":"tc1","input":"{\\"path\\":\\"file"}',
+      '{"input":".txt\\"}"}',
+      '{"stop":true}',
+      '{"contextUsagePercentage":10}',
+    ]);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const types = events.map((e) => e.type);
+    const toolcallStart = types.indexOf("toolcall_start");
+    const textEnd = types.indexOf("text_end");
+
+    expect(toolcallStart).toBeGreaterThan(-1);
+    expect(textEnd).toBeGreaterThan(-1);
+    expect(toolcallStart).toBeLessThan(textEnd);
+
+    const tcEnd = events.find((e) => e.type === "toolcall_end");
+    expect(tcEnd?.type === "toolcall_end" && (tcEnd.toolCall.arguments as Record<string, unknown>).path).toBe(
+      "file.txt",
+    );
 
     vi.unstubAllGlobals();
   });

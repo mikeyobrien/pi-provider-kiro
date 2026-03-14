@@ -70,6 +70,37 @@ interface KiroToolCallState {
   input: string;
 }
 
+function emitToolCall(
+  state: KiroToolCallState,
+  output: AssistantMessage,
+  stream: AssistantMessageEventStream,
+): boolean {
+  if (!state.input.trim()) {
+    console.warn(
+      `[pi-provider-kiro] Skipping tool call "${state.name}" (toolUseId: ${state.toolUseId}): empty input — stream likely truncated`,
+    );
+    return false;
+  }
+
+  let args: Record<string, unknown>;
+  try {
+    args = JSON.parse(state.input) as Record<string, unknown>;
+  } catch (e) {
+    console.warn(
+      `[pi-provider-kiro] Failed to parse tool input for "${state.name}" (toolUseId: ${state.toolUseId}): ${e instanceof Error ? e.message : String(e)}. Raw input (${state.input.length} chars): ${state.input.substring(0, 200)}`,
+    );
+    return false;
+  }
+
+  const contentIndex = output.content.length;
+  const toolCall: ToolCall = { type: "toolCall", id: state.toolUseId, name: state.name, arguments: args };
+  output.content.push(toolCall);
+  stream.push({ type: "toolcall_start", contentIndex, partial: output });
+  stream.push({ type: "toolcall_delta", contentIndex, delta: state.input, partial: output });
+  stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
+  return true;
+}
+
 export function streamKiro(
   model: Model<Api>,
   context: Context,
@@ -277,7 +308,8 @@ export function streamKiro(
         let receivedContextUsage = false;
         const thinkingParser = thinkingEnabled ? new ThinkingTagParser(output, stream) : null;
         let textBlockIndex: number | null = null;
-        const toolCalls: KiroToolCallState[] = [];
+        let emittedToolCalls = 0;
+        let sawAnyToolCalls = false;
         let currentToolCall: KiroToolCallState | null = null;
         const IDLE_TIMEOUT = 300_000;
         let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -351,21 +383,27 @@ export function streamKiro(
               }
             } else if (event.type === "toolUse") {
               const tc = event.data;
-              if (currentToolCall && currentToolCall.toolUseId === tc.toolUseId)
-                currentToolCall.input += tc.input || "";
-              else {
-                if (currentToolCall) toolCalls.push(currentToolCall);
-                currentToolCall = { toolUseId: tc.toolUseId, name: tc.name, input: tc.input || "" };
+              sawAnyToolCalls = true;
+              if (!currentToolCall || currentToolCall.toolUseId !== tc.toolUseId) {
+                if (currentToolCall && emitToolCall(currentToolCall, output, stream)) {
+                  emittedToolCalls++;
+                }
+                currentToolCall = { toolUseId: tc.toolUseId, name: tc.name, input: "" };
               }
+              currentToolCall.input += tc.input || "";
               if (tc.stop && currentToolCall) {
-                toolCalls.push(currentToolCall);
+                if (emitToolCall(currentToolCall, output, stream)) {
+                  emittedToolCalls++;
+                }
                 currentToolCall = null;
               }
             } else if (event.type === "toolUseInput") {
               if (currentToolCall) currentToolCall.input += event.data.input || "";
             } else if (event.type === "toolUseStop") {
               if (currentToolCall && event.data.stop) {
-                toolCalls.push(currentToolCall);
+                if (emitToolCall(currentToolCall, output, stream)) {
+                  emittedToolCalls++;
+                }
                 currentToolCall = null;
               }
             } else if (event.type === "usage") {
@@ -396,23 +434,34 @@ export function streamKiro(
           }
           throw new Error(`Kiro API error: ${firstTokenTimedOut ? "first token" : "idle"} timeout after max retries`);
         }
-        if (currentToolCall) toolCalls.push(currentToolCall);
+        if (currentToolCall && emitToolCall(currentToolCall, output, stream)) {
+          emittedToolCalls++;
+        }
         if (thinkingParser) {
           thinkingParser.finalize();
           textBlockIndex = thinkingParser.getTextBlockIndex();
         }
         // Fallback: extract bracket-style tool calls from content if no native tool calls
-        if (toolCalls.length === 0 && textBlockIndex !== null) {
+        if (!sawAnyToolCalls && textBlockIndex !== null) {
           const textBlock = output.content[textBlockIndex] as TextContent;
           const bracketResult = parseBracketToolCalls(textBlock.text);
           if (bracketResult.toolCalls.length > 0) {
+            sawAnyToolCalls = true;
             textBlock.text = bracketResult.cleanedText;
             for (const btc of bracketResult.toolCalls) {
-              toolCalls.push({
-                toolUseId: btc.toolUseId,
-                name: btc.name,
-                input: JSON.stringify(btc.arguments),
-              });
+              if (
+                emitToolCall(
+                  {
+                    toolUseId: btc.toolUseId,
+                    name: btc.name,
+                    input: JSON.stringify(btc.arguments),
+                  },
+                  output,
+                  stream,
+                )
+              ) {
+                emittedToolCalls++;
+              }
             }
           }
         }
@@ -423,31 +472,6 @@ export function streamKiro(
             content: (output.content[textBlockIndex] as TextContent).text,
             partial: output,
           });
-        let emittedToolCalls = 0;
-        for (const tc of toolCalls) {
-          if (!tc.input.trim()) {
-            console.warn(
-              `[pi-provider-kiro] Skipping tool call "${tc.name}" (toolUseId: ${tc.toolUseId}): empty input — stream likely truncated`,
-            );
-            continue;
-          }
-          const idx = output.content.length;
-          let args: Record<string, unknown> = {};
-          try {
-            args = JSON.parse(tc.input);
-          } catch (e) {
-            console.warn(
-              `[pi-provider-kiro] Failed to parse tool input for "${tc.name}" (toolUseId: ${tc.toolUseId}): ${e instanceof Error ? e.message : String(e)}. Raw input (${tc.input.length} chars): ${tc.input.substring(0, 200)}`,
-            );
-            continue;
-          }
-          const toolCall: ToolCall = { type: "toolCall", id: tc.toolUseId, name: tc.name, arguments: args };
-          output.content.push(toolCall);
-          stream.push({ type: "toolcall_start", contentIndex: idx, partial: output });
-          stream.push({ type: "toolcall_delta", contentIndex: idx, delta: tc.input, partial: output });
-          stream.push({ type: "toolcall_end", contentIndex: idx, toolCall, partial: output });
-          emittedToolCalls++;
-        }
         // Prefer usage event values when available, fall back to tiktoken
         if (usageEvent) {
           if (usageEvent.inputTokens !== undefined) output.usage.input = usageEvent.inputTokens;
@@ -472,7 +496,7 @@ export function streamKiro(
         // tool calls. Retrying would likely produce the same result. The
         // stopReason fix below prevents the agent loop stall.
         const hasText = textBlockIndex !== null && (output.content[textBlockIndex] as TextContent).text.length > 0;
-        if (!hasText && toolCalls.length === 0) {
+        if (!hasText && !sawAnyToolCalls) {
           if (retryCount < maxRetries) {
             retryCount++;
             const delayMs = Math.min(1000 * 2 ** (retryCount - 1), MAX_RETRY_DELAY);

@@ -58,6 +58,34 @@ describe("Feature 7: Thinking Tag Parser", () => {
     expect(deltas(events, "text_delta")).toBe("Just plain text");
   });
 
+  it("flushes plain text immediately without waiting for finalize", () => {
+    const output = makeOutput();
+    const stream = createAssistantMessageEventStream();
+    const parser = new ThinkingTagParser(output, stream);
+
+    parser.processChunk("Hello world");
+
+    expect(output.content[0]?.type).toBe("text");
+    expect(output.content[0]?.type === "text" && output.content[0].text).toBe("Hello world");
+  });
+
+  it("retains only a trailing possible opening-tag prefix between chunks", () => {
+    const output = makeOutput();
+    const stream = createAssistantMessageEventStream();
+    const parser = new ThinkingTagParser(output, stream);
+
+    parser.processChunk("Hello <thin");
+
+    expect(output.content[0]?.type).toBe("text");
+    expect(output.content[0]?.type === "text" && output.content[0].text).toBe("Hello ");
+
+    parser.processChunk("king>deep thought</thinking>");
+    parser.finalize();
+
+    expect(output.content[0]?.type === "text" && output.content[0].text).toBe("Hello ");
+    expect(output.content[1]?.type === "thinking" && output.content[1].thinking).toBe("deep thought");
+  });
+
   it("detects thinking start tag split across chunks", async () => {
     const events = await run(["<thin", "king>deep thought</thinking>"]);
     expect(deltas(events, "thinking_delta")).toContain("deep thought");

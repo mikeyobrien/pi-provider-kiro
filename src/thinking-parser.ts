@@ -14,9 +14,21 @@ const THINKING_TAG_VARIANTS: Array<{ open: string; close: string }> = [
   { open: "<thought>", close: "</thought>" },
 ];
 
-// The longest open/close tag determines the hold-back safe length
-const MAX_OPEN_TAG_LEN = Math.max(...THINKING_TAG_VARIANTS.map((v) => v.open.length));
-const MAX_CLOSE_TAG_LEN = Math.max(...THINKING_TAG_VARIANTS.map((v) => v.close.length));
+function getTrailingPossibleTagPrefixLength(text: string, tag: string): number {
+  const maxPrefixLength = Math.min(text.length, tag.length - 1);
+  for (let len = maxPrefixLength; len > 0; len--) {
+    if (text.endsWith(tag.slice(0, len))) return len;
+  }
+  return 0;
+}
+
+function getMaxTrailingPossibleTagPrefixLength(text: string, tags: string[]): number {
+  let maxLength = 0;
+  for (const tag of tags) {
+    maxLength = Math.max(maxLength, getTrailingPossibleTagPrefixLength(text, tag));
+  }
+  return maxLength;
+}
 
 export class ThinkingTagParser {
   private textBuffer = "";
@@ -79,7 +91,6 @@ export class ThinkingTagParser {
   }
 
   private processBeforeThinking(): void {
-    // Try each tag variant, pick the earliest match
     let bestPos = -1;
     let bestVariant: (typeof THINKING_TAG_VARIANTS)[number] | null = null;
     for (const variant of THINKING_TAG_VARIANTS) {
@@ -96,7 +107,12 @@ export class ThinkingTagParser {
       this.inThinking = true;
       return;
     }
-    const safeLen = Math.max(0, this.textBuffer.length - MAX_OPEN_TAG_LEN);
+
+    const trailingPrefixLength = getMaxTrailingPossibleTagPrefixLength(
+      this.textBuffer,
+      THINKING_TAG_VARIANTS.map((variant) => variant.open),
+    );
+    const safeLen = this.textBuffer.length - trailingPrefixLength;
     if (safeLen > 0) {
       this.emitText(this.textBuffer.slice(0, safeLen));
       this.textBuffer = this.textBuffer.slice(safeLen);
@@ -122,7 +138,9 @@ export class ThinkingTagParser {
       if (this.textBuffer.startsWith("\n\n")) this.textBuffer = this.textBuffer.slice(2);
       return;
     }
-    const safeLen = Math.max(0, this.textBuffer.length - MAX_CLOSE_TAG_LEN);
+
+    const trailingPrefixLength = getTrailingPossibleTagPrefixLength(this.textBuffer, this.activeEndTag);
+    const safeLen = this.textBuffer.length - trailingPrefixLength;
     if (safeLen > 0) {
       this.emitThinking(this.textBuffer.slice(0, safeLen));
       this.textBuffer = this.textBuffer.slice(safeLen);
@@ -135,6 +153,7 @@ export class ThinkingTagParser {
   }
 
   private emitText(text: string): void {
+    if (!text) return;
     if (this.textBlockIndex === null) {
       this.textBlockIndex = this.output.content.length;
       this.output.content.push({ type: "text", text: "" });
@@ -146,6 +165,7 @@ export class ThinkingTagParser {
   }
 
   private emitThinking(thinking: string): void {
+    if (!thinking) return;
     if (this.thinkingBlockIndex === null) {
       this.thinkingBlockIndex = this.output.content.length;
       this.output.content.push({ type: "thinking", thinking: "" });
