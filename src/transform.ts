@@ -158,13 +158,17 @@ export function buildHistory(
         assistantResponseMessage: { content: armContent, ...(armToolUses.length > 0 ? { toolUses: armToolUses } : {}) },
       });
     } else if (msg.role === "toolResult") {
+      const trMsg = msg as ToolResultMessage;
       const toolResults: KiroToolResult[] = [
         {
           content: [{ text: truncate(getContentText(msg), toolResultLimit) }],
-          status: (msg as ToolResultMessage).isError ? "error" : "success",
-          toolUseId: (msg as ToolResultMessage).toolCallId,
+          status: trMsg.isError ? "error" : "success",
+          toolUseId: trMsg.toolCallId,
         },
       ];
+      const trImages: ImageContent[] = [];
+      if (Array.isArray(trMsg.content))
+        for (const c of trMsg.content) if (c.type === "image") trImages.push(c as ImageContent);
       let j = i + 1;
       while (j < historyMessages.length && historyMessages[j].role === "toolResult") {
         const next = historyMessages[j] as ToolResultMessage;
@@ -173,6 +177,8 @@ export function buildHistory(
           status: next.isError ? "error" : "success",
           toolUseId: next.toolCallId,
         });
+        if (Array.isArray(next.content))
+          for (const c of next.content) if (c.type === "image") trImages.push(c as ImageContent);
         j++;
       }
       i = j - 1;
@@ -183,6 +189,7 @@ export function buildHistory(
           content: "Tool results provided.",
           modelId,
           origin: "AI_EDITOR",
+          ...(trImages.length > 0 ? { images: convertImagesToKiro(trImages) } : {}),
           userInputMessageContext: { toolResults },
         },
       });

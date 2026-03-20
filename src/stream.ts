@@ -160,6 +160,7 @@ export function streamKiro(
         const firstMsg = currentMessages[0];
         let currentContent = "";
         const currentToolResults: KiroToolResult[] = [];
+        let currentImages: KiroImage[] | undefined;
         if (firstMsg?.role === "assistant") {
           const am = firstMsg as AssistantMessage;
           let armContent = "";
@@ -191,24 +192,42 @@ export function streamKiro(
               },
             });
           }
+          const toolResultImages: ImageContent[] = [];
           for (let i = 1; i < currentMessages.length; i++) {
             const m = currentMessages[i];
-            if (m.role === "toolResult")
+            if (m.role === "toolResult") {
+              const trm = m as ToolResultMessage;
               currentToolResults.push({
                 content: [{ text: truncate(getContentText(m), toolResultLimit) }],
-                status: (m as ToolResultMessage).isError ? "error" : "success",
-                toolUseId: (m as ToolResultMessage).toolCallId,
+                status: trm.isError ? "error" : "success",
+                toolUseId: trm.toolCallId,
               });
+              if (Array.isArray(trm.content))
+                for (const c of trm.content) if (c.type === "image") toolResultImages.push(c as ImageContent);
+            }
+          }
+          if (toolResultImages.length > 0) {
+            const converted = convertImagesToKiro(toolResultImages);
+            currentImages = currentImages ? [...currentImages, ...converted] : converted;
           }
           currentContent = currentToolResults.length > 0 ? "Tool results provided." : "Continue";
         } else if (firstMsg?.role === "toolResult") {
+          const toolResultImages2: ImageContent[] = [];
           for (const m of currentMessages)
-            if (m.role === "toolResult")
+            if (m.role === "toolResult") {
+              const trm = m as ToolResultMessage;
               currentToolResults.push({
                 content: [{ text: truncate(getContentText(m), toolResultLimit) }],
-                status: (m as ToolResultMessage).isError ? "error" : "success",
-                toolUseId: (m as ToolResultMessage).toolCallId,
+                status: trm.isError ? "error" : "success",
+                toolUseId: trm.toolCallId,
               });
+              if (Array.isArray(trm.content))
+                for (const c of trm.content) if (c.type === "image") toolResultImages2.push(c as ImageContent);
+            }
+          if (toolResultImages2.length > 0) {
+            const converted = convertImagesToKiro(toolResultImages2);
+            currentImages = currentImages ? [...currentImages, ...converted] : converted;
+          }
           currentContent = "Tool results provided.";
         } else if (firstMsg?.role === "user") {
           currentContent = typeof firstMsg.content === "string" ? firstMsg.content : getContentText(firstMsg);
@@ -229,7 +248,6 @@ export function streamKiro(
             uimc.tools = kt;
           }
         }
-        let currentImages: KiroImage[] | undefined;
         if (firstMsg?.role === "user") {
           const imgs = extractImages(firstMsg);
           if (imgs.length > 0) currentImages = convertImagesToKiro(imgs as ImageContent[]);
