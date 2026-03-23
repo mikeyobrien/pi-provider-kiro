@@ -44,8 +44,14 @@ const toolResult = (id: string, text: string, isError = false): ToolResultMessag
 
 describe("Feature 5: Message Transformation", () => {
   describe("sanitizeSurrogates", () => {
-    it("replaces lone surrogates", () => {
-      expect(sanitizeSurrogates("a\uD800b")).toBe("a\uFFFDb");
+    it("removes unpaired high surrogate", () => {
+      expect(sanitizeSurrogates("a\uD800b")).toBe("ab");
+    });
+    it("removes unpaired low surrogate", () => {
+      expect(sanitizeSurrogates("a\uDC00b")).toBe("ab");
+    });
+    it("preserves properly paired surrogates (emoji)", () => {
+      expect(sanitizeSurrogates("Hello 🙈 World")).toBe("Hello 🙈 World");
     });
     it("leaves normal text unchanged", () => {
       expect(sanitizeSurrogates("hello")).toBe("hello");

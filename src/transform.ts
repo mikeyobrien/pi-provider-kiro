@@ -47,7 +47,10 @@ export interface KiroHistoryEntry {
 export const TOOL_RESULT_LIMIT = 250000;
 
 export function sanitizeSurrogates(text: string): string {
-  return text.replace(/[\uD800-\uDFFF]/g, "\uFFFD");
+  // Replace unpaired high surrogates (0xD800-0xDBFF not followed by low surrogate)
+  // Replace unpaired low surrogates (0xDC00-0xDFFF not preceded by high surrogate)
+  // Properly paired surrogates (e.g. emoji like 🙈) are preserved.
+  return text.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
 }
 
 export function truncate(text: string, limit: number): string {
