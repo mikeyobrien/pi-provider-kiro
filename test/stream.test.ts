@@ -629,7 +629,49 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
-  it("retries on 500 then succeeds", async () => {
+  it("omits 429 from INSUFFICIENT_MODEL_CAPACITY errors to avoid outer auto-retry", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 429,
+      statusText: "Too Many Requests",
+      text: () => Promise.resolve("INSUFFICIENT_MODEL_CAPACITY"),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    expect(mockFetch).toHaveBeenCalledOnce();
+    const error = events.find((e) => e.type === "error");
+    expect(error).toBeDefined();
+    expect(error?.type === "error" && error.error.errorMessage).toContain("INSUFFICIENT_MODEL_CAPACITY");
+    expect(error?.type === "error" && error.error.errorMessage).not.toContain("429");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("omits status codes from MONTHLY_REQUEST_COUNT errors to avoid outer auto-retry", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 429,
+      statusText: "Too Many Requests",
+      text: () => Promise.resolve("MONTHLY_REQUEST_COUNT exceeded"),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    expect(mockFetch).toHaveBeenCalledOnce();
+    const error = events.find((e) => e.type === "error");
+    expect(error).toBeDefined();
+    expect(error?.type === "error" && error.error.errorMessage).toContain("MONTHLY_REQUEST_COUNT");
+    expect(error?.type === "error" && error.error.errorMessage).not.toContain("429");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("propagates 500 immediately so pi-coding-agent can retry at the session layer", async () => {
     const mockFetch = vi
       .fn()
       .mockResolvedValueOnce({
@@ -657,8 +699,10 @@ describe("Feature 9: Streaming Integration", () => {
     const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
     const events = await collect(stream);
 
-    expect(mockFetch).toHaveBeenCalledTimes(2);
-    expect(events.find((e) => e.type === "done")).toBeDefined();
+    expect(mockFetch).toHaveBeenCalledOnce();
+    const error = events.find((e) => e.type === "error");
+    expect(error).toBeDefined();
+    expect(error?.type === "error" && error.error.errorMessage).toContain("500");
 
     vi.unstubAllGlobals();
   });
@@ -1035,10 +1079,10 @@ describe("Feature 9: Streaming Integration", () => {
   });
 
   // =========================================================================
-  // 429 retry with backoff (Task 1.3)
+  // Provider-level HTTP error handling
   // =========================================================================
 
-  it("retries on 429 with backoff delay", async () => {
+  it("propagates 429 immediately so pi-coding-agent can own outer retries", async () => {
     const mockFetch = vi
       .fn()
       .mockResolvedValueOnce({
@@ -1066,13 +1110,15 @@ describe("Feature 9: Streaming Integration", () => {
     const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
     const events = await collect(stream);
 
-    expect(mockFetch).toHaveBeenCalledTimes(2);
-    expect(events.find((e) => e.type === "done")).toBeDefined();
+    expect(mockFetch).toHaveBeenCalledOnce();
+    const error = events.find((e) => e.type === "error");
+    expect(error).toBeDefined();
+    expect(error?.type === "error" && error.error.errorMessage).toContain("429");
 
     vi.unstubAllGlobals();
   });
 
-  it("retries on 5xx with backoff delay", async () => {
+  it("propagates 5xx immediately so pi-coding-agent can own outer retries", async () => {
     const mockFetch = vi
       .fn()
       .mockResolvedValueOnce({
@@ -1100,8 +1146,10 @@ describe("Feature 9: Streaming Integration", () => {
     const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
     const events = await collect(stream);
 
-    expect(mockFetch).toHaveBeenCalledTimes(2);
-    expect(events.find((e) => e.type === "done")).toBeDefined();
+    expect(mockFetch).toHaveBeenCalledOnce();
+    const error = events.find((e) => e.type === "error");
+    expect(error).toBeDefined();
+    expect(error?.type === "error" && error.error.errorMessage).toContain("502");
 
     vi.unstubAllGlobals();
   });
@@ -1191,7 +1239,7 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
-  it("gives up after max retries on repeated 429", async () => {
+  it("does not retry repeated 429 responses inside the provider", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: false,
       status: 429,
@@ -1203,8 +1251,7 @@ describe("Feature 9: Streaming Integration", () => {
     const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
     const events = await collect(stream);
 
-    // 1 initial + 3 retries = 4 calls
-    expect(mockFetch).toHaveBeenCalledTimes(4);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
     const error = events.find((e) => e.type === "error");
     expect(error).toBeDefined();
     expect(error?.type === "error" && error.error.stopReason).toBe("error");
@@ -1212,13 +1259,13 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   }, 15000);
 
-  it("aborts promptly during retry backoff delay", async () => {
+  it("aborts promptly during 403 retry backoff delay", async () => {
     const ac = new AbortController();
     const mockFetch = vi.fn().mockResolvedValue({
       ok: false,
-      status: 429,
-      statusText: "Too Many Requests",
-      text: () => Promise.resolve("Rate limited"),
+      status: 403,
+      statusText: "Forbidden",
+      text: () => Promise.resolve("Access denied"),
     });
     vi.stubGlobal("fetch", mockFetch);
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { KIRO_MODEL_IDS, kiroModels, resolveKiroModel } from "../src/models.js";
+import { filterModelsByRegion, KIRO_MODEL_IDS, kiroModels, resolveKiroModel } from "../src/models.js";
 
 describe("Feature 2: Model Definitions", () => {
   describe("resolveKiroModel", () => {
@@ -35,6 +35,24 @@ describe("Feature 2: Model Definitions", () => {
   describe("KIRO_MODEL_IDS", () => {
     it("contains 17 model IDs", () => {
       expect(KIRO_MODEL_IDS.size).toBe(17);
+    });
+  });
+
+  describe("filterModelsByRegion", () => {
+    it("us-east-1 returns all models", () => {
+      expect(filterModelsByRegion(kiroModels, "us-east-1")).toHaveLength(kiroModels.length);
+    });
+
+    it("eu-central-1 includes Claude + documented OSS, excludes DeepSeek and undocumented models", () => {
+      const ids = filterModelsByRegion(kiroModels, "eu-central-1").map((m) => m.id);
+      expect(ids).toContain("claude-sonnet-4-6");
+      expect(ids).toContain("minimax-m2-1");
+      expect(ids).not.toContain("deepseek-3-2");
+      expect(ids).not.toContain("agi-nova-beta-1m");
+    });
+
+    it("unknown region returns no models", () => {
+      expect(filterModelsByRegion(kiroModels, "ap-southeast-1")).toHaveLength(0);
     });
   });
 

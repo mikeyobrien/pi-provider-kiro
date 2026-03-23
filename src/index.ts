@@ -5,7 +5,7 @@
 import type { Api, Model, OAuthCredentials } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { getKiroCliCredentials } from "./kiro-cli.js";
-import { kiroModels } from "./models.js";
+import { filterModelsByRegion, kiroModels, resolveApiRegion } from "./models.js";
 import type { KiroCredentials } from "./oauth.js";
 import { loginKiro, refreshKiroToken } from "./oauth.js";
 import { streamKiro } from "./stream.js";
@@ -24,10 +24,15 @@ export default function (pi: ExtensionAPI) {
       getApiKey: (cred: OAuthCredentials) => cred.access,
       getCliCredentials: getKiroCliCredentials,
       modifyModels: (models: Model<Api>[], cred: OAuthCredentials) => {
-        const region = (cred as KiroCredentials).region || "us-east-1";
-        return models.map((m: Model<Api>) =>
-          m.provider === "kiro" ? { ...m, baseUrl: `https://q.${region}.amazonaws.com/generateAssistantResponse` } : m,
-        );
+        const apiRegion = resolveApiRegion((cred as KiroCredentials).region);
+        const kiroOnly = models.filter((m: Model<Api>) => m.provider === "kiro");
+        const nonKiro = models.filter((m: Model<Api>) => m.provider !== "kiro");
+        const modifiedKiro = filterModelsByRegion(kiroOnly, apiRegion).map((m: Model<Api>) => ({
+          ...m,
+          baseUrl: `https://q.${apiRegion}.amazonaws.com/generateAssistantResponse`,
+        }));
+
+        return [...nonKiro, ...modifiedKiro];
       },
       fetchUsage: fetchKiroUsage,
       // biome-ignore lint/suspicious/noExplicitAny: ProviderConfig.oauth doesn't include getCliCredentials but OAuthProviderInterface does

@@ -58,6 +58,16 @@ Once logged in, select any Kiro model in pi:
 
 Reasoning is automatically enabled for supported models. Use `/reasoning` to adjust the thinking budget.
 
+## Retry Behavior
+
+Generic transient retries such as HTTP `429` and `5xx` are handled by `pi-coding-agent` at the session layer.
+
+This provider only keeps local recovery for Kiro-specific cases:
+- `403` auth races, where it can refresh credentials from `kiro-cli`
+- first-token / stalled-stream recovery
+- empty-stream retries
+- non-retryable Kiro body markers like `MONTHLY_REQUEST_COUNT` and `INSUFFICIENT_MODEL_CAPACITY`
+
 ## Development
 
 ```bash
