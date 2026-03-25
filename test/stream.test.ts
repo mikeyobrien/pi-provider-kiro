@@ -629,24 +629,27 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
-  it("omits 429 from INSUFFICIENT_MODEL_CAPACITY errors to avoid outer auto-retry", async () => {
-    const mockFetch = vi.fn().mockResolvedValueOnce({
+  it("retries on INSUFFICIENT_MODEL_CAPACITY with backoff then fails", async () => {
+    const originalBase = retryConfig.capacityRetryBaseMs;
+    retryConfig.capacityRetryBaseMs = 10;
+
+    const mockFetch = vi.fn().mockResolvedValue({
       ok: false,
       status: 429,
       statusText: "Too Many Requests",
-      text: () => Promise.resolve("INSUFFICIENT_MODEL_CAPACITY"),
+      text: () => Promise.resolve('{"message":"I am experiencing high traffic, please try again shortly.","reason":"INSUFFICIENT_MODEL_CAPACITY"}'),
     });
     vi.stubGlobal("fetch", mockFetch);
 
     const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
     const events = await collect(stream);
 
-    expect(mockFetch).toHaveBeenCalledOnce();
+    expect(mockFetch).toHaveBeenCalledTimes(4); // 1 initial + 3 retries
     const error = events.find((e) => e.type === "error");
     expect(error).toBeDefined();
     expect(error?.type === "error" && error.error.errorMessage).toContain("INSUFFICIENT_MODEL_CAPACITY");
-    expect(error?.type === "error" && error.error.errorMessage).not.toContain("429");
 
+    retryConfig.capacityRetryBaseMs = originalBase;
     vi.unstubAllGlobals();
   });
 
