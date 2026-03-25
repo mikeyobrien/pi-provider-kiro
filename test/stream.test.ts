@@ -1539,61 +1539,9 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
-  it("retries on completely empty response (no text, no tool calls)", async () => {
-    // Simulates the degenerate API response: only contextUsage, no content or tools.
-    // Should retry up to maxRetries, then return without stalling.
+  it("throws error on empty response (no text, no tool calls)", async () => {
     const emptyResponse = '{"contextUsagePercentage":50}';
-    const goodResponse = '{"content":"recovered"}{"contextUsagePercentage":10}';
-
-    const mockFetch = vi
-      .fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        body: {
-          getReader: () => ({
-            read: vi
-              .fn()
-              .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(emptyResponse) })
-              .mockResolvedValueOnce({ done: true, value: undefined }),
-          }),
-        },
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        body: {
-          getReader: () => ({
-            read: vi
-              .fn()
-              .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(goodResponse) })
-              .mockResolvedValueOnce({ done: true, value: undefined }),
-          }),
-        },
-      });
-    vi.stubGlobal("fetch", mockFetch);
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
-    const events = await collect(stream);
-
-    // Should have retried: 2 fetch calls
-    expect(mockFetch).toHaveBeenCalledTimes(2);
-    const done = events.find((e) => e.type === "done");
-    expect(done).toBeDefined();
-    expect(done?.type === "done" && done.message.stopReason).toBe("stop");
-    expect(
-      done?.type === "done" &&
-        done.message.content.some((b) => b.type === "text" && (b as TextContent).text === "recovered"),
-    ).toBe(true);
-
-    warnSpy.mockRestore();
-    vi.unstubAllGlobals();
-  });
-
-  it("returns stop (not toolUse) after max retries on persistent empty responses", async () => {
-    const emptyResponse = '{"contextUsagePercentage":50}';
-
-    // All 4 attempts return empty — need a fresh reader for each call
-    const makeEmptyResponse = () => ({
+    const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       body: {
         getReader: () => ({
@@ -1604,29 +1552,45 @@ describe("Feature 9: Streaming Integration", () => {
         }),
       },
     });
-    const mockFetch = vi
-      .fn()
-      .mockResolvedValueOnce(makeEmptyResponse())
-      .mockResolvedValueOnce(makeEmptyResponse())
-      .mockResolvedValueOnce(makeEmptyResponse())
-      .mockResolvedValueOnce(makeEmptyResponse());
     vi.stubGlobal("fetch", mockFetch);
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
     const events = await collect(stream);
 
-    // 1 initial + 3 retries = 4 calls
-    expect(mockFetch).toHaveBeenCalledTimes(4);
-    const done = events.find((e) => e.type === "done");
-    expect(done).toBeDefined();
-    // Must be "stop", not "toolUse" — toolUse with empty content stalls the agent
-    expect(done?.type === "done" && done.reason).toBe("stop");
-    expect(done?.type === "done" && done.message.content).toHaveLength(0);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const error = events.find((e) => e.type === "error");
+    expect(error).toBeDefined();
+    expect(error?.type === "error" && error.error.errorMessage).toContain("empty response");
+    expect(error?.type === "error" && error.error.errorMessage).toContain("contextUsage: 50%");
 
-    warnSpy.mockRestore();
     vi.unstubAllGlobals();
-  }, 30000);
+  });
+
+  it("throws error with event list on persistent empty responses", async () => {
+    const emptyResponse = '{"contextUsagePercentage":50}';
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi
+            .fn()
+            .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(emptyResponse) })
+            .mockResolvedValueOnce({ done: true, value: undefined }),
+        }),
+      },
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const error = events.find((e) => e.type === "error");
+    expect(error).toBeDefined();
+    expect(error?.type === "error" && error.error.errorMessage).toContain("events: [contextUsage]");
+
+    vi.unstubAllGlobals();
+  });
 
   it("keeps non-consecutive duplicate content events", async () => {
     const mockFetch = mockFetchChunked([

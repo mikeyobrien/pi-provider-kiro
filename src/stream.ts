@@ -574,27 +574,17 @@ export function streamKiro(
         // Detect degenerate responses: the API returned 200 but produced no
         // usable content at all — no text and no tool calls (not even broken
         // ones). This happens when the stream is truncated early or the API
-        // returns only a contextUsage event. Retry with backoff.
+        // returns only a contextUsage event. Throw so pi's outer retry logic
+        // handles it (compaction, backoff, etc.).
         //
         // When tool calls *were* present but all got dropped (empty/unparseable
-        // input), don't retry — the API did respond, it just sent malformed
+        // input), don't throw — the API did respond, it just sent malformed
         // tool calls. Retrying would likely produce the same result. The
         // stopReason fix below prevents the agent loop stall.
         const hasText = textBlockIndex !== null && (output.content[textBlockIndex] as TextContent).text.length > 0;
         if (!hasText && !sawAnyToolCalls) {
-          if (retryCount < maxRetries) {
-            retryCount++;
-            const delayMs = exponentialBackoff(retryCount - 1, 1000, MAX_RETRY_DELAY);
-            console.warn(
-              `[pi-provider-kiro] Empty response (no text, no tool calls) — retrying (${retryCount}/${maxRetries}), contextUsage: ${(output.usage as unknown as Record<string, unknown>).contextPercent ?? "unknown"}%, events: [${receivedEventTypes.join(", ")}]`,
-            );
-            // Reset output content for the retry
-            output.content = [];
-            await abortableDelay(delayMs, options?.signal);
-            continue;
-          }
-          console.warn(
-            `[pi-provider-kiro] Empty response after ${maxRetries} retries — returning stopReason:"stop" to avoid agent loop stall`,
+          throw new Error(
+            `Kiro API error: empty response (no text, no tool calls), contextUsage: ${(output.usage as unknown as Record<string, unknown>).contextPercent ?? "unknown"}%, events: [${receivedEventTypes.join(", ")}]`,
           );
         }
         // Use emittedToolCalls (not toolCalls.length) to avoid stopReason:"toolUse"
