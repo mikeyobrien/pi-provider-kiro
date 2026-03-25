@@ -1592,6 +1592,33 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
+  it("throws context_length_exceeded on empty response with high context usage", async () => {
+    const emptyResponse = '{"contextUsagePercentage":95}';
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi
+            .fn()
+            .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(emptyResponse) })
+            .mockResolvedValueOnce({ done: true, value: undefined }),
+        }),
+      },
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const error = events.find((e) => e.type === "error");
+    expect(error).toBeDefined();
+    expect(error?.type === "error" && error.error.errorMessage).toContain("context_length_exceeded");
+    expect(error?.type === "error" && error.error.errorMessage).toContain("95%");
+
+    vi.unstubAllGlobals();
+  });
+
   it("keeps non-consecutive duplicate content events", async () => {
     const mockFetch = mockFetchChunked([
       '{"content":"A"}',

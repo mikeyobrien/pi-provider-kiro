@@ -583,8 +583,17 @@ export function streamKiro(
         // stopReason fix below prevents the agent loop stall.
         const hasText = textBlockIndex !== null && (output.content[textBlockIndex] as TextContent).text.length > 0;
         if (!hasText && !sawAnyToolCalls) {
+          const contextPct = (output.usage as unknown as Record<string, unknown>).contextPercent as number | undefined;
+          const eventsStr = `events: [${receivedEventTypes.join(", ")}]`;
+          // High context usage likely caused the empty response — treat as overflow
+          // so pi routes to compaction rather than retrying with the same context.
+          if (contextPct !== undefined && contextPct >= 90) {
+            throw new Error(
+              `Kiro API error: context_length_exceeded (empty response at ${contextPct}% context usage, ${eventsStr})`,
+            );
+          }
           throw new Error(
-            `Kiro API error: empty response (internal error — no text, no tool calls), contextUsage: ${(output.usage as unknown as Record<string, unknown>).contextPercent ?? "unknown"}%, events: [${receivedEventTypes.join(", ")}]`,
+            `Kiro API error: empty response (internal error — no text, no tool calls), contextUsage: ${contextPct ?? "unknown"}%, ${eventsStr}`,
           );
         }
         // Use emittedToolCalls (not toolCalls.length) to avoid stopReason:"toolUse"
