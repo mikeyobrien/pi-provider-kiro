@@ -584,7 +584,7 @@ export function streamKiro(
         const hasText = textBlockIndex !== null && (output.content[textBlockIndex] as TextContent).text.length > 0;
         if (!hasText && !sawAnyToolCalls) {
           throw new Error(
-            `Kiro API error: empty response (no text, no tool calls), contextUsage: ${(output.usage as unknown as Record<string, unknown>).contextPercent ?? "unknown"}%, events: [${receivedEventTypes.join(", ")}]`,
+            `Kiro API error: empty response (internal error — no text, no tool calls), contextUsage: ${(output.usage as unknown as Record<string, unknown>).contextPercent ?? "unknown"}%, events: [${receivedEventTypes.join(", ")}]`,
           );
         }
         // Use emittedToolCalls (not toolCalls.length) to avoid stopReason:"toolUse"
