@@ -190,7 +190,7 @@ export function streamKiro(
             }
           if (armContent || armToolUses.length > 0) {
             if (history.length > 0 && !history[history.length - 1].userInputMessage)
-              history.push({ userInputMessage: { content: "Continue", modelId: kiroModelId, origin: "AI_EDITOR" } });
+              history.push({ userInputMessage: { content: "", modelId: kiroModelId, origin: "AI_EDITOR" } });
             history.push({
               assistantResponseMessage: {
                 content: armContent,
@@ -216,7 +216,7 @@ export function streamKiro(
             const converted = convertImagesToKiro(toolResultImages);
             currentImages = currentImages ? [...currentImages, ...converted] : converted;
           }
-          currentContent = currentToolResults.length > 0 ? "Tool results provided." : "Continue";
+          currentContent = currentToolResults.length > 0 ? "" : "";
         } else if (firstMsg?.role === "toolResult") {
           const toolResultImages2: ImageContent[] = [];
           for (const m of currentMessages)
@@ -234,7 +234,7 @@ export function streamKiro(
             const converted = convertImagesToKiro(toolResultImages2);
             currentImages = currentImages ? [...currentImages, ...converted] : converted;
           }
-          currentContent = "Tool results provided.";
+          currentContent = "";
         } else if (firstMsg?.role === "user") {
           currentContent = typeof firstMsg.content === "string" ? firstMsg.content : getContentText(firstMsg);
           if (effectiveSystemPrompt && !systemPrepended)
@@ -259,7 +259,7 @@ export function streamKiro(
           if (imgs.length > 0) currentImages = convertImagesToKiro(imgs as ImageContent[]);
         }
         if (history.length > 0 && history[history.length - 1].userInputMessage)
-          history.push({ assistantResponseMessage: { content: "Continue" } });
+          history.push({ assistantResponseMessage: { content: "" } });
         const request: KiroRequest = {
           conversationState: {
             chatTriggerType: "MANUAL",
