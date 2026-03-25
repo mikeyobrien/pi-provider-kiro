@@ -637,7 +637,10 @@ describe("Feature 9: Streaming Integration", () => {
       ok: false,
       status: 429,
       statusText: "Too Many Requests",
-      text: () => Promise.resolve('{"message":"I am experiencing high traffic, please try again shortly.","reason":"INSUFFICIENT_MODEL_CAPACITY"}'),
+      text: () =>
+        Promise.resolve(
+          '{"message":"I am experiencing high traffic, please try again shortly.","reason":"INSUFFICIENT_MODEL_CAPACITY"}',
+        ),
     });
     vi.stubGlobal("fetch", mockFetch);
 

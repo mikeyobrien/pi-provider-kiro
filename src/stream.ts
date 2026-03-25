@@ -19,7 +19,14 @@ import { parseKiroEvents } from "./event-parser.js";
 import { addPlaceholderTools, HISTORY_LIMIT, truncateHistory } from "./history.js";
 import { getKiroCliCredentials } from "./kiro-cli.js";
 import { resolveKiroModel } from "./models.js";
-import { exponentialBackoff, isCapacityError, isNonRetryableBodyError, isTooBigError, MAX_RETRY_DELAY, retryConfig } from "./retry.js";
+import {
+  exponentialBackoff,
+  isCapacityError,
+  isNonRetryableBodyError,
+  isTooBigError,
+  MAX_RETRY_DELAY,
+  retryConfig,
+} from "./retry.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
 import { countTokens } from "./tokenizer.js";
 import {
@@ -76,9 +83,7 @@ function emitToolCall(
   stream: AssistantMessageEventStream,
 ): boolean {
   if (!state.input.trim()) {
-    console.warn(
-      `[pi-provider-kiro] Empty tool input for "${state.name}" (toolUseId: ${state.toolUseId}) — skipping`,
-    );
+    console.warn(`[pi-provider-kiro] Empty tool input for "${state.name}" (toolUseId: ${state.toolUseId}) — skipping`);
     return false;
   }
 
@@ -146,7 +151,8 @@ export function streamKiro(
       let retryCount = 0;
       const maxRetries = 3;
       while (retryCount <= maxRetries) {
-        if (options?.signal?.aborted) throw options.signal.reason ?? new DOMException("This operation was aborted", "AbortError");
+        if (options?.signal?.aborted)
+          throw options.signal.reason ?? new DOMException("This operation was aborted", "AbortError");
         const effectiveSystemPrompt = systemPrompt;
         const normalized = normalizeMessages(context.messages);
         const {
@@ -306,7 +312,8 @@ export function streamKiro(
         }
         // Re-check after fetch in case abort arrived between response
         // headers and our removeEventListener above.
-        if (options?.signal?.aborted) throw options.signal.reason ?? new DOMException("This operation was aborted", "AbortError");
+        if (options?.signal?.aborted)
+          throw options.signal.reason ?? new DOMException("This operation was aborted", "AbortError");
         if (!response.ok) {
           let errText = "";
           try {
@@ -351,7 +358,9 @@ export function streamKiro(
         let readerAbortCleanup: (() => void) | undefined;
         if (options?.signal && !options.signal.aborted) {
           const onAbort = () => {
-            try { reader.cancel().catch(() => {}); } catch {}
+            try {
+              reader.cancel().catch(() => {});
+            } catch {}
           };
           options.signal.addEventListener("abort", onAbort, { once: true });
           readerAbortCleanup = () => options.signal!.removeEventListener("abort", onAbort);

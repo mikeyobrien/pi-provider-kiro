@@ -56,7 +56,11 @@ describe("isNonRetryableBodyError", () => {
 
 describe("isCapacityError", () => {
   it("returns true for INSUFFICIENT_MODEL_CAPACITY", () => {
-    expect(isCapacityError('{"message":"I am experiencing high traffic, please try again shortly.","reason":"INSUFFICIENT_MODEL_CAPACITY"}')).toBe(true);
+    expect(
+      isCapacityError(
+        '{"message":"I am experiencing high traffic, please try again shortly.","reason":"INSUFFICIENT_MODEL_CAPACITY"}',
+      ),
+    ).toBe(true);
   });
 
   it("returns false for non-capacity errors", () => {

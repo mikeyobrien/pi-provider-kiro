@@ -142,9 +142,7 @@ describe("Thinking parser race conditions", () => {
   // ---- Race 7: multiple thinking blocks ----
 
   it("second thinking block tags don't corrupt text output", async () => {
-    const { events } = await run([
-      "<thinking>first</thinking>\n\nMiddle text<thinking>second</thinking>\n\nEnd",
-    ]);
+    const { events } = await run(["<thinking>first</thinking>\n\nMiddle text<thinking>second</thinking>\n\nEnd"]);
 
     expect(deltas(events, "thinking_delta")).toBe("first");
     // Second <thinking> block should appear as literal text (only first block parsed)
