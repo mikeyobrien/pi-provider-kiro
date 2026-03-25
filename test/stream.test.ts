@@ -597,7 +597,7 @@ describe("Feature 9: Streaming Integration", () => {
     // Verify tool results were sent in the request body
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     const currentMsg = body.conversationState.currentMessage.userInputMessage;
-    expect(currentMsg.content).toBe("");
+    expect(currentMsg.content).toBe(".");
     expect(currentMsg.userInputMessageContext?.toolResults).toHaveLength(1);
     expect(currentMsg.userInputMessageContext.toolResults[0].toolUseId).toBe("tc1");
 
