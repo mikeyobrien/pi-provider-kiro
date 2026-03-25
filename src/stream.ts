@@ -371,6 +371,7 @@ export function streamKiro(
         let lastContentData = "";
         let usageEvent: { inputTokens?: number; outputTokens?: number } | null = null;
         let receivedContextUsage = false;
+        const receivedEventTypes: string[] = [];
         const thinkingParser = thinkingEnabled ? new ThinkingTagParser(output, stream) : null;
         let textBlockIndex: number | null = null;
         let emittedToolCalls = 0;
@@ -430,6 +431,7 @@ export function streamKiro(
           // the stream is still actively flowing.
           resetIdle();
           for (const event of events) {
+            receivedEventTypes.push(event.type);
             if (event.type === "contextUsage") {
               const pct = event.data.contextUsagePercentage;
               output.usage.input = Math.round((pct / 100) * model.contextWindow);
@@ -584,7 +586,7 @@ export function streamKiro(
             retryCount++;
             const delayMs = exponentialBackoff(retryCount - 1, 1000, MAX_RETRY_DELAY);
             console.warn(
-              `[pi-provider-kiro] Empty response (no text, no tool calls) — retrying (${retryCount}/${maxRetries})`,
+              `[pi-provider-kiro] Empty response (no text, no tool calls) — retrying (${retryCount}/${maxRetries}), contextUsage: ${(output.usage as unknown as Record<string, unknown>).contextPercent ?? "unknown"}%, events: [${receivedEventTypes.join(", ")}]`,
             );
             // Reset output content for the retry
             output.content = [];
