@@ -135,7 +135,7 @@ export function buildHistory(
         origin: "AI_EDITOR",
         ...(images.length > 0 ? { images: convertImagesToKiro(images) } : {}),
       };
-      if (history[history.length - 1]?.userInputMessage) history.push({ assistantResponseMessage: { content: "." } });
+      if (history[history.length - 1]?.userInputMessage) history.push({ assistantResponseMessage: { content: " " } });
       history.push({ userInputMessage: uim });
     } else if (msg.role === "assistant") {
       let armContent = "";
@@ -157,7 +157,10 @@ export function buildHistory(
       }
       if (!armContent && armToolUses.length === 0) continue;
       history.push({
-        assistantResponseMessage: { content: armContent, ...(armToolUses.length > 0 ? { toolUses: armToolUses } : {}) },
+        assistantResponseMessage: {
+          content: armContent || " ",
+          ...(armToolUses.length > 0 ? { toolUses: armToolUses } : {}),
+        },
       });
     } else if (msg.role === "toolResult") {
       const trMsg = msg as ToolResultMessage;
@@ -184,10 +187,10 @@ export function buildHistory(
         j++;
       }
       i = j - 1;
-      if (history[history.length - 1]?.userInputMessage) history.push({ assistantResponseMessage: { content: "." } });
+      if (history[history.length - 1]?.userInputMessage) history.push({ assistantResponseMessage: { content: " " } });
       history.push({
         userInputMessage: {
-          content: ".",
+          content: " ",
           modelId,
           origin: "AI_EDITOR",
           ...(trImages.length > 0 ? { images: convertImagesToKiro(trImages) } : {}),
