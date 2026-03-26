@@ -190,10 +190,10 @@ export function streamKiro(
             }
           if (armContent || armToolUses.length > 0) {
             if (history.length > 0 && !history[history.length - 1].userInputMessage)
-              history.push({ userInputMessage: { content: " ", modelId: kiroModelId, origin: "AI_EDITOR" } });
+              history.push({ userInputMessage: { content: "", modelId: kiroModelId, origin: "AI_EDITOR" } });
             history.push({
               assistantResponseMessage: {
-                content: armContent || " ",
+                content: armContent,
                 ...(armToolUses.length > 0 ? { toolUses: armToolUses } : {}),
               },
             });
@@ -216,7 +216,7 @@ export function streamKiro(
             const converted = convertImagesToKiro(toolResultImages);
             currentImages = currentImages ? [...currentImages, ...converted] : converted;
           }
-          currentContent = " ";
+          currentContent = currentToolResults.length > 0 ? "" : "";
         } else if (firstMsg?.role === "toolResult") {
           const toolResultImages2: ImageContent[] = [];
           for (const m of currentMessages)
@@ -234,7 +234,7 @@ export function streamKiro(
             const converted = convertImagesToKiro(toolResultImages2);
             currentImages = currentImages ? [...currentImages, ...converted] : converted;
           }
-          currentContent = " ";
+          currentContent = "";
         } else if (firstMsg?.role === "user") {
           currentContent = typeof firstMsg.content === "string" ? firstMsg.content : getContentText(firstMsg);
           if (effectiveSystemPrompt && !systemPrepended)
@@ -259,7 +259,7 @@ export function streamKiro(
           if (imgs.length > 0) currentImages = convertImagesToKiro(imgs as ImageContent[]);
         }
         if (history.length > 0 && history[history.length - 1].userInputMessage)
-          history.push({ assistantResponseMessage: { content: " " } });
+          history.push({ assistantResponseMessage: { content: "" } });
         const request: KiroRequest = {
           conversationState: {
             chatTriggerType: "MANUAL",
