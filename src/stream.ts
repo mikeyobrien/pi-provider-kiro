@@ -19,7 +19,14 @@ import { parseKiroEvents } from "./event-parser.js";
 import { addPlaceholderTools, HISTORY_LIMIT, truncateHistory } from "./history.js";
 import { getKiroCliCredentials } from "./kiro-cli.js";
 import { resolveKiroModel } from "./models.js";
-import { exponentialBackoff, isNonRetryableBodyError, isTooBigError, MAX_RETRY_DELAY, retryConfig } from "./retry.js";
+import {
+  exponentialBackoff,
+  isCapacityError,
+  isNonRetryableBodyError,
+  isTooBigError,
+  MAX_RETRY_DELAY,
+  retryConfig,
+} from "./retry.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
 import { countTokens } from "./tokenizer.js";
 import {
@@ -76,9 +83,7 @@ function emitToolCall(
   stream: AssistantMessageEventStream,
 ): boolean {
   if (!state.input.trim()) {
-    console.warn(
-      `[pi-provider-kiro] Skipping tool call "${state.name}" (toolUseId: ${state.toolUseId}): empty input — stream likely truncated`,
-    );
+    console.warn(`[pi-provider-kiro] Empty tool input for "${state.name}" (toolUseId: ${state.toolUseId}) — skipping`);
     return false;
   }
 
@@ -146,7 +151,8 @@ export function streamKiro(
       let retryCount = 0;
       const maxRetries = 3;
       while (retryCount <= maxRetries) {
-        if (options?.signal?.aborted) throw options.signal.reason;
+        if (options?.signal?.aborted)
+          throw options.signal.reason ?? new DOMException("This operation was aborted", "AbortError");
         const effectiveSystemPrompt = systemPrompt;
         const normalized = normalizeMessages(context.messages);
         const {
@@ -184,7 +190,7 @@ export function streamKiro(
             }
           if (armContent || armToolUses.length > 0) {
             if (history.length > 0 && !history[history.length - 1].userInputMessage)
-              history.push({ userInputMessage: { content: "Continue", modelId: kiroModelId, origin: "AI_EDITOR" } });
+              history.push({ userInputMessage: { content: "", modelId: kiroModelId, origin: "AI_EDITOR" } });
             history.push({
               assistantResponseMessage: {
                 content: armContent,
@@ -210,7 +216,7 @@ export function streamKiro(
             const converted = convertImagesToKiro(toolResultImages);
             currentImages = currentImages ? [...currentImages, ...converted] : converted;
           }
-          currentContent = currentToolResults.length > 0 ? "Tool results provided." : "Continue";
+          currentContent = currentToolResults.length > 0 ? "" : "";
         } else if (firstMsg?.role === "toolResult") {
           const toolResultImages2: ImageContent[] = [];
           for (const m of currentMessages)
@@ -228,7 +234,7 @@ export function streamKiro(
             const converted = convertImagesToKiro(toolResultImages2);
             currentImages = currentImages ? [...currentImages, ...converted] : converted;
           }
-          currentContent = "Tool results provided.";
+          currentContent = "";
         } else if (firstMsg?.role === "user") {
           currentContent = typeof firstMsg.content === "string" ? firstMsg.content : getContentText(firstMsg);
           if (effectiveSystemPrompt && !systemPrepended)
@@ -253,7 +259,7 @@ export function streamKiro(
           if (imgs.length > 0) currentImages = convertImagesToKiro(imgs as ImageContent[]);
         }
         if (history.length > 0 && history[history.length - 1].userInputMessage)
-          history.push({ assistantResponseMessage: { content: "Continue" } });
+          history.push({ assistantResponseMessage: { content: "" } });
         const request: KiroRequest = {
           conversationState: {
             chatTriggerType: "MANUAL",
@@ -272,21 +278,42 @@ export function streamKiro(
         };
         const mid = crypto.randomUUID().replace(/-/g, "");
         const ua = `aws-sdk-js/1.0.0 ua/2.1 os/nodejs lang/js api/codewhispererruntime#1.0.0 m/E KiroIDE-0.75.0-${mid}`;
-        const response = await fetch(endpoint, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "application/json",
-            Authorization: `Bearer ${accessToken}`,
-            "amz-sdk-invocation-id": crypto.randomUUID(),
-            "amz-sdk-request": "attempt=1; max=1",
-            "x-amzn-kiro-agent-mode": "vibe",
-            "x-amz-user-agent": ua,
-            "user-agent": ua,
-          },
-          body: JSON.stringify(request),
-          signal: options?.signal,
-        });
+        // Use a local AbortController for fetch so we control teardown.
+        // Passing the caller's signal directly causes undici to wire
+        // internal abort listeners on the body stream — when the signal
+        // fires after response headers are received, those listeners can
+        // produce unhandled rejections that crash the process.
+        const fetchController = new AbortController();
+        const propagateAbort = () => fetchController.abort();
+        options?.signal?.addEventListener("abort", propagateAbort, { once: true });
+
+        let response: Response;
+        try {
+          response = await fetch(endpoint, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "application/json",
+              Authorization: `Bearer ${accessToken}`,
+              "amz-sdk-invocation-id": crypto.randomUUID(),
+              "amz-sdk-request": "attempt=1; max=1",
+              "x-amzn-kiro-agent-mode": "vibe",
+              "x-amz-user-agent": ua,
+              "user-agent": ua,
+            },
+            body: JSON.stringify(request),
+            signal: fetchController.signal,
+          });
+        } finally {
+          // Disconnect propagation — from here on we handle abort by
+          // cancelling the reader (which resolves pending reads cleanly
+          // instead of rejecting with AbortError).
+          options?.signal?.removeEventListener("abort", propagateAbort);
+        }
+        // Re-check after fetch in case abort arrived between response
+        // headers and our removeEventListener above.
+        if (options?.signal?.aborted)
+          throw options.signal.reason ?? new DOMException("This operation was aborted", "AbortError");
         if (!response.ok) {
           let errText = "";
           try {
@@ -304,6 +331,12 @@ export function streamKiro(
             await abortableDelay(delayMs, options?.signal);
             continue;
           }
+          if (isCapacityError(errText) && retryCount < maxRetries) {
+            retryCount++;
+            const delayMs = exponentialBackoff(retryCount - 1, retryConfig.capacityRetryBaseMs, MAX_RETRY_DELAY);
+            await abortableDelay(delayMs, options?.signal);
+            continue;
+          }
           // Avoid pi-coding-agent's outer auto-retry from treating known
           // Kiro quota/capacity body markers as generic retryable 429s.
           if (isNonRetryableBodyError(errText)) {
@@ -318,12 +351,27 @@ export function streamKiro(
         stream.push({ type: "start", partial: output });
         const reader = response.body?.getReader();
         if (!reader) throw new Error("No response body");
+
+        // Cancel the reader (not abort) when the caller's signal fires.
+        // reader.cancel() causes pending read() calls to resolve with
+        // { done: true } instead of rejecting — no unhandled rejections.
+        let readerAbortCleanup: (() => void) | undefined;
+        if (options?.signal && !options.signal.aborted) {
+          const onAbort = () => {
+            try {
+              reader.cancel().catch(() => {});
+            } catch {}
+          };
+          options.signal.addEventListener("abort", onAbort, { once: true });
+          readerAbortCleanup = () => options.signal!.removeEventListener("abort", onAbort);
+        }
         const decoder = new TextDecoder();
         let buffer = "";
         let totalContent = "";
         let lastContentData = "";
         let usageEvent: { inputTokens?: number; outputTokens?: number } | null = null;
         let receivedContextUsage = false;
+        const receivedEventTypes: string[] = [];
         const thinkingParser = thinkingEnabled ? new ThinkingTagParser(output, stream) : null;
         let textBlockIndex: number | null = null;
         let emittedToolCalls = 0;
@@ -336,7 +384,7 @@ export function streamKiro(
           idleTimer = setTimeout(() => {
             idleCancelled = true;
             try {
-              reader.cancel();
+              reader.cancel().catch(() => {});
             } catch {}
           }, IDLE_TIMEOUT);
         };
@@ -348,16 +396,21 @@ export function streamKiro(
         while (true) {
           let readResult: ReadableStreamReadResult<Uint8Array>;
           if (!gotFirstToken) {
-            // First-token timeout: race the first read against a deadline
+            // First-token timeout: race the first read against a deadline.
+            // Attach a no-op .catch() to the read promise so that if the
+            // timeout (or abort) wins the race and the read later rejects,
+            // the rejection doesn't become unhandled.
+            const readPromise = reader.read();
+            readPromise.catch(() => {});
             const result = await Promise.race([
-              reader.read(),
+              readPromise,
               new Promise<typeof FIRST_TOKEN_SENTINEL>((resolve) =>
                 setTimeout(() => resolve(FIRST_TOKEN_SENTINEL), retryConfig.firstTokenTimeoutMs),
               ),
             ]);
             if (result === FIRST_TOKEN_SENTINEL) {
               try {
-                reader.cancel();
+                reader.cancel().catch(() => {});
               } catch {}
               firstTokenTimedOut = true;
               break;
@@ -378,6 +431,7 @@ export function streamKiro(
           // the stream is still actively flowing.
           resetIdle();
           for (const event of events) {
+            receivedEventTypes.push(event.type);
             if (event.type === "contextUsage") {
               const pct = event.data.contextUsagePercentage;
               output.usage.input = Math.round((pct / 100) * model.contextWindow);
@@ -444,6 +498,14 @@ export function streamKiro(
           }
         }
         if (idleTimer) clearTimeout(idleTimer);
+        readerAbortCleanup?.();
+        // The reader was cancelled (not aborted) by our signal handler,
+        // so reader.read() resolved with { done: true } instead of
+        // rejecting. Detect this and throw so the catch block sets
+        // stopReason:"aborted".
+        if (options?.signal?.aborted) {
+          throw options.signal.reason ?? new DOMException("This operation was aborted", "AbortError");
+        }
         if (firstTokenTimedOut || idleCancelled || streamError) {
           // Timed out or received error mid-stream: retry with backoff
           if (retryCount < maxRetries) {
@@ -512,27 +574,26 @@ export function streamKiro(
         // Detect degenerate responses: the API returned 200 but produced no
         // usable content at all — no text and no tool calls (not even broken
         // ones). This happens when the stream is truncated early or the API
-        // returns only a contextUsage event. Retry with backoff.
+        // returns only a contextUsage event. Throw so pi's outer retry logic
+        // handles it (compaction, backoff, etc.).
         //
         // When tool calls *were* present but all got dropped (empty/unparseable
-        // input), don't retry — the API did respond, it just sent malformed
+        // input), don't throw — the API did respond, it just sent malformed
         // tool calls. Retrying would likely produce the same result. The
         // stopReason fix below prevents the agent loop stall.
         const hasText = textBlockIndex !== null && (output.content[textBlockIndex] as TextContent).text.length > 0;
         if (!hasText && !sawAnyToolCalls) {
-          if (retryCount < maxRetries) {
-            retryCount++;
-            const delayMs = exponentialBackoff(retryCount - 1, 1000, MAX_RETRY_DELAY);
-            console.warn(
-              `[pi-provider-kiro] Empty response (no text, no tool calls) — retrying (${retryCount}/${maxRetries})`,
+          const contextPct = (output.usage as unknown as Record<string, unknown>).contextPercent as number | undefined;
+          const eventsStr = `events: [${receivedEventTypes.join(", ")}]`;
+          // High context usage likely caused the empty response — treat as overflow
+          // so pi routes to compaction rather than retrying with the same context.
+          if (contextPct !== undefined && contextPct >= 90) {
+            throw new Error(
+              `Kiro API error: context_length_exceeded (empty response at ${contextPct}% context usage, ${eventsStr})`,
             );
-            // Reset output content for the retry
-            output.content = [];
-            await abortableDelay(delayMs, options?.signal);
-            continue;
           }
-          console.warn(
-            `[pi-provider-kiro] Empty response after ${maxRetries} retries — returning stopReason:"stop" to avoid agent loop stall`,
+          throw new Error(
+            `Kiro API error: empty response (internal error — no text, no tool calls), contextUsage: ${contextPct ?? "unknown"}%, ${eventsStr}`,
           );
         }
         // Use emittedToolCalls (not toolCalls.length) to avoid stopReason:"toolUse"

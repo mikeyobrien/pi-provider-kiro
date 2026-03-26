@@ -135,8 +135,7 @@ export function buildHistory(
         origin: "AI_EDITOR",
         ...(images.length > 0 ? { images: convertImagesToKiro(images) } : {}),
       };
-      if (history[history.length - 1]?.userInputMessage)
-        history.push({ assistantResponseMessage: { content: "Continue" } });
+      if (history[history.length - 1]?.userInputMessage) history.push({ assistantResponseMessage: { content: "" } });
       history.push({ userInputMessage: uim });
     } else if (msg.role === "assistant") {
       let armContent = "";
@@ -185,8 +184,7 @@ export function buildHistory(
         j++;
       }
       i = j - 1;
-      if (history[history.length - 1]?.userInputMessage)
-        history.push({ assistantResponseMessage: { content: "Continue" } });
+      if (history[history.length - 1]?.userInputMessage) history.push({ assistantResponseMessage: { content: "" } });
       history.push({
         userInputMessage: {
           content: "Tool results provided.",

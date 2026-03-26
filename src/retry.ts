@@ -9,6 +9,7 @@ export const FIRST_TOKEN_TIMEOUT = 90_000;
 // Mutable config for values that tests need to override
 export const retryConfig = {
   firstTokenTimeoutMs: FIRST_TOKEN_TIMEOUT,
+  capacityRetryBaseMs: 2000,
 };
 
 export function exponentialBackoff(attempt: number, baseMs: number, maxMs: number): number {
@@ -18,7 +19,8 @@ export function exponentialBackoff(attempt: number, baseMs: number, maxMs: numbe
 export const MAX_RETRY_DELAY = 10_000;
 
 export const TOO_BIG_PATTERNS = ["CONTENT_LENGTH_EXCEEDS_THRESHOLD", "Input is too long", "Improperly formed"];
-const NON_RETRYABLE_BODY_PATTERNS = ["MONTHLY_REQUEST_COUNT", "INSUFFICIENT_MODEL_CAPACITY"];
+const NON_RETRYABLE_BODY_PATTERNS = ["MONTHLY_REQUEST_COUNT"];
+const CAPACITY_ERROR_PATTERNS = ["INSUFFICIENT_MODEL_CAPACITY"];
 
 /** Check whether an HTTP error represents a "request too large" condition. */
 export function isTooBigError(status: number, errorText: string): boolean {
@@ -28,4 +30,9 @@ export function isTooBigError(status: number, errorText: string): boolean {
 /** Check whether the response body contains a Kiro-specific non-retryable marker. */
 export function isNonRetryableBodyError(errorText: string): boolean {
   return NON_RETRYABLE_BODY_PATTERNS.some((p) => errorText.includes(p));
+}
+
+/** Check whether the response body indicates a transient capacity error worth retrying. */
+export function isCapacityError(errorText: string): boolean {
+  return CAPACITY_ERROR_PATTERNS.some((p) => errorText.includes(p));
 }

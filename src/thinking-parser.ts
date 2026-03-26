@@ -37,6 +37,8 @@ export class ThinkingTagParser {
   private thinkingBlockIndex: number | null = null;
   private textBlockIndex: number | null = null;
   private activeEndTag: string = THINKING_END_TAG;
+  /** Number of leading \n chars still to strip after a closing thinking tag. */
+  private separatorNewlinesRemaining = 0;
 
   constructor(
     private output: AssistantMessage,
@@ -64,24 +66,26 @@ export class ThinkingTagParser {
   }
 
   finalize(): void {
-    if (this.textBuffer.length === 0) return;
-    if (this.inThinking && this.thinkingBlockIndex !== null) {
-      const block = this.output.content[this.thinkingBlockIndex] as ThinkingContent;
-      block.thinking += this.textBuffer;
-      this.stream.push({
-        type: "thinking_delta",
-        contentIndex: this.thinkingBlockIndex,
-        delta: this.textBuffer,
-        partial: this.output,
-      });
-      this.stream.push({
-        type: "thinking_end",
-        contentIndex: this.thinkingBlockIndex,
-        content: block.thinking,
-        partial: this.output,
-      });
+    // Strip any remaining separator newlines from the thinking→text boundary.
+    this.stripSeparatorNewlines();
+    if (this.textBuffer.length === 0 && !this.inThinking) return;
+    if (this.inThinking) {
+      // Bug fix: when all thinking content is shorter than MAX_CLOSE_TAG_LEN,
+      // emitThinking() was never called during streaming (safeLen stayed 0),
+      // so thinkingBlockIndex is null. Flush held-back content as thinking,
+      // not text.
+      if (this.textBuffer.length > 0) this.emitThinking(this.textBuffer);
+      if (this.thinkingBlockIndex !== null) {
+        const block = this.output.content[this.thinkingBlockIndex] as ThinkingContent;
+        this.stream.push({
+          type: "thinking_end",
+          contentIndex: this.thinkingBlockIndex,
+          content: block.thinking,
+          partial: this.output,
+        });
+      }
     } else {
-      this.emitText(this.textBuffer);
+      if (this.textBuffer.length > 0) this.emitText(this.textBuffer);
     }
     this.textBuffer = "";
   }
@@ -123,19 +127,23 @@ export class ThinkingTagParser {
     const endPos = this.textBuffer.indexOf(this.activeEndTag);
     if (endPos !== -1) {
       if (endPos > 0) this.emitThinking(this.textBuffer.slice(0, endPos));
-      if (this.thinkingBlockIndex !== null) {
-        const block = this.output.content[this.thinkingBlockIndex] as ThinkingContent;
-        this.stream.push({
-          type: "thinking_end",
-          contentIndex: this.thinkingBlockIndex,
-          content: block.thinking,
-          partial: this.output,
-        });
-      }
+      // Ensure thinking block exists even if empty (endPos === 0), so that
+      // thinking_start/thinking_end events are always emitted as a pair.
+      if (this.thinkingBlockIndex === null) this.initThinkingBlock();
+      const block = this.output.content[this.thinkingBlockIndex!] as ThinkingContent;
+      this.stream.push({
+        type: "thinking_end",
+        contentIndex: this.thinkingBlockIndex!,
+        content: block.thinking,
+        partial: this.output,
+      });
       this.textBuffer = this.textBuffer.slice(endPos + this.activeEndTag.length);
       this.inThinking = false;
       this.thinkingExtracted = true;
-      if (this.textBuffer.startsWith("\n\n")) this.textBuffer = this.textBuffer.slice(2);
+      // Mark that we need to strip up to 2 newlines separating thinking from text.
+      // They may arrive in the same buffer, a later chunk, or one char at a time.
+      this.separatorNewlinesRemaining = 2;
+      this.stripSeparatorNewlines();
       return;
     }
 
@@ -148,8 +156,21 @@ export class ThinkingTagParser {
   }
 
   private processAfterThinking(): void {
-    this.emitText(this.textBuffer);
+    this.stripSeparatorNewlines();
+    if (this.textBuffer.length > 0) this.emitText(this.textBuffer);
     this.textBuffer = "";
+  }
+
+  /** Strip up to separatorNewlinesRemaining leading \n chars from the buffer. */
+  private stripSeparatorNewlines(): void {
+    while (this.separatorNewlinesRemaining > 0 && this.textBuffer.startsWith("\n")) {
+      this.textBuffer = this.textBuffer.slice(1);
+      this.separatorNewlinesRemaining--;
+    }
+    // If the next char is not \n, stop trying (the separator is incomplete or absent)
+    if (this.textBuffer.length > 0 && !this.textBuffer.startsWith("\n")) {
+      this.separatorNewlinesRemaining = 0;
+    }
   }
 
   private emitText(text: string): void {
@@ -164,18 +185,21 @@ export class ThinkingTagParser {
     this.stream.push({ type: "text_delta", contentIndex: this.textBlockIndex, delta: text, partial: this.output });
   }
 
+  private initThinkingBlock(): void {
+    if (this.thinkingBlockIndex !== null) return;
+    this.thinkingBlockIndex = this.output.content.length;
+    this.output.content.push({ type: "thinking", thinking: "" });
+    this.stream.push({ type: "thinking_start", contentIndex: this.thinkingBlockIndex, partial: this.output });
+  }
+
   private emitThinking(thinking: string): void {
     if (!thinking) return;
-    if (this.thinkingBlockIndex === null) {
-      this.thinkingBlockIndex = this.output.content.length;
-      this.output.content.push({ type: "thinking", thinking: "" });
-      this.stream.push({ type: "thinking_start", contentIndex: this.thinkingBlockIndex, partial: this.output });
-    }
-    const block = this.output.content[this.thinkingBlockIndex] as ThinkingContent;
+    this.initThinkingBlock();
+    const block = this.output.content[this.thinkingBlockIndex!] as ThinkingContent;
     block.thinking += thinking;
     this.stream.push({
       type: "thinking_delta",
-      contentIndex: this.thinkingBlockIndex,
+      contentIndex: this.thinkingBlockIndex!,
       delta: thinking,
       partial: this.output,
     });
