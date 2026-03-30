@@ -1045,7 +1045,7 @@ describe("Feature 9: Streaming Integration", () => {
           body: {
             getReader: () => ({
               read: () => new Promise(() => {}), // never resolves
-              cancel: vi.fn(),
+              cancel: vi.fn().mockResolvedValue(undefined),
             }),
           },
         };
@@ -1076,6 +1076,61 @@ describe("Feature 9: Streaming Integration", () => {
 
     retryConfig.firstTokenTimeoutMs = originalTimeout;
     vi.unstubAllGlobals();
+  });
+
+  it("does not produce unhandled rejection when reader.cancel() rejects", async () => {
+    // Regression: reader.cancel() returns a Promise, but the old code wrapped
+    // it in try/catch which only catches synchronous throws. If cancel()
+    // returned a rejected promise (e.g. stream already errored from abort),
+    // it became an unhandled rejection that crashed the Node process.
+    const originalTimeout = retryConfig.firstTokenTimeoutMs;
+    retryConfig.firstTokenTimeoutMs = 50;
+
+    const abortController = new AbortController();
+
+    // Temporarily remove vitest's unhandledRejection listeners so ours fires
+    const existingListeners = process.rawListeners("unhandledRejection") as ((...args: unknown[]) => void)[];
+    process.removeAllListeners("unhandledRejection");
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+
+    // reader.cancel() returns a rejected promise — simulates cancel on an
+    // already-errored stream (common when abort fires mid-read).
+    const cancelError = new Error("stream already errored");
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: () => new Promise(() => {}), // never resolves → timeout wins
+          cancel: vi.fn().mockRejectedValue(cancelError),
+        }),
+      },
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), {
+      apiKey: "tok",
+      signal: abortController.signal,
+    });
+
+    // Abort after the first-token timeout fires to cut through retry delays
+    setTimeout(() => abortController.abort(), 120);
+
+    const events = await collect(stream);
+
+    // Let microtasks / unhandled rejections surface
+    await new Promise((r) => setTimeout(r, 100));
+
+    process.off("unhandledRejection", onUnhandled);
+    // Restore vitest's listeners
+    for (const l of existingListeners) process.on("unhandledRejection", l);
+    retryConfig.firstTokenTimeoutMs = originalTimeout;
+    vi.unstubAllGlobals();
+
+    expect(events.find((e) => e.type === "error" || e.type === "done")).toBeDefined();
+    expect(unhandled).toEqual([]);
   });
 
   // =========================================================================
