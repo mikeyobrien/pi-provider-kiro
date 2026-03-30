@@ -76,10 +76,10 @@ function emitToolCall(
   stream: AssistantMessageEventStream,
 ): boolean {
   if (!state.input.trim()) {
-    console.warn(
-      `[pi-provider-kiro] Skipping tool call "${state.name}" (toolUseId: ${state.toolUseId}): empty input — stream likely truncated`,
-    );
-    return false;
+    // Kiro API omits the input payload when the model calls a tool with no
+    // arguments (e.g. mcp({})). Treat empty input as an empty object rather
+    // than skipping — these are valid zero-arg tool calls, not truncations.
+    state.input = "{}";
   }
 
   let args: Record<string, unknown>;
@@ -335,9 +335,7 @@ export function streamKiro(
           if (idleTimer) clearTimeout(idleTimer);
           idleTimer = setTimeout(() => {
             idleCancelled = true;
-            try {
-              reader.cancel();
-            } catch {}
+            void reader.cancel().catch(() => {});
           }, IDLE_TIMEOUT);
         };
         let gotFirstToken = false;
@@ -348,9 +346,13 @@ export function streamKiro(
         while (true) {
           let readResult: ReadableStreamReadResult<Uint8Array>;
           if (!gotFirstToken) {
-            // First-token timeout: race the first read against a deadline
+            // First-token timeout: race the first read against a deadline.
+            // Keep a reference to the read promise so we can suppress its
+            // rejection if the timeout wins — otherwise an abort that fires
+            // after the race settles leaves a dangling rejected promise.
+            const readPromise = reader.read();
             const result = await Promise.race([
-              reader.read(),
+              readPromise,
               new Promise<typeof FIRST_TOKEN_SENTINEL>((resolve) =>
                 setTimeout(() => resolve(FIRST_TOKEN_SENTINEL), retryConfig.firstTokenTimeoutMs),
               ),
@@ -435,9 +437,7 @@ export function streamKiro(
               // API sent an error mid-stream (throttling, internal error, etc.)
               const errMsg = event.data.message ? `${event.data.error}: ${event.data.message}` : event.data.error;
               streamError = errMsg;
-              try {
-                reader.cancel();
-              } catch {}
+              void reader.cancel().catch(() => {});
               break;
             }
             // followupPrompt events are intentionally ignored
