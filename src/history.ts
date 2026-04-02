@@ -15,6 +15,9 @@ export function stripHistoryImages(history: KiroHistoryEntry[]): KiroHistoryEntr
 }
 
 export function sanitizeHistory(history: KiroHistoryEntry[]): KiroHistoryEntry[] {
+  // Strip leading entries that would make the history invalid
+  while (history.length > 0 && (!history[0]?.userInputMessage || history[0].userInputMessage.userInputMessageContext?.toolResults))
+    history = history.slice(1);
   const result: KiroHistoryEntry[] = [];
   for (let i = 0; i < history.length; i++) {
     const m = history[i];
@@ -32,10 +35,7 @@ export function sanitizeHistory(history: KiroHistoryEntry[]): KiroHistoryEntry[]
       result.push(m);
     }
   }
-  if (result.length > 0) {
-    const first = result[0];
-    if (!first?.userInputMessage || first.userInputMessage.userInputMessageContext?.toolResults) return [];
-  }
+  // Leading invalid entries already stripped above
   return result;
 }
 

@@ -58,6 +58,33 @@ describe("Feature 6: History Management", () => {
       expect(sanitizeHistory(h)).toHaveLength(0);
     });
 
+    it("strips leading toolResults entry and keeps subsequent valid entries (truncation bug)", () => {
+      // Reproduces the 25% context wipe bug: after truncation the first entry is a
+      // toolResults user message; the old code returned [] nuking all remaining history.
+      const h = [
+        userEntry("tool results", [{ toolUseId: "tc1", content: [{ text: "done" }], status: "success" }]),
+        userEntry("what time is it?"),
+        assistantEntry("It is noon."),
+      ];
+      const r = sanitizeHistory(h);
+      expect(r.length).toBeGreaterThan(0);
+      expect(r[0].userInputMessage).toBeDefined();
+      expect(r[0].userInputMessage?.userInputMessageContext?.toolResults).toBeUndefined();
+    });
+
+    it("strips leading assistant entry and keeps subsequent valid entries", () => {
+      // After truncation the first surviving entry may be an assistant message when
+      // the paired user message was shifted out.
+      const h = [
+        assistantEntry("stale assistant"),
+        userEntry("new user message"),
+        assistantEntry("response"),
+      ];
+      const r = sanitizeHistory(h);
+      expect(r.length).toBeGreaterThan(0);
+      expect(r[0].userInputMessage).toBeDefined();
+    });
+
     it("ensures first entry is a userInputMessage", () => {
       const h = [assistantEntry("stale"), userEntry("hi")];
       const r = sanitizeHistory(h);
