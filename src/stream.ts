@@ -145,6 +145,7 @@ export function streamKiro(
       }
       let retryCount = 0;
       const maxRetries = 3;
+      const conversationId = options?.sessionId ?? crypto.randomUUID();
       while (retryCount <= maxRetries) {
         if (options?.signal?.aborted) throw options.signal.reason;
         const effectiveSystemPrompt = systemPrompt;
@@ -257,7 +258,7 @@ export function streamKiro(
         const request: KiroRequest = {
           conversationState: {
             chatTriggerType: "MANUAL",
-            conversationId: crypto.randomUUID(),
+            conversationId,
             currentMessage: {
               userInputMessage: {
                 content: sanitizeSurrogates(currentContent),

@@ -1779,4 +1779,22 @@ describe("Feature 9: Streaming Integration", () => {
 
     vi.unstubAllGlobals();
   });
+
+  // =========================================================================
+  // conversationId uses sessionId when provided
+  // =========================================================================
+
+  it("uses options.sessionId as conversationId when provided", async () => {
+    const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":5}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    const sessionId = "stable-session-id-1234";
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok", sessionId });
+    await collect(stream);
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.conversationState.conversationId).toBe(sessionId);
+
+    vi.unstubAllGlobals();
+  });
 });
