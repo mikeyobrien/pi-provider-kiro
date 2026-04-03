@@ -1,0 +1,7 @@
+# Normalise line endings to LF in the repository and working copy.
+# This prevents CRLF noise on Windows checkouts and keeps Biome happy.
+* text=auto eol=lf
+*.ts  text eol=lf
+*.js  text eol=lf
+*.json text eol=lf
+*.md  text eol=lf
