@@ -10,6 +10,7 @@
 
 import { execFileSync } from "node:child_process";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@mariozechner/pi-ai";
+import { getKiroIdeCredentials, getKiroIdeCredentialsAllowExpired } from "./kiro-ide.js";
 
 export const SSO_OIDC_ENDPOINT = "https://oidc.us-east-1.amazonaws.com";
 export const BUILDER_ID_START_URL = "https://view.awsapps.com/start";
@@ -51,8 +52,18 @@ export async function loginKiro(
     return loginViaKiroCli(callbacks, preferredMethod);
   }
 
-  // For "auto" or "builder-id", check for existing kiro-cli credentials
-  // Prefer social token if available (user explicitly logged in that way)
+  // 1. Kiro IDE token (~/.aws/sso/cache/kiro-auth-token.json)
+  //    Checked first because the IDE keeps it continuously fresh and it already
+  //    covers IAM Identity Center logins — no extra prompts needed.
+  const ideCreds = getKiroIdeCredentials();
+  if (ideCreds && (preferredMethod === "auto" || preferredMethod === "builder-id")) {
+    (callbacks as unknown as { onProgress?: (msg: string) => void }).onProgress?.(
+      "Using existing Kiro IDE credentials",
+    );
+    return ideCreds;
+  }
+
+  // 2. kiro-cli DB credentials (social / Builder ID / IdC)
   let cliCreds = getKiroCliSocialToken();
   if (!cliCreds) {
     cliCreds = getKiroCliCredentials();
@@ -67,7 +78,20 @@ export async function loginKiro(
     return cliCreds;
   }
 
-  // Credentials expired but refresh token may still be valid — try refreshing
+  // 3. Expired IDE token — attempt a silent AWS OIDC refresh
+  const expiredIdeCreds = getKiroIdeCredentialsAllowExpired();
+  if (expiredIdeCreds) {
+    try {
+      (callbacks as unknown as { onProgress?: (msg: string) => void }).onProgress?.(
+        "Refreshing Kiro IDE credentials...",
+      );
+      return await refreshKiroTokenDirect(expiredIdeCreds);
+    } catch {
+      // Fall through to kiro-cli refresh
+    }
+  }
+
+  // 4. Expired kiro-cli credentials — attempt a silent refresh
   const expiredCreds = getKiroCliCredentialsAllowExpired();
   if (expiredCreds) {
     try {
@@ -213,6 +237,10 @@ const EXPIRES_BUFFER_MS = 5 * 60 * 1000;
 export async function refreshKiroToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
   const { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, saveKiroCliCredentials, getKiroCliSocialToken } =
     await import("./kiro-cli.js");
+
+  // Layer 0: Kiro IDE token — freshest source, covers IAM Identity Center
+  const ideCreds = getKiroIdeCredentials();
+  if (ideCreds) return ideCreds;
 
   // Layer 1: Pre-refresh check — prefer social token if available (user logged in that way)
   // Otherwise check for any valid kiro-cli token

@@ -14,6 +14,7 @@ export const KIRO_MODEL_IDS = new Set([
   "deepseek-3.2",
   "kimi-k2.5",
   "minimax-m2.1",
+  "minimax-m2.5",
   "glm-4.7",
   "glm-4.7-flash",
   "qwen3-coder-next",
@@ -77,6 +78,7 @@ const MODELS_BY_REGION: Record<string, Set<string>> = {
     "deepseek-3-2",
     "kimi-k2-5",
     "minimax-m2-1",
+    "minimax-m2-5",
     "glm-4-7",
     "glm-4-7-flash",
     "qwen3-coder-next",
@@ -94,6 +96,7 @@ const MODELS_BY_REGION: Record<string, Set<string>> = {
     "claude-sonnet-4",
     "claude-haiku-4-5",
     "minimax-m2-1",
+    "minimax-m2-5",
     "qwen3-coder-next",
   ]),
 };
@@ -256,6 +259,18 @@ export const kiroModels = [
     maxTokens: 8192,
   },
   // MiniMax
+  {
+    id: "minimax-m2-5",
+    name: "MiniMax M2.5",
+    api: "kiro-api" as const,
+    provider: "kiro" as const,
+    baseUrl: BASE_URL,
+    reasoning: false,
+    input: ["text"] as ("text" | "image")[],
+    cost: ZERO_COST,
+    contextWindow: 200000,
+    maxTokens: 8192,
+  },
   {
     id: "minimax-m2-1",
     name: "MiniMax M2.1",
