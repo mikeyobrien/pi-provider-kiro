@@ -19,6 +19,7 @@ import { parseKiroEvents } from "./event-parser.js";
 import { addPlaceholderTools, HISTORY_LIMIT, truncateHistory } from "./history.js";
 import { getKiroCliCredentials } from "./kiro-cli.js";
 import { resolveKiroModel } from "./models.js";
+import type { KiroCredentials } from "./oauth.js";
 import { exponentialBackoff, isNonRetryableBodyError, isTooBigError, MAX_RETRY_DELAY, retryConfig } from "./retry.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
 import { countTokens } from "./tokenizer.js";
@@ -63,6 +64,22 @@ interface KiroRequest {
     currentMessage: { userInputMessage: KiroUserInputMessage };
     history?: KiroHistoryEntry[];
   };
+  profileArn?: string;
+}
+
+// The default Kiro consumer profile ARN, used as fallback for social/Builder ID auth
+// when the profile cannot be resolved via ListAvailableProfiles.
+const KIRO_CONSUMER_PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK";
+
+/**
+ * Resolves the profileArn required by the Kiro generateAssistantResponse API.
+ * The backend requires this for all auth methods (IdC, social, Builder ID).
+ * Uses the stored profileArn from credentials if available, otherwise falls
+ * back to the well-known Kiro consumer profile ARN.
+ */
+function resolveProfileArn(): string {
+  const cliCreds = getKiroCliCredentials() as KiroCredentials | undefined;
+  return cliCreds?.profileArn || KIRO_CONSUMER_PROFILE_ARN;
 }
 interface KiroToolCallState {
   toolUseId: string;
@@ -255,6 +272,7 @@ export function streamKiro(
         }
         if (history.length > 0 && history[history.length - 1].userInputMessage)
           history.push({ assistantResponseMessage: { content: "Continue" } });
+        const profileArn = resolveProfileArn();
         const request: KiroRequest = {
           conversationState: {
             chatTriggerType: "MANUAL",
@@ -270,6 +288,7 @@ export function streamKiro(
             },
             ...(history.length > 0 ? { history } : {}),
           },
+          ...(profileArn ? { profileArn } : {}),
         };
         const mid = crypto.randomUUID().replace(/-/g, "");
         const ua = `aws-sdk-js/1.0.0 ua/2.1 os/nodejs lang/js api/codewhispererruntime#1.0.0 m/E KiroIDE-0.75.0-${mid}`;
