@@ -59,11 +59,13 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
 interface KiroRequest {
   conversationState: {
     chatTriggerType: "MANUAL";
+    agentTaskType: "vibe";
     conversationId: string;
     currentMessage: { userInputMessage: KiroUserInputMessage };
     history?: KiroHistoryEntry[];
   };
   profileArn?: string;
+  agentMode?: string;
 }
 interface KiroToolCallState {
   toolUseId: string;
@@ -245,7 +247,7 @@ export function streamKiro(
             }
           if (armContent || armToolUses.length > 0) {
             if (history.length > 0 && !history[history.length - 1].userInputMessage)
-              history.push({ userInputMessage: { content: "Continue", modelId: kiroModelId, origin: "AI_EDITOR" } });
+              history.push({ userInputMessage: { content: "Continue", modelId: kiroModelId, origin: "KIRO_CLI" } });
             history.push({
               assistantResponseMessage: {
                 content: armContent,
@@ -318,12 +320,13 @@ export function streamKiro(
         const request: KiroRequest = {
           conversationState: {
             chatTriggerType: "MANUAL",
+            agentTaskType: "vibe",
             conversationId,
             currentMessage: {
               userInputMessage: {
                 content: sanitizeSurrogates(currentContent),
                 modelId: kiroModelId,
-                origin: "AI_EDITOR",
+                origin: "KIRO_CLI",
                 ...(currentImages ? { images: currentImages } : {}),
                 ...(uimc ? { userInputMessageContext: uimc } : {}),
               },
@@ -331,15 +334,18 @@ export function streamKiro(
             ...(history.length > 0 ? { history } : {}),
           },
           ...(profileArn ? { profileArn } : {}),
+          agentMode: "vibe",
         };
         const mid = crypto.randomUUID().replace(/-/g, "");
-        const ua = `aws-sdk-js/1.0.0 ua/2.1 os/nodejs lang/js api/codewhispererruntime#1.0.0 m/E KiroIDE-0.75.0-${mid}`;
+        const ua = `aws-sdk-rust/1.0.0 ua/2.1 os/other lang/rust api/codewhispererstreaming#1.28.3 m/E app/AmazonQ-For-CLI md/appVersion-1.28.3-${mid}`;
         const response = await fetch(endpoint, {
           method: "POST",
           headers: {
-            "Content-Type": "application/json",
+            "Content-Type": "application/x-amz-json-1.0",
             Accept: "application/json",
             Authorization: `Bearer ${accessToken}`,
+            "X-Amz-Target": "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
+            "x-amzn-codewhisperer-optout": "true",
             "amz-sdk-invocation-id": crypto.randomUUID(),
             "amz-sdk-request": "attempt=1; max=1",
             "x-amzn-kiro-agent-mode": "vibe",

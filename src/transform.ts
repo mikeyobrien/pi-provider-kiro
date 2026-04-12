@@ -31,7 +31,7 @@ export interface KiroToolSpec {
 export interface KiroUserInputMessage {
   content: string;
   modelId: string;
-  origin: "AI_EDITOR";
+  origin: "KIRO_CLI";
   images?: KiroImage[];
   userInputMessageContext?: { toolResults?: KiroToolResult[]; tools?: KiroToolSpec[] };
 }
@@ -132,7 +132,7 @@ export function buildHistory(
       const uim: KiroUserInputMessage = {
         content: sanitizeSurrogates(content),
         modelId,
-        origin: "AI_EDITOR",
+        origin: "KIRO_CLI",
         ...(images.length > 0 ? { images: convertImagesToKiro(images) } : {}),
       };
       if (history[history.length - 1]?.userInputMessage)
@@ -191,7 +191,7 @@ export function buildHistory(
         userInputMessage: {
           content: "Tool results provided.",
           modelId,
-          origin: "AI_EDITOR",
+          origin: "KIRO_CLI",
           ...(trImages.length > 0 ? { images: convertImagesToKiro(trImages) } : {}),
           userInputMessageContext: { toolResults },
         },
