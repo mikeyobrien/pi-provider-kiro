@@ -1,7 +1,6 @@
-import type { OAuthLoginCallbacks } from "@mariozechner/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import type { KiroCredentials } from "../src/oauth.js";
-import { loginKiroBuilderID, refreshKiroToken } from "../src/oauth.js";
+import { refreshKiroToken } from "../src/oauth.js";
 
 // Mock kiro-cli to prevent fallback to real credentials
 vi.mock("../src/kiro-cli.js", () => ({
@@ -12,110 +11,8 @@ vi.mock("../src/kiro-cli.js", () => ({
   saveKiroCliCredentials: vi.fn(),
 }));
 
-function makeCallbacks(overrides?: Partial<OAuthLoginCallbacks>): OAuthLoginCallbacks & {
-  onAuth: ReturnType<typeof vi.fn>;
-  signal: AbortSignal;
-} {
-  return {
-    onAuth: vi.fn(),
-    onDeviceCode: vi.fn(),
-    onPrompt: vi.fn().mockResolvedValue("code"),
-    onProgress: vi.fn(),
-    signal: new AbortController().signal,
-    ...overrides,
-  } as OAuthLoginCallbacks & { onAuth: ReturnType<typeof vi.fn>; signal: AbortSignal };
-}
-
-describe("Feature 3: OAuth — AWS Builder ID", () => {
-  describe("loginKiroBuilderID", () => {
-    it("calls onAuth with verification URL", async () => {
-      const callbacks = makeCallbacks();
-      const mockFetch = vi
-        .fn()
-        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ clientId: "cid", clientSecret: "csec" }) })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () =>
-            Promise.resolve({
-              verificationUri: "https://device.sso.us-east-1.amazonaws.com",
-              verificationUriComplete: "https://device.sso.us-east-1.amazonaws.com?code=ABCD",
-              userCode: "ABCD-1234",
-              deviceCode: "dc",
-              interval: 1,
-              expiresIn: 10,
-            }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () => Promise.resolve({ accessToken: "at", refreshToken: "rt", expiresIn: 3600 }),
-        });
-      vi.stubGlobal("fetch", mockFetch);
-
-      const creds = await loginKiroBuilderID(callbacks);
-      expect(callbacks.onAuth).toHaveBeenCalled();
-      const authCall = callbacks.onAuth.mock.calls[0][0];
-      expect(authCall.url).toContain("device.sso");
-      expect(creds.access).toBe("at");
-      expect(creds.refresh).toContain("rt|cid|csec|idc");
-      expect((creds as KiroCredentials).authMethod).toBe("idc");
-
-      vi.unstubAllGlobals();
-    });
-
-    it("throws on cancelled signal", async () => {
-      const ac = new AbortController();
-      ac.abort();
-      const callbacks = makeCallbacks({ signal: ac.signal });
-      const mockFetch = vi
-        .fn()
-        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ clientId: "c", clientSecret: "s" }) })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () =>
-            Promise.resolve({
-              verificationUri: "u",
-              verificationUriComplete: "u",
-              userCode: "X",
-              deviceCode: "d",
-              interval: 1,
-              expiresIn: 10,
-            }),
-        });
-      vi.stubGlobal("fetch", mockFetch);
-
-      await expect(loginKiroBuilderID(callbacks)).rejects.toThrow("cancelled");
-      vi.unstubAllGlobals();
-    });
-
-    it("increases interval on slow_down response", async () => {
-      const callbacks = makeCallbacks();
-      const mockFetch = vi
-        .fn()
-        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ clientId: "c", clientSecret: "s" }) })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () =>
-            Promise.resolve({
-              verificationUri: "u",
-              verificationUriComplete: "u",
-              userCode: "X",
-              deviceCode: "d",
-              interval: 1,
-              expiresIn: 30,
-            }),
-        })
-        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ error: "slow_down" }) })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () => Promise.resolve({ accessToken: "at", refreshToken: "rt", expiresIn: 3600 }),
-        });
-      vi.stubGlobal("fetch", mockFetch);
-
-      const creds = await loginKiroBuilderID(callbacks);
-      expect(creds.access).toBe("at");
-      vi.unstubAllGlobals();
-    });
-  });
+describe("Feature 3: OAuth — Token Refresh", () => {
+  // Interactive login / device code flow tests live in test/login.test.ts (Feature 10)
 
   describe("refreshKiroToken", () => {
     it("refreshes token using encoded refresh field", async () => {
@@ -171,12 +68,7 @@ describe("Feature 3: OAuth — AWS Builder ID", () => {
     });
 
     it("throws on desktop token refresh failure", async () => {
-      const mockFetch = vi.fn().mockResolvedValueOnce({
-        ok: false,
-        status: 401,
-      });
-      vi.stubGlobal("fetch", mockFetch);
-
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce({ ok: false, status: 401 }));
       await expect(
         refreshKiroToken({
           refresh: "desk_rt|desktop",
@@ -189,12 +81,10 @@ describe("Feature 3: OAuth — AWS Builder ID", () => {
     });
 
     it("throws on desktop token refresh with missing accessToken", async () => {
-      const mockFetch = vi.fn().mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ expiresIn: 3600 }),
-      });
-      vi.stubGlobal("fetch", mockFetch);
-
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ expiresIn: 3600 }) }),
+      );
       await expect(
         refreshKiroToken({
           refresh: "desk_rt|desktop",
@@ -220,8 +110,7 @@ describe("Feature 3: OAuth — AWS Builder ID", () => {
         region: "us-west-2",
       } as KiroCredentials);
 
-      const url = mockFetch.mock.calls[0][0];
-      expect(url).toContain("oidc.us-west-2.amazonaws.com");
+      expect(mockFetch.mock.calls[0][0]).toContain("oidc.us-west-2.amazonaws.com");
       vi.unstubAllGlobals();
     });
 
@@ -230,7 +119,7 @@ describe("Feature 3: OAuth — AWS Builder ID", () => {
       vi.mocked(getKiroCliCredentialsAllowExpired).mockReturnValueOnce({
         refresh: "cli_rt|cli_cid|cli_csec|idc",
         access: "cli_at",
-        expires: Date.now() - 1000, // expired
+        expires: Date.now() - 1000,
         clientId: "cli_cid",
         clientSecret: "cli_csec",
         region: "us-east-1",
@@ -239,19 +128,14 @@ describe("Feature 3: OAuth — AWS Builder ID", () => {
 
       const mockFetch = vi
         .fn()
-        .mockResolvedValueOnce({ ok: false, status: 401 }) // direct refresh fails
+        .mockResolvedValueOnce({ ok: false, status: 401 })
         .mockResolvedValueOnce({
-          // expired creds refresh succeeds
           ok: true,
           json: () => Promise.resolve({ accessToken: "new_at", refreshToken: "new_rt", expiresIn: 3600 }),
         });
       vi.stubGlobal("fetch", mockFetch);
 
-      const creds = await refreshKiroToken({
-        refresh: "stale_rt|cid|csec|idc",
-        access: "stale_at",
-        expires: 0,
-      });
+      const creds = await refreshKiroToken({ refresh: "stale_rt|cid|csec|idc", access: "stale_at", expires: 0 });
       expect(creds.access).toBe("new_at");
       vi.unstubAllGlobals();
     });
@@ -270,16 +154,15 @@ describe("Feature 3: OAuth — AWS Builder ID", () => {
 
       const mockFetch = vi
         .fn()
-        .mockResolvedValueOnce({ ok: false, status: 401 }) // direct refresh fails
-        .mockResolvedValueOnce({ ok: false, status: 401 }); // expired creds refresh also fails
+        .mockResolvedValueOnce({ ok: false, status: 401 })
+        .mockResolvedValueOnce({ ok: false, status: 401 });
       vi.stubGlobal("fetch", mockFetch);
 
       const creds = await refreshKiroToken({
         refresh: "old_rt|cid|csec|idc",
         access: "old_at",
-        expires: Date.now() - 60_000, // within 5-min buffer window
+        expires: Date.now() - 60_000,
       });
-      // Falls through to Layer 5: returns credentials with buffer added
       expect(creds.access).toBe("old_at");
       expect(creds.expires).toBeGreaterThan(Date.now());
       vi.unstubAllGlobals();
