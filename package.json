@@ -44,7 +44,6 @@
     "vitest": "^3.0.0"
   },
   "dependencies": {
-    "@sinclair/typebox": "^0.34.48",
     "js-tiktoken": "^1.0.21"
   }
 }
