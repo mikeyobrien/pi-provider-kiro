@@ -41,6 +41,8 @@ export function resolveKiroModel(modelId: string): string {
  * internally via the AWS SDK partition resolver.
  */
 const API_REGION_MAP: Record<string, string> = {
+  "us-west-1": "us-east-1",
+  "us-west-2": "us-east-1",
   "us-east-2": "us-east-1",
   "eu-west-1": "eu-central-1",
   "eu-west-2": "eu-central-1",
