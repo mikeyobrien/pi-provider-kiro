@@ -20,6 +20,7 @@ export const KIRO_MODEL_IDS = new Set([
   "qwen3-coder-next",
   "agi-nova-beta-1m",
   "qwen3-coder-480b",
+  "auto",
 ]);
 
 export function resolveKiroModel(modelId: string): string {
@@ -84,20 +85,20 @@ const MODELS_BY_REGION: Record<string, Set<string>> = {
     "qwen3-coder-next",
     "qwen3-coder-480b",
     "agi-nova-beta-1m",
+    "auto",
   ]),
+  // API-verified 2026-04-14 (eu-west-1 IdC token)
   "eu-central-1": new Set([
     "claude-opus-4-6",
-    "claude-opus-4-6-1m",
     "claude-sonnet-4-6",
-    "claude-sonnet-4-6-1m",
     "claude-opus-4-5",
     "claude-sonnet-4-5",
-    "claude-sonnet-4-5-1m",
     "claude-sonnet-4",
     "claude-haiku-4-5",
     "minimax-m2-1",
     "minimax-m2-5",
     "qwen3-coder-next",
+    "auto",
   ]),
 };
 
@@ -344,6 +345,19 @@ export const kiroModels = [
     input: ["text", "image"] as ("text" | "image")[],
     cost: ZERO_COST,
     contextWindow: 1000000,
+    maxTokens: 65536,
+  },
+  // Auto — routes to optimal model per task
+  {
+    id: "auto",
+    name: "Auto",
+    api: "kiro-api" as const,
+    provider: "kiro" as const,
+    baseUrl: BASE_URL,
+    reasoning: true,
+    input: ["text", "image"] as ("text" | "image")[],
+    cost: ZERO_COST,
+    contextWindow: 200000,
     maxTokens: 65536,
   },
 ];
