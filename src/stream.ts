@@ -46,9 +46,14 @@ import { TRUNCATION_NOTICE, wasPreviousResponseTruncated } from "./truncation.js
 const CAPACITY_LOG_DIR = join(homedir(), ".pi", "logs");
 const CAPACITY_LOG_FILE = join(CAPACITY_LOG_DIR, "capacity-retries.log");
 
+let capacityLogDirCreated = false;
+
 function logCapacityEvent(message: string): void {
   try {
-    mkdirSync(CAPACITY_LOG_DIR, { recursive: true });
+    if (!capacityLogDirCreated) {
+      mkdirSync(CAPACITY_LOG_DIR, { recursive: true });
+      capacityLogDirCreated = true;
+    }
     appendFileSync(CAPACITY_LOG_FILE, `${new Date().toISOString()} ${message}\n`);
   } catch {
     // best-effort logging, don't break the provider
@@ -352,6 +357,7 @@ export function streamKiro(
           agentMode: "vibe",
         };
         let response!: Response;
+        // Reset per outer iteration — each 403 retry gets a fresh capacity budget
         let capacityRetryCount = 0;
         // Inner loop: retry capacity errors without consuming outer retry budget
         while (true) {
@@ -394,7 +400,7 @@ export function streamKiro(
             if (isCapacityError(errText)) {
               logCapacityEvent(`INSUFFICIENT_MODEL_CAPACITY — exhausted ${capacityRetryConfig.maxRetries} retries, giving up`);
             }
-            if (response.status === 403 && retryCount < maxRetries) {
+            if (response.status === 403 && !isCapacityError(errText) && retryCount < maxRetries) {
               retryCount++;
               // On 403, try to get a fresh token before retrying — the current
               // one may have been rotated by kiro-cli or another session.
@@ -410,6 +416,8 @@ export function streamKiro(
             }
             // Avoid pi-coding-agent's outer auto-retry from treating known
             // Kiro quota/capacity body markers as generic retryable 429s.
+            // This covers both hard quota (MONTHLY_REQUEST_COUNT) and
+            // exhausted capacity retries (INSUFFICIENT_MODEL_CAPACITY).
             if (isNonRetryableBodyError(errText) || isCapacityError(errText)) {
               throw new Error(`Kiro API error: ${errText || response.statusText}`);
             }
