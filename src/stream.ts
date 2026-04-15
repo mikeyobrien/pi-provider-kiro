@@ -1,6 +1,9 @@
 // ABOUTME: Core streaming integration for Kiro API requests and responses.
 // ABOUTME: Handles request building, retry logic, event parsing, and token counting.
 
+import { appendFile, mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type {
   Api,
   AssistantMessage,
@@ -15,14 +18,19 @@ import type {
 } from "@mariozechner/pi-ai";
 import { calculateCost, createAssistantMessageEventStream } from "@mariozechner/pi-ai";
 import { parseBracketToolCalls } from "./bracket-tool-parser.js";
-import { appendFileSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { parseKiroEvents } from "./event-parser.js";
 import { addPlaceholderTools, HISTORY_LIMIT, HISTORY_LIMIT_CONTEXT_WINDOW, truncateHistory } from "./history.js";
 import { getKiroCliCredentials } from "./kiro-cli.js";
 import { resolveKiroModel } from "./models.js";
-import { capacityRetryConfig, exponentialBackoff, isCapacityError, isNonRetryableBodyError, isTooBigError, MAX_RETRY_DELAY, retryConfig } from "./retry.js";
+import {
+  capacityRetryConfig,
+  exponentialBackoff,
+  isCapacityError,
+  isNonRetryableBodyError,
+  isTooBigError,
+  MAX_RETRY_DELAY,
+  retryConfig,
+} from "./retry.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
 import { countTokens } from "./tokenizer.js";
 import {
@@ -49,15 +57,19 @@ const CAPACITY_LOG_FILE = join(CAPACITY_LOG_DIR, "capacity-retries.log");
 let capacityLogDirCreated = false;
 
 function logCapacityEvent(message: string): void {
-  try {
-    if (!capacityLogDirCreated) {
-      mkdirSync(CAPACITY_LOG_DIR, { recursive: true });
-      capacityLogDirCreated = true;
+  if (process.env.PI_PROVIDER_KIRO_NO_LOG === "1") return;
+  // Fire-and-forget async logging to avoid blocking the event loop
+  (async () => {
+    try {
+      if (!capacityLogDirCreated) {
+        await mkdir(CAPACITY_LOG_DIR, { recursive: true });
+        capacityLogDirCreated = true;
+      }
+      await appendFile(CAPACITY_LOG_FILE, `${new Date().toISOString()} ${message}\n`);
+    } catch {
+      // best-effort logging, don't break the provider
     }
-    appendFileSync(CAPACITY_LOG_FILE, `${new Date().toISOString()} ${message}\n`);
-  } catch {
-    // best-effort logging, don't break the provider
-  }
+  })();
 }
 
 /** Delay that rejects early if the abort signal fires. */
@@ -398,7 +410,9 @@ export function streamKiro(
               continue;
             }
             if (isCapacityError(errText)) {
-              logCapacityEvent(`INSUFFICIENT_MODEL_CAPACITY — exhausted ${capacityRetryConfig.maxRetries} retries, giving up`);
+              logCapacityEvent(
+                `INSUFFICIENT_MODEL_CAPACITY — exhausted ${capacityRetryConfig.maxRetries} retries, giving up`,
+              );
             }
             if (response.status === 403 && !isCapacityError(errText) && retryCount < maxRetries) {
               retryCount++;
