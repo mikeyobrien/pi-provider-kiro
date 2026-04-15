@@ -21,7 +21,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && esbuild dist/index.js --bundle --platform=node --format=esm --outfile=dist/index.js --allow-overwrite --external:@mariozechner/pi-ai --external:@mariozechner/pi-coding-agent",
     "check": "tsc --noEmit",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
@@ -39,10 +39,8 @@
     "@biomejs/biome": "2.4.2",
     "@mariozechner/pi-ai": "^0.53.0",
     "@mariozechner/pi-coding-agent": "^0.53.0",
+    "js-tiktoken": "^1.0.21",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
-  },
-  "dependencies": {
-    "js-tiktoken": "^1.0.21"
   }
 }
