@@ -57,7 +57,6 @@ const CAPACITY_LOG_FILE = join(CAPACITY_LOG_DIR, "capacity-retries.log");
 let capacityLogDirCreated = false;
 
 function logCapacityEvent(message: string): void {
-  if (process.env.PI_PROVIDER_KIRO_NO_LOG === "1") return;
   // Fire-and-forget async logging to avoid blocking the event loop
   (async () => {
     try {
