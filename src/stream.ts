@@ -15,11 +15,14 @@ import type {
 } from "@mariozechner/pi-ai";
 import { calculateCost, createAssistantMessageEventStream } from "@mariozechner/pi-ai";
 import { parseBracketToolCalls } from "./bracket-tool-parser.js";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { parseKiroEvents } from "./event-parser.js";
 import { addPlaceholderTools, HISTORY_LIMIT, HISTORY_LIMIT_CONTEXT_WINDOW, truncateHistory } from "./history.js";
 import { getKiroCliCredentials } from "./kiro-cli.js";
 import { resolveKiroModel } from "./models.js";
-import { exponentialBackoff, isNonRetryableBodyError, isTooBigError, MAX_RETRY_DELAY, retryConfig } from "./retry.js";
+import { capacityRetryConfig, exponentialBackoff, isCapacityError, isNonRetryableBodyError, isTooBigError, MAX_RETRY_DELAY, retryConfig } from "./retry.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
 import { countTokens } from "./tokenizer.js";
 import {
@@ -39,6 +42,18 @@ import {
   truncate,
 } from "./transform.js";
 import { TRUNCATION_NOTICE, wasPreviousResponseTruncated } from "./truncation.js";
+
+const CAPACITY_LOG_DIR = join(homedir(), ".pi", "logs");
+const CAPACITY_LOG_FILE = join(CAPACITY_LOG_DIR, "capacity-retries.log");
+
+function logCapacityEvent(message: string): void {
+  try {
+    mkdirSync(CAPACITY_LOG_DIR, { recursive: true });
+    appendFileSync(CAPACITY_LOG_FILE, `${new Date().toISOString()} ${message}\n`);
+  } catch {
+    // best-effort logging, don't break the provider
+  }
+}
 
 /** Delay that rejects early if the abort signal fires. */
 function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -336,57 +351,81 @@ export function streamKiro(
           ...(profileArn ? { profileArn } : {}),
           agentMode: "vibe",
         };
-        const mid = crypto.randomUUID().replace(/-/g, "");
-        const ua = `aws-sdk-rust/1.0.0 ua/2.1 os/other lang/rust api/codewhispererstreaming#1.28.3 m/E app/AmazonQ-For-CLI md/appVersion-1.28.3-${mid}`;
-        const response = await fetch(endpoint, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/x-amz-json-1.0",
-            Accept: "application/json",
-            Authorization: `Bearer ${accessToken}`,
-            "X-Amz-Target": "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
-            "x-amzn-codewhisperer-optout": "true",
-            "amz-sdk-invocation-id": crypto.randomUUID(),
-            "amz-sdk-request": "attempt=1; max=1",
-            "x-amzn-kiro-agent-mode": "vibe",
-            "x-amz-user-agent": ua,
-            "user-agent": ua,
-          },
-          body: JSON.stringify(request),
-          signal: options?.signal,
-        });
-        if (!response.ok) {
-          let errText = "";
-          try {
-            errText = await response.text();
-          } catch {
-            errText = "";
-          }
-          if (response.status === 403 && retryCount < maxRetries) {
-            retryCount++;
-            // On 403, try to get a fresh token before retrying — the current
-            // one may have been rotated by kiro-cli or another session.
-            const freshCreds = getKiroCliCredentials();
-            if (freshCreds?.access) accessToken = freshCreds.access;
+        let response!: Response;
+        let capacityRetryCount = 0;
+        // Inner loop: retry capacity errors without consuming outer retry budget
+        while (true) {
+          const mid = crypto.randomUUID().replace(/-/g, "");
+          const ua = `aws-sdk-rust/1.0.0 ua/2.1 os/other lang/rust api/codewhispererstreaming#1.28.3 m/E app/AmazonQ-For-CLI md/appVersion-1.28.3-${mid}`;
+          response = await fetch(endpoint, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/x-amz-json-1.0",
+              Accept: "application/json",
+              Authorization: `Bearer ${accessToken}`,
+              "X-Amz-Target": "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
+              "x-amzn-codewhisperer-optout": "true",
+              "amz-sdk-invocation-id": crypto.randomUUID(),
+              "amz-sdk-request": "attempt=1; max=1",
+              "x-amzn-kiro-agent-mode": "vibe",
+              "x-amz-user-agent": ua,
+              "user-agent": ua,
+            },
+            body: JSON.stringify(request),
+            signal: options?.signal,
+          });
+          if (!response.ok) {
+            let errText = "";
+            try {
+              errText = await response.text();
+            } catch {
+              errText = "";
+            }
+            // Retry transient capacity errors with longer backoff
+            if (isCapacityError(errText) && capacityRetryCount < capacityRetryConfig.maxRetries) {
+              capacityRetryCount++;
+              const delayMs = exponentialBackoff(capacityRetryCount - 1, capacityRetryConfig.baseDelayMs, 30_000);
+              const msg = `INSUFFICIENT_MODEL_CAPACITY — retrying in ${delayMs}ms (${capacityRetryCount}/${capacityRetryConfig.maxRetries})`;
+              console.error(`[pi-provider-kiro] ${msg}`);
+              logCapacityEvent(msg);
+              await abortableDelay(delayMs, options?.signal);
+              continue;
+            }
+            if (isCapacityError(errText)) {
+              logCapacityEvent(`INSUFFICIENT_MODEL_CAPACITY — exhausted ${capacityRetryConfig.maxRetries} retries, giving up`);
+            }
+            if (response.status === 403 && retryCount < maxRetries) {
+              retryCount++;
+              // On 403, try to get a fresh token before retrying — the current
+              // one may have been rotated by kiro-cli or another session.
+              const freshCreds = getKiroCliCredentials();
+              if (freshCreds?.access) accessToken = freshCreds.access;
 
-            // Re-resolve profileArn with fresh credentials
-            profileArnCache.delete(endpoint);
-            profileArn = await resolveProfileArn(accessToken, endpoint);
-            const delayMs = exponentialBackoff(retryCount - 1, 500, MAX_RETRY_DELAY);
-            await abortableDelay(delayMs, options?.signal);
-            continue;
+              // Re-resolve profileArn with fresh credentials
+              profileArnCache.delete(endpoint);
+              profileArn = await resolveProfileArn(accessToken, endpoint);
+              const delayMs = exponentialBackoff(retryCount - 1, 500, MAX_RETRY_DELAY);
+              await abortableDelay(delayMs, options?.signal);
+              break; // break inner loop, continue outer loop
+            }
+            // Avoid pi-coding-agent's outer auto-retry from treating known
+            // Kiro quota/capacity body markers as generic retryable 429s.
+            if (isNonRetryableBodyError(errText) || isCapacityError(errText)) {
+              throw new Error(`Kiro API error: ${errText || response.statusText}`);
+            }
+            // Format error so pi-ai's isContextOverflow() recognizes it
+            if (isTooBigError(response.status, errText)) {
+              throw new Error(`Kiro API error: context_length_exceeded (${response.status} ${errText})`);
+            }
+            throw new Error(`Kiro API error: ${response.status} ${response.statusText} ${errText}`);
           }
-          // Avoid pi-coding-agent's outer auto-retry from treating known
-          // Kiro quota/capacity body markers as generic retryable 429s.
-          if (isNonRetryableBodyError(errText)) {
-            throw new Error(`Kiro API error: ${errText || response.statusText}`);
-          }
-          // Format error so pi-ai's isContextOverflow() recognizes it
-          if (isTooBigError(response.status, errText)) {
-            throw new Error(`Kiro API error: context_length_exceeded (${response.status} ${errText})`);
-          }
-          throw new Error(`Kiro API error: ${response.status} ${response.statusText} ${errText}`);
+          break; // success, break inner loop
         }
+        if (capacityRetryCount > 0 && response.ok) {
+          logCapacityEvent(`INSUFFICIENT_MODEL_CAPACITY — succeeded after ${capacityRetryCount} retries`);
+        }
+        // 403 retry: continue outer loop
+        if (!response.ok) continue;
         stream.push({ type: "start", partial: output });
         const reader = response.body?.getReader();
         if (!reader) throw new Error("No response body");

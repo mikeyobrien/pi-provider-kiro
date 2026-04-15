@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   exponentialBackoff,
   FIRST_TOKEN_TIMEOUT,
+  isCapacityError,
   isNonRetryableBodyError,
   isTooBigError,
   MAX_RETRY_DELAY,
@@ -43,13 +44,24 @@ describe("isNonRetryableBodyError", () => {
     expect(isNonRetryableBodyError("MONTHLY_REQUEST_COUNT exceeded")).toBe(true);
   });
 
-  it("returns true for INSUFFICIENT_MODEL_CAPACITY", () => {
-    expect(isNonRetryableBodyError("INSUFFICIENT_MODEL_CAPACITY")).toBe(true);
+  it("returns false for INSUFFICIENT_MODEL_CAPACITY (now retryable)", () => {
+    expect(isNonRetryableBodyError("INSUFFICIENT_MODEL_CAPACITY")).toBe(false);
   });
 
   it("returns false for generic retryable messages", () => {
     expect(isNonRetryableBodyError("Rate limited")).toBe(false);
     expect(isNonRetryableBodyError("Internal Server Error")).toBe(false);
+  });
+});
+
+describe("isCapacityError", () => {
+  it("returns true for INSUFFICIENT_MODEL_CAPACITY", () => {
+    expect(isCapacityError("INSUFFICIENT_MODEL_CAPACITY")).toBe(true);
+  });
+
+  it("returns false for other errors", () => {
+    expect(isCapacityError("MONTHLY_REQUEST_COUNT")).toBe(false);
+    expect(isCapacityError("Rate limited")).toBe(false);
   });
 });
 

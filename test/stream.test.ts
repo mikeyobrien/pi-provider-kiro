@@ -9,7 +9,7 @@ import type {
   ToolResultMessage,
 } from "@mariozechner/pi-ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { retryConfig } from "../src/retry.js";
+import { capacityRetryConfig, retryConfig } from "../src/retry.js";
 import { resetProfileArnCache, streamKiro } from "../src/stream.js";
 
 const ts = Date.now();
@@ -772,8 +772,11 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
-  it("omits 429 from INSUFFICIENT_MODEL_CAPACITY errors to avoid outer auto-retry", async () => {
-    const mockFetch = vi.fn().mockResolvedValueOnce({
+  it("retries INSUFFICIENT_MODEL_CAPACITY with backoff then throws after max retries", async () => {
+    const origConfig = { ...capacityRetryConfig };
+    capacityRetryConfig.baseDelayMs = 10;
+
+    const mockFetch = vi.fn().mockResolvedValue({
       ok: false,
       status: 429,
       statusText: "Too Many Requests",
@@ -784,12 +787,14 @@ describe("Feature 9: Streaming Integration", () => {
     const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
     const events = await collect(stream);
 
-    expect(mockFetch).toHaveBeenCalledOnce();
+    // 1 initial + 3 capacity retries
+    expect(mockFetch).toHaveBeenCalledTimes(4);
     const error = events.find((e) => e.type === "error");
     expect(error).toBeDefined();
     expect(error?.type === "error" && error.error.errorMessage).toContain("INSUFFICIENT_MODEL_CAPACITY");
     expect(error?.type === "error" && error.error.errorMessage).not.toContain("429");
 
+    Object.assign(capacityRetryConfig, origConfig);
     vi.unstubAllGlobals();
   });
 
