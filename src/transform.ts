@@ -135,9 +135,14 @@ export function buildHistory(
         origin: "KIRO_CLI",
         ...(images.length > 0 ? { images: convertImagesToKiro(images) } : {}),
       };
-      if (history[history.length - 1]?.userInputMessage)
-        history.push({ assistantResponseMessage: { content: "Continue" } });
-      history.push({ userInputMessage: uim });
+      if (history[history.length - 1]?.userInputMessage) {
+        // Merge into previous user message to maintain alternation without synthetic padding
+        const prev = history[history.length - 1].userInputMessage!;
+        prev.content += "\n\n" + uim.content;
+        if (uim.images) prev.images = [...(prev.images || []), ...uim.images];
+      } else {
+        history.push({ userInputMessage: uim });
+      }
     } else if (msg.role === "assistant") {
       let armContent = "";
       const armToolUses: KiroToolUse[] = [];
@@ -185,17 +190,27 @@ export function buildHistory(
         j++;
       }
       i = j - 1;
-      if (history[history.length - 1]?.userInputMessage)
-        history.push({ assistantResponseMessage: { content: "Continue" } });
-      history.push({
-        userInputMessage: {
-          content: "Tool results provided.",
-          modelId,
-          origin: "KIRO_CLI",
-          ...(trImages.length > 0 ? { images: convertImagesToKiro(trImages) } : {}),
-          userInputMessageContext: { toolResults },
-        },
-      });
+      if (history[history.length - 1]?.userInputMessage) {
+        // Merge tool results into previous user message to maintain alternation without synthetic padding
+        const prev = history[history.length - 1].userInputMessage!;
+        prev.content += "\n\nTool results provided.";
+        if (trImages.length > 0) prev.images = [...(prev.images || []), ...convertImagesToKiro(trImages)];
+        if (!prev.userInputMessageContext) prev.userInputMessageContext = {};
+        prev.userInputMessageContext.toolResults = [
+          ...(prev.userInputMessageContext.toolResults || []),
+          ...toolResults,
+        ];
+      } else {
+        history.push({
+          userInputMessage: {
+            content: "Tool results provided.",
+            modelId,
+            origin: "KIRO_CLI",
+            ...(trImages.length > 0 ? { images: convertImagesToKiro(trImages) } : {}),
+            userInputMessageContext: { toolResults },
+          },
+        });
+      }
     }
   }
   return { history, systemPrepended, currentMsgStartIdx };

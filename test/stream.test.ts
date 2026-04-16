@@ -1941,4 +1941,274 @@ describe("Feature 9: Streaming Integration", () => {
 
     vi.unstubAllGlobals();
   });
+
+  // =========================================================================
+  // Echo loop detection ("Continue" as entire response)
+  // =========================================================================
+
+  it("retries when model responds with just 'Continue' (echo loop detection)", async () => {
+    const echoResponse = '{"content":"Continue"}{"contextUsagePercentage":10}';
+    const goodResponse = '{"content":"Here is the actual work."}{"contextUsagePercentage":10}';
+
+    const makeEchoResponse = () => ({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi
+            .fn()
+            .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(echoResponse) })
+            .mockResolvedValueOnce({ done: true, value: undefined }),
+        }),
+      },
+    });
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce(makeEchoResponse())
+      .mockResolvedValueOnce({
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(goodResponse) })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+          }),
+        },
+      });
+    vi.stubGlobal("fetch", mockFetch);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    const done = events.find((e) => e.type === "done");
+    expect(done).toBeDefined();
+    expect(
+      done?.type === "done" &&
+        done.message.content.some((b) => b.type === "text" && (b as TextContent).text === "Here is the actual work."),
+    ).toBe(true);
+
+    warnSpy.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
+  it("detects echo loop for '.', 'continue', 'CONTINUE', ' Continue '", async () => {
+    for (const echoText of [".", "continue", "CONTINUE", " Continue ", "\n continue \n", "..."]) {
+      const echoResponse = `{"content":"${echoText.replace(/\n/g, "\\n")}"}{"contextUsagePercentage":10}`;
+      const goodResponse = '{"content":"recovered"}{"contextUsagePercentage":10}';
+
+      const mockFetch = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          body: {
+            getReader: () => ({
+              read: vi
+                .fn()
+                .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(echoResponse) })
+                .mockResolvedValueOnce({ done: true, value: undefined }),
+            }),
+          },
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          body: {
+            getReader: () => ({
+              read: vi
+                .fn()
+                .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(goodResponse) })
+                .mockResolvedValueOnce({ done: true, value: undefined }),
+            }),
+          },
+        });
+      vi.stubGlobal("fetch", mockFetch);
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+      const events = await collect(stream);
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      const done = events.find((e) => e.type === "done");
+      expect(
+        done?.type === "done" &&
+          done.message.content.some((b) => b.type === "text" && (b as TextContent).text === "recovered"),
+      ).toBe(true);
+
+      warnSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  }, 30000);
+
+  it("strips echo text after max retries on persistent 'Continue' responses", async () => {
+    const echoResponse = '{"content":"Continue"}{"contextUsagePercentage":10}';
+
+    const makeEchoResponse = () => ({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi
+            .fn()
+            .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(echoResponse) })
+            .mockResolvedValueOnce({ done: true, value: undefined }),
+        }),
+      },
+    });
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce(makeEchoResponse())
+      .mockResolvedValueOnce(makeEchoResponse())
+      .mockResolvedValueOnce(makeEchoResponse())
+      .mockResolvedValueOnce(makeEchoResponse());
+    vi.stubGlobal("fetch", mockFetch);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    // 1 initial + 3 retries = 4 calls
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+    const done = events.find((e) => e.type === "done");
+    expect(done).toBeDefined();
+    expect(done?.type === "done" && done.reason).toBe("stop");
+    // The echo text should be stripped — no "Continue" in final output
+    const textBlocks = done?.type === "done" ? done.message.content.filter((b) => b.type === "text") : [];
+    const fullText = textBlocks.map((b) => (b as TextContent).text).join("");
+    expect(fullText).toBe("");
+
+    warnSpy.mockRestore();
+    vi.unstubAllGlobals();
+  }, 30000);
+
+  it("does NOT treat 'Continue' with tool calls as echo loop", async () => {
+    const toolPayload =
+      '{"content":"Continue"}{"name":"bash","toolUseId":"tc1","input":"{\\"cmd\\":\\"ls\\"}","stop":true}{"contextUsagePercentage":10}';
+    const mockFetch = mockFetchOk(toolPayload);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    // Should NOT retry — tool calls present means it's not an echo loop
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const done = events.find((e) => e.type === "done");
+    expect(done?.type === "done" && done.reason).toBe("toolUse");
+    // But the echo text should be stripped from the response
+    const textBlocks = done?.type === "done" ? done.message.content.filter((b) => b.type === "text") : [];
+    const fullText = textBlocks.map((b) => (b as TextContent).text).join("");
+    expect(fullText).toBe("");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("strips '.' prefix from tool call responses to prevent echo accumulation", async () => {
+    const toolPayload =
+      '{"content":"."}{"name":"bash","toolUseId":"tc1","input":"{\\"cmd\\":\\"ls\\"}","stop":true}{"contextUsagePercentage":10}';
+    const mockFetch = mockFetchOk(toolPayload);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const done = events.find((e) => e.type === "done");
+    expect(done?.type === "done" && done.reason).toBe("toolUse");
+    // "." should be stripped — it's echo noise alongside tool calls
+    const textBlocks = done?.type === "done" ? done.message.content.filter((b) => b.type === "text") : [];
+    const fullText = textBlocks.map((b) => (b as TextContent).text).join("");
+    expect(fullText).toBe("");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("preserves meaningful text alongside tool calls", async () => {
+    const toolPayload =
+      '{"content":"Let me check that."}{"name":"bash","toolUseId":"tc1","input":"{\\"cmd\\":\\"ls\\"}","stop":true}{"contextUsagePercentage":10}';
+    const mockFetch = mockFetchOk(toolPayload);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    const done = events.find((e) => e.type === "done");
+    expect(done?.type === "done" && done.reason).toBe("toolUse");
+    // Meaningful text should be preserved
+    const textBlocks = done?.type === "done" ? done.message.content.filter((b) => b.type === "text") : [];
+    const fullText = textBlocks.map((b) => (b as TextContent).text).join("");
+    expect(fullText).toBe("Let me check that.");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("does NOT treat longer text containing 'continue' as echo loop", async () => {
+    const response = '{"content":"Let me continue working on this task."}{"contextUsagePercentage":10}';
+    const mockFetch = mockFetchOk(response);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const done = events.find((e) => e.type === "done");
+    expect(
+      done?.type === "done" &&
+        done.message.content.some(
+          (b) => b.type === "text" && (b as TextContent).text === "Let me continue working on this task.",
+        ),
+    ).toBe(true);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("history uses merging instead of synthetic padding — no echoable content", async () => {
+    // Simulate a multi-turn conversation with tool calls
+    const a1: AssistantMessage = {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "tc1", name: "bash", arguments: { cmd: "ls" } }],
+      api: "kiro-api",
+      provider: "kiro",
+      model: "claude-sonnet-4-5",
+      usage: zeroUsage,
+      stopReason: "toolUse" as const,
+      timestamp: ts,
+    };
+    const context: Context = {
+      systemPrompt: "You are helpful",
+      messages: [
+        { role: "user", content: "Build an app", timestamp: ts },
+        a1,
+        {
+          role: "toolResult",
+          toolCallId: "tc1",
+          toolName: "bash",
+          content: [{ type: "text", text: "file1.ts" }],
+          isError: false,
+          timestamp: ts,
+        },
+        { role: "user", content: "Next step", timestamp: ts },
+      ],
+      tools: [],
+    };
+
+    const mockFetch = mockFetchOk('{"content":"Done."}{"contextUsagePercentage":5}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), context, { apiKey: "tok" });
+    await collect(stream);
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    const json = JSON.stringify(body);
+    // No "Continue" anywhere in the request
+    expect(json).not.toContain('"Continue"');
+    // Padding uses "..." which is caught by echo stripping — not "Continue" or "."
+    const history = body.conversationState.history || [];
+    const badPadding = history.filter(
+      (h: any) =>
+        (h.assistantResponseMessage && /^(Continue|\.)$/i.test(h.assistantResponseMessage.content)) ||
+        (h.userInputMessage && /^(Continue|\.)$/i.test(h.userInputMessage.content)),
+    );
+    expect(badPadding).toHaveLength(0);
+
+    vi.unstubAllGlobals();
+  });
 });

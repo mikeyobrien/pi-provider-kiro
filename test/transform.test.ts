@@ -171,5 +171,82 @@ describe("Feature 5: Message Transformation", () => {
       const text = entry?.userInputMessage?.userInputMessageContext?.toolResults?.[0].content[0].text ?? "";
       expect(text).toContain("[TRUNCATED]");
     });
+
+    it("merges consecutive user messages instead of inserting synthetic padding", () => {
+      const msgs: Message[] = [user("first"), user("second"), assistant("reply"), user("third")];
+      const { history } = buildHistory(msgs, "M");
+      const json = JSON.stringify(history);
+      expect(json).not.toContain('"Continue"');
+      // No synthetic assistant padding — consecutive users are merged
+      const assistantPadding = history.filter(
+        (h) =>
+          h.assistantResponseMessage &&
+          !h.assistantResponseMessage.toolUses &&
+          h.assistantResponseMessage.content.length > 0 &&
+          h.assistantResponseMessage.content.length <= 3,
+      );
+      expect(assistantPadding).toHaveLength(0);
+      // First user message should contain both user contents merged
+      expect(history[0].userInputMessage?.content).toContain("first");
+      expect(history[0].userInputMessage?.content).toContain("second");
+    });
+
+    it("merges tool results into previous user message instead of inserting synthetic padding", () => {
+      const a = assistant("");
+      a.content = [{ type: "toolCall", id: "tc1", name: "a", arguments: {} }];
+      // user -> user(tool results) — should merge, not pad
+      const msgs: Message[] = [user("go"), user("more"), a, toolResult("tc1", "ok"), user("next")];
+      const { history } = buildHistory(msgs, "M");
+      const json = JSON.stringify(history);
+      expect(json).not.toContain('"Continue"');
+      // No synthetic padding entries
+      const assistantPadding = history.filter(
+        (h) =>
+          h.assistantResponseMessage &&
+          !h.assistantResponseMessage.toolUses &&
+          h.assistantResponseMessage.content.length > 0 &&
+          h.assistantResponseMessage.content.length <= 3,
+      );
+      expect(assistantPadding).toHaveLength(0);
+    });
+
+    it("never contains synthetic padding in long agentic sessions", () => {
+      const msgs: Message[] = [user("start")];
+      for (let i = 0; i < 20; i++) {
+        const a = assistant(`step ${i}`);
+        a.content = [{ type: "toolCall", id: `tc${i}`, name: "bash", arguments: { cmd: "ls" } }];
+        msgs.push(a);
+        msgs.push(toolResult(`tc${i}`, `output ${i}`));
+      }
+      msgs.push(user("done"));
+      const { history } = buildHistory(msgs, "M", "Be helpful");
+      const json = JSON.stringify(history);
+      expect(json).not.toContain('"Continue"');
+      // No single-char synthetic padding
+      const padding = history.filter(
+        (h) =>
+          (h.assistantResponseMessage &&
+            h.assistantResponseMessage.content.length > 0 &&
+            h.assistantResponseMessage.content.length <= 3 &&
+            !h.assistantResponseMessage.toolUses) ||
+          (h.userInputMessage &&
+            h.userInputMessage.content.length > 0 &&
+            h.userInputMessage.content.length <= 3 &&
+            !h.userInputMessage.userInputMessageContext?.toolResults),
+      );
+      expect(padding).toHaveLength(0);
+    });
+
+    it("maintains valid alternating user/assistant pattern via merging", () => {
+      const msgs: Message[] = [user("a"), user("b"), user("c"), assistant("reply"), user("d")];
+      const { history } = buildHistory(msgs, "M");
+      for (let i = 0; i < history.length - 1; i++) {
+        const curr = history[i];
+        const next = history[i + 1];
+        // No two consecutive user or assistant entries
+        if (curr.userInputMessage) expect(next.assistantResponseMessage).toBeDefined();
+        if (curr.assistantResponseMessage) expect(next.userInputMessage).toBeDefined();
+      }
+    });
   });
 });

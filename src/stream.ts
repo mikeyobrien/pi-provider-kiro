@@ -277,14 +277,19 @@ export function streamKiro(
               }
             }
           if (armContent || armToolUses.length > 0) {
-            if (history.length > 0 && !history[history.length - 1].userInputMessage)
-              history.push({ userInputMessage: { content: "Continue", modelId: kiroModelId, origin: "KIRO_CLI" } });
-            history.push({
-              assistantResponseMessage: {
-                content: armContent,
-                ...(armToolUses.length > 0 ? { toolUses: armToolUses } : {}),
-              },
-            });
+            if (history.length > 0 && !history[history.length - 1].userInputMessage) {
+              // Merge into previous assistant message to maintain alternation without synthetic padding
+              const prev = history[history.length - 1].assistantResponseMessage!;
+              prev.content += "\n\n" + armContent;
+              if (armToolUses.length > 0) prev.toolUses = [...(prev.toolUses || []), ...armToolUses];
+            } else {
+              history.push({
+                assistantResponseMessage: {
+                  content: armContent,
+                  ...(armToolUses.length > 0 ? { toolUses: armToolUses } : {}),
+                },
+              });
+            }
           }
           const toolResultImages: ImageContent[] = [];
           for (let i = 1; i < currentMessages.length; i++) {
@@ -304,7 +309,7 @@ export function streamKiro(
             const converted = convertImagesToKiro(toolResultImages);
             currentImages = currentImages ? [...currentImages, ...converted] : converted;
           }
-          currentContent = currentToolResults.length > 0 ? "Tool results provided." : "Continue";
+          currentContent = currentToolResults.length > 0 ? "Tool results provided." : "Please proceed with the task.";
         } else if (firstMsg?.role === "toolResult") {
           const toolResultImages2: ImageContent[] = [];
           for (const m of currentMessages)
@@ -346,8 +351,8 @@ export function streamKiro(
           const imgs = extractImages(firstMsg);
           if (imgs.length > 0) currentImages = convertImagesToKiro(imgs as ImageContent[]);
         }
-        if (history.length > 0 && history[history.length - 1].userInputMessage)
-          history.push({ assistantResponseMessage: { content: "Continue" } });
+        // kiro-cli does not enforce alternation — the API accepts
+        // non-alternating history. No synthetic padding needed.
         const request: KiroRequest = {
           conversationState: {
             chatTriggerType: "MANUAL",
@@ -619,6 +624,16 @@ export function streamKiro(
             }
           }
         }
+        // Strip echo noise: when tool calls are present and the text content
+        // is just "." or similar short echo from history padding, remove it.
+        // This prevents the echo from accumulating in conversation history
+        // and reinforcing the pattern in future turns.
+        if (emittedToolCalls > 0 && textBlockIndex !== null) {
+          const textBlock = output.content[textBlockIndex] as TextContent;
+          if (/^\s*(\.+|continue)\s*$/i.test(textBlock.text)) {
+            textBlock.text = "";
+          }
+        }
         if (textBlockIndex !== null)
           stream.push({
             type: "text_end",
@@ -645,26 +660,44 @@ export function streamKiro(
         // ones). This happens when the stream is truncated early or the API
         // returns only a contextUsage event. Retry with backoff.
         //
+        // Also detect "Continue" echo loops: the model's entire response is
+        // just "continue" (case-insensitive) with no tool calls. This happens
+        // when synthetic history padding teaches the model to echo "Continue"
+        // as a valid response, causing an infinite loop where pi sends
+        // "continue" back and the model echoes it again.
+        //
         // When tool calls *were* present but all got dropped (empty/unparseable
         // input), don't retry — the API did respond, it just sent malformed
         // tool calls. Retrying would likely produce the same result. The
         // stopReason fix below prevents the agent loop stall.
         const hasText = textBlockIndex !== null && (output.content[textBlockIndex] as TextContent).text.length > 0;
-        if (!hasText && !sawAnyToolCalls) {
+        const responseText = hasText ? (output.content[textBlockIndex!] as TextContent).text : "";
+        const isEchoLoop = hasText && !sawAnyToolCalls && /^\s*(continue|\.+)\s*$/i.test(responseText);
+        if ((!hasText && !sawAnyToolCalls) || isEchoLoop) {
           if (retryCount < maxRetries) {
             retryCount++;
             const delayMs = exponentialBackoff(retryCount - 1, 1000, MAX_RETRY_DELAY);
             console.warn(
-              `[pi-provider-kiro] Empty response (no text, no tool calls) — retrying (${retryCount}/${maxRetries})`,
+              `[pi-provider-kiro] ${isEchoLoop ? 'Echo loop detected (model responded with just "Continue")' : "Empty response (no text, no tool calls)"} — retrying (${retryCount}/${maxRetries})`,
             );
             // Reset output content for the retry
             output.content = [];
+            textBlockIndex = null;
             await abortableDelay(delayMs, options?.signal);
             continue;
           }
-          console.warn(
-            `[pi-provider-kiro] Empty response after ${maxRetries} retries — returning stopReason:"stop" to avoid agent loop stall`,
-          );
+          if (isEchoLoop) {
+            // After max retries, strip the echo text to prevent the agent
+            // loop from interpreting "Continue" as a continuation signal.
+            (output.content[textBlockIndex!] as TextContent).text = "";
+            console.warn(
+              `[pi-provider-kiro] Echo loop persisted after ${maxRetries} retries — stripping "Continue" response`,
+            );
+          } else {
+            console.warn(
+              `[pi-provider-kiro] Empty response after ${maxRetries} retries — returning stopReason:"stop" to avoid agent loop stall`,
+            );
+          }
         }
         // Use emittedToolCalls (not toolCalls.length) to avoid stopReason:"toolUse"
         // when all tool calls were skipped due to empty/unparseable input — that
