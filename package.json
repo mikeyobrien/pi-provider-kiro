@@ -1,7 +1,7 @@
 {
   "name": "pi-provider-kiro",
   "version": "0.5.1",
-  "description": "pi extension for Kiro API (AWS CodeWhisperer/Q) — 18 models across 8 families with OAuth authentication",
+  "description": "pi extension for the Kiro API (AWS CodeWhisperer/Q) — 19 models across 8 families with OAuth authentication",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -21,7 +21,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc && esbuild dist/index.js --bundle --platform=node --format=esm --outfile=dist/index.js --allow-overwrite --external:@mariozechner/pi-ai --external:@mariozechner/pi-coding-agent",
+    "build": "tsc && esbuild dist/index.js --bundle --platform=node --format=esm --outfile=dist/index.js --allow-overwrite --external:@mariozechner/pi-ai --external:@mariozechner/pi-coding-agent --external:@mariozechner/pi-tui",
     "check": "tsc --noEmit",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
