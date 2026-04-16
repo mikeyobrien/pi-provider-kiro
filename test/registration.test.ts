@@ -4,7 +4,7 @@ import { kiroModels } from "../src/models.js";
 
 const mockPi = () => {
   const registerProvider = vi.fn();
-  return { pi: { registerProvider } as unknown as ExtensionAPI, registerProvider };
+  return { pi: { registerProvider, on: vi.fn() } as unknown as ExtensionAPI, registerProvider };
 };
 
 describe("Feature 1: Extension Registration", () => {

@@ -4,13 +4,12 @@
 //   - "idc": AWS Builder ID or IAM Identity Center (SSO) via device code flow
 //   - "desktop": Google/GitHub social login via Kiro auth service (delegates to kiro-cli)
 //
-// Social login (Google/GitHub) uses PKCE with localhost callback, which requires
-// either a local browser or SSH port forwarding. We delegate to kiro-cli for this
-// flow since it already handles the complexity.
+// When no existing credentials are found (no Kiro IDE, no kiro-cli), falls back
+// to the interactive login flow in login.ts (Feature 10).
 
-import { execFileSync } from "node:child_process";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@mariozechner/pi-ai";
 import { getKiroIdeCredentials, getKiroIdeCredentialsAllowExpired } from "./kiro-ide.js";
+import { interactiveLogin, loginViaKiroCli } from "./login.js";
 
 export const SSO_OIDC_ENDPOINT = "https://oidc.us-east-1.amazonaws.com";
 export const BUILDER_ID_START_URL = "https://view.awsapps.com/start";
@@ -106,120 +105,8 @@ export async function loginKiro(
     }
   }
 
-  // Fall back to device code flow
-  const regResp = await fetch(`${SSO_OIDC_ENDPOINT}/client/register`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "User-Agent": "pi-cli" },
-    body: JSON.stringify({
-      clientName: "pi-cli",
-      clientType: "public",
-      scopes: SSO_SCOPES,
-      grantTypes: ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"],
-    }),
-  });
-  if (!regResp.ok) throw new Error(`Client registration failed: ${regResp.status}`);
-  const { clientId, clientSecret } = (await regResp.json()) as { clientId: string; clientSecret: string };
-
-  const devResp = await fetch(`${SSO_OIDC_ENDPOINT}/device_authorization`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "User-Agent": "pi-cli" },
-    body: JSON.stringify({ clientId, clientSecret, startUrl: BUILDER_ID_START_URL }),
-  });
-  if (!devResp.ok) throw new Error(`Device authorization failed: ${devResp.status}`);
-  const devAuth = (await devResp.json()) as {
-    verificationUri: string;
-    verificationUriComplete: string;
-    userCode: string;
-    deviceCode: string;
-    interval: number;
-    expiresIn: number;
-  };
-
-  (callbacks as unknown as { onAuth: (info: { url: string; instructions: string }) => void }).onAuth({
-    url: devAuth.verificationUriComplete,
-    instructions: `Your code: ${devAuth.userCode}`,
-  });
-
-  const interval = (devAuth.interval || 5) * 1000;
-  const maxAttempts = Math.floor((devAuth.expiresIn || 600) / (devAuth.interval || 5));
-  let currentInterval = interval;
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    if ((callbacks as unknown as { signal?: AbortSignal }).signal?.aborted) throw new Error("Login cancelled");
-    await new Promise((r) => setTimeout(r, currentInterval));
-    const tokResp = await fetch(`${SSO_OIDC_ENDPOINT}/token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "User-Agent": "pi-cli" },
-      body: JSON.stringify({
-        clientId,
-        clientSecret,
-        deviceCode: devAuth.deviceCode,
-        grantType: "urn:ietf:params:oauth:grant-type:device_code",
-      }),
-    });
-    const tokData = (await tokResp.json()) as {
-      error?: string;
-      accessToken?: string;
-      refreshToken?: string;
-      expiresIn?: number;
-    };
-    if (tokData.error === "authorization_pending") continue;
-    if (tokData.error === "slow_down") {
-      currentInterval += interval;
-      continue;
-    }
-    if (tokData.error) throw new Error(`Authorization failed: ${tokData.error}`);
-    if (tokData.accessToken && tokData.refreshToken) {
-      return {
-        refresh: `${tokData.refreshToken}|${clientId}|${clientSecret}|idc`,
-        access: tokData.accessToken,
-        expires: Date.now() + (tokData.expiresIn || 3600) * 1000 - 5 * 60 * 1000,
-        clientId,
-        clientSecret,
-        region: "us-east-1",
-        authMethod: "idc" as KiroAuthMethod,
-      };
-    }
-  }
-  throw new Error("Authorization timed out");
-}
-
-/**
- * Delegate social login to kiro-cli.
- * Requires kiro-cli to be installed and in PATH.
- */
-async function loginViaKiroCli(
-  callbacks: OAuthLoginCallbacks,
-  provider: "google" | "github",
-): Promise<OAuthCredentials> {
-  const { getKiroCliCredentials, getKiroCliSocialToken } = await import("./kiro-cli.js");
-
-  (callbacks as unknown as { onProgress?: (msg: string) => void }).onProgress?.(
-    `Initiating ${provider} login via kiro-cli...`,
-  );
-
-  // Run kiro-cli login
-  try {
-    execFileSync("kiro-cli", ["login", "--license", "free"], {
-      timeout: 120000, // 2 minutes should be enough
-      stdio: "inherit", // Let kiro-cli handle the browser/auth UX
-    });
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    throw new Error(`kiro-cli login failed: ${msg}. Ensure kiro-cli is installed and in PATH.`);
-  }
-
-  // Read the new credentials from kiro-cli's DB (prefer social token)
-  const creds = getKiroCliSocialToken() || getKiroCliCredentials();
-  if (!creds) {
-    throw new Error("kiro-cli login completed but no credentials found in its database");
-  }
-
-  (callbacks as unknown as { onProgress?: (msg: string) => void }).onProgress?.(
-    creds.authMethod === "desktop" ? "Google/GitHub login successful" : "Login successful",
-  );
-
-  return creds;
+  // Fall back to interactive login (Feature 10)
+  return interactiveLogin(callbacks);
 }
 
 /**
