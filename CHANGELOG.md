@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-04-16
+
 ### Fixed
 
 - Exclude `@mariozechner/pi-tui` from the release bundle so `npm ci` / CI builds stop trying to inline `koffi` native binaries during `prepare`
@@ -119,7 +121,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release: 17 models across 7 families, OAuth device code flow, kiro-cli SQLite credential fallback, streaming pipeline with thinking tag parser
 
-[Unreleased]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.5.1...v0.5.2
 [0.4.2]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.4.0...v0.4.1
 [0.5.1]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.5.0...v0.5.1
