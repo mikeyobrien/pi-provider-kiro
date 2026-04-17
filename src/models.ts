@@ -132,7 +132,8 @@ export const kiroModels = [
     input: ["text", "image"] as ("text" | "image")[],
     cost: ZERO_COST,
     contextWindow: 1000000,
-    maxTokens: 32768,
+    maxTokens: 128000,
+    firstTokenTimeout: 180_000,
   },
   // Claude Opus 4.6
   {

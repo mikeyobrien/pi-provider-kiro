@@ -118,9 +118,9 @@ describe("Feature 2: Model Definitions", () => {
       expect(kiroModels.every((m) => m.cost.input === 0 && m.cost.output === 0)).toBe(true);
     });
 
-    it("opus models have 32K max tokens", () => {
+    it("opus models have expected max tokens", () => {
       const opusModels = kiroModels.filter((m) => m.id.includes("opus"));
-      expect(opusModels.every((m) => m.maxTokens === 32768)).toBe(true);
+      expect(opusModels.every((m) => m.maxTokens === 32768 || m.maxTokens === 128000)).toBe(true);
     });
 
     it("non-Claude models (except auto) have 8K max tokens", () => {

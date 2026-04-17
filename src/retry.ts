@@ -1,10 +1,21 @@
 // ABOUTME: Stream recovery helpers and Kiro-specific error classification.
 // ABOUTME: Keeps provider-local retry logic limited to auth refresh and stream quirks.
 
+import { kiroModels } from "./models.js";
+
 // kiro-cli uses 5-minute read/operation timeouts (DEFAULT_TIMEOUT_DURATION)
 // and 5-minute stalled stream grace period. 90s matches the TUI's
 // INITIAL_RESPONSE_TIMEOUT_MS for the first event from the backend.
 export const FIRST_TOKEN_TIMEOUT = 90_000;
+
+export function firstTokenTimeoutForModel(modelId: string): number {
+  // Allow test overrides via retryConfig.firstTokenTimeoutMs
+  if (retryConfig.firstTokenTimeoutMs !== FIRST_TOKEN_TIMEOUT) {
+    return retryConfig.firstTokenTimeoutMs;
+  }
+  const model = kiroModels.find((m) => m.id === modelId);
+  return model?.firstTokenTimeout ?? FIRST_TOKEN_TIMEOUT;
+}
 
 // Mutable config for values that tests need to override
 export const retryConfig = {

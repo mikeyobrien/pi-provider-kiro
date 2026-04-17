@@ -25,6 +25,7 @@ import { resolveKiroModel } from "./models.js";
 import {
   capacityRetryConfig,
   exponentialBackoff,
+  firstTokenTimeoutForModel,
   isCapacityError,
   isNonRetryableBodyError,
   isTooBigError,
@@ -466,6 +467,11 @@ export function streamKiro(
         let emittedToolCalls = 0;
         let sawAnyToolCalls = false;
         let currentToolCall: KiroToolCallState | null = null;
+        const flushToolCall = () => {
+          if (!currentToolCall) return;
+          if (emitToolCall(currentToolCall, output, stream)) emittedToolCalls++;
+          currentToolCall = null;
+        };
         const IDLE_TIMEOUT = 300_000;
         let idleTimer: ReturnType<typeof setTimeout> | null = null;
         const resetIdle = () => {
@@ -491,7 +497,7 @@ export function streamKiro(
             const result = await Promise.race([
               readPromise,
               new Promise<typeof FIRST_TOKEN_SENTINEL>((resolve) =>
-                setTimeout(() => resolve(FIRST_TOKEN_SENTINEL), retryConfig.firstTokenTimeoutMs),
+                setTimeout(() => resolve(FIRST_TOKEN_SENTINEL), firstTokenTimeoutForModel(model.id)),
               ),
             ]);
             if (result === FIRST_TOKEN_SENTINEL) {
@@ -516,67 +522,69 @@ export function streamKiro(
           // the stream is still actively flowing.
           resetIdle();
           for (const event of events) {
-            if (event.type === "contextUsage") {
-              const pct = event.data.contextUsagePercentage;
-              output.usage.input = Math.round((pct / 100) * model.contextWindow);
-              // Pass through the raw percentage so rho-web (and other UIs)
-              // can display it directly instead of back-calculating from
-              // input tokens / guessed context window — which breaks when
-              // the usage event later overwrites usage.input.
-              (output.usage as unknown as Record<string, unknown>).contextPercent = pct;
-              receivedContextUsage = true;
-              // Don't break the reader loop here — tool call input chunks
-              // may still be pending in subsequent network packets. The
-              // stream will close naturally when the server ends it.
-            } else if (event.type === "content") {
-              if (event.data === lastContentData) continue;
-              lastContentData = event.data;
-              totalContent += event.data;
-              if (thinkingParser) thinkingParser.processChunk(event.data);
-              else {
-                if (textBlockIndex === null) {
-                  textBlockIndex = output.content.length;
-                  output.content.push({ type: "text", text: "" });
-                  stream.push({ type: "text_start", contentIndex: textBlockIndex, partial: output });
-                }
-                (output.content[textBlockIndex] as TextContent).text += event.data;
-                stream.push({ type: "text_delta", contentIndex: textBlockIndex, delta: event.data, partial: output });
+            switch (event.type) {
+              case "contextUsage": {
+                const pct = event.data.contextUsagePercentage;
+                output.usage.input = Math.round((pct / 100) * model.contextWindow);
+                // Pass through the raw percentage so rho-web (and other UIs)
+                // can display it directly instead of back-calculating from
+                // input tokens / guessed context window — which breaks when
+                // the usage event later overwrites usage.input.
+                (output.usage as unknown as Record<string, unknown>).contextPercent = pct;
+                receivedContextUsage = true;
+                break;
               }
-            } else if (event.type === "toolUse") {
-              const tc = event.data;
-              sawAnyToolCalls = true;
-              if (!currentToolCall || currentToolCall.toolUseId !== tc.toolUseId) {
-                if (currentToolCall && emitToolCall(currentToolCall, output, stream)) {
-                  emittedToolCalls++;
+              case "content": {
+                if (event.data === lastContentData) continue;
+                lastContentData = event.data;
+                totalContent += event.data;
+                if (thinkingParser) {
+                  thinkingParser.processChunk(event.data);
+                } else {
+                  if (textBlockIndex === null) {
+                    textBlockIndex = output.content.length;
+                    output.content.push({ type: "text", text: "" });
+                    stream.push({ type: "text_start", contentIndex: textBlockIndex, partial: output });
+                  }
+                  (output.content[textBlockIndex] as TextContent).text += event.data;
+                  stream.push({ type: "text_delta", contentIndex: textBlockIndex, delta: event.data, partial: output });
                 }
-                currentToolCall = { toolUseId: tc.toolUseId, name: tc.name, input: "" };
+                break;
               }
-              currentToolCall.input += tc.input || "";
-              if (tc.stop && currentToolCall) {
-                if (emitToolCall(currentToolCall, output, stream)) {
-                  emittedToolCalls++;
+              case "toolUse": {
+                const tc = event.data;
+                sawAnyToolCalls = true;
+                if (!currentToolCall || currentToolCall.toolUseId !== tc.toolUseId) {
+                  flushToolCall();
+                  currentToolCall = { toolUseId: tc.toolUseId, name: tc.name, input: "" };
                 }
-                currentToolCall = null;
+                currentToolCall.input += tc.input || "";
+                if (tc.input) totalContent += tc.input;
+                if (tc.stop) flushToolCall();
+                break;
               }
-            } else if (event.type === "toolUseInput") {
-              if (currentToolCall) currentToolCall.input += event.data.input || "";
-            } else if (event.type === "toolUseStop") {
-              if (currentToolCall && event.data.stop) {
-                if (emitToolCall(currentToolCall, output, stream)) {
-                  emittedToolCalls++;
-                }
-                currentToolCall = null;
+              case "toolUseInput": {
+                if (currentToolCall) currentToolCall.input += event.data.input || "";
+                if (event.data.input) totalContent += event.data.input;
+                break;
               }
-            } else if (event.type === "usage") {
-              usageEvent = event.data;
-            } else if (event.type === "error") {
-              // API sent an error mid-stream (throttling, internal error, etc.)
-              const errMsg = event.data.message ? `${event.data.error}: ${event.data.message}` : event.data.error;
-              streamError = errMsg;
-              void reader.cancel().catch(() => {});
-              break;
+              case "toolUseStop": {
+                if (event.data.stop) flushToolCall();
+                break;
+              }
+              case "usage": {
+                usageEvent = event.data;
+                break;
+              }
+              case "error": {
+                const errMsg = event.data.message ? `${event.data.error}: ${event.data.message}` : event.data.error;
+                streamError = errMsg;
+                void reader.cancel().catch(() => {});
+                break;
+              }
+              // followupPrompt events are intentionally ignored
             }
-            // followupPrompt events are intentionally ignored
+            if (streamError) break;
           }
         }
         if (idleTimer) clearTimeout(idleTimer);
@@ -641,13 +649,16 @@ export function streamKiro(
             content: (output.content[textBlockIndex] as TextContent).text,
             partial: output,
           });
-        // Prefer usage event values when available, fall back to tiktoken
-        if (usageEvent) {
-          if (usageEvent.inputTokens !== undefined) output.usage.input = usageEvent.inputTokens;
-          if (usageEvent.outputTokens !== undefined) output.usage.output = usageEvent.outputTokens;
-        } else {
-          output.usage.output = countTokens(totalContent);
-        }
+        // The Kiro streaming API does not reliably emit per-response output
+        // token counts (unlike Anthropic's `output_tokens` or Bedrock's
+        // `usage.outputTokens`). When the `usage` event is missing or only
+        // reports `inputTokens`, fall back to a tiktoken estimate over
+        // everything the assistant emitted — text plus tool-call input JSON
+        // (accumulated into `totalContent` above). Otherwise tool-call-only
+        // turns report 0 output tokens and break consumers like the TPS
+        // extension that watch `usage.output`.
+        if (usageEvent?.inputTokens !== undefined) output.usage.input = usageEvent.inputTokens;
+        output.usage.output = usageEvent?.outputTokens ?? countTokens(totalContent);
         output.usage.totalTokens = output.usage.input + output.usage.output;
         try {
           calculateCost(model, output.usage);
