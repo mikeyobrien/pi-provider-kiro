@@ -5,21 +5,20 @@ describe("Feature 2: Model Definitions", () => {
   describe("resolveKiroModel", () => {
     it.each([
       // Claude models - dash to dot conversion
+      ["claude-opus-4-7", "claude-opus-4.7"],
       ["claude-opus-4-6", "claude-opus-4.6"],
       ["claude-opus-4-6-1m", "claude-opus-4.6-1m"],
       ["claude-sonnet-4-6", "claude-sonnet-4.6"],
       ["claude-sonnet-4-6-1m", "claude-sonnet-4.6-1m"],
       ["claude-opus-4-5", "claude-opus-4.5"],
       ["claude-sonnet-4-5", "claude-sonnet-4.5"],
-      ["claude-sonnet-4-5-1m", "claude-sonnet-4.5-1m"],
       ["claude-sonnet-4", "claude-sonnet-4"],
       ["claude-haiku-4-5", "claude-haiku-4.5"],
       // Non-Claude models
       ["deepseek-3-2", "deepseek-3.2"],
       ["kimi-k2-5", "kimi-k2.5"],
       ["minimax-m2-1", "minimax-m2.1"],
-      ["glm-4-7", "glm-4.7"],
-      ["glm-4-7-flash", "glm-4.7-flash"],
+      ["glm-5", "glm-5"],
       ["qwen3-coder-next", "qwen3-coder-next"],
       ["agi-nova-beta-1m", "agi-nova-beta-1m"],
       ["qwen3-coder-480b", "qwen3-coder-480b"],
@@ -33,8 +32,8 @@ describe("Feature 2: Model Definitions", () => {
   });
 
   describe("KIRO_MODEL_IDS", () => {
-    it("contains 20 model IDs", () => {
-      expect(KIRO_MODEL_IDS.size).toBe(20);
+    it("contains 19 model IDs", () => {
+      expect(KIRO_MODEL_IDS.size).toBe(18);
     });
   });
 
@@ -75,8 +74,8 @@ describe("Feature 2: Model Definitions", () => {
   });
 
   describe("model catalog", () => {
-    it("defines 20 models", () => {
-      expect(kiroModels).toHaveLength(20);
+    it("defines 19 models", () => {
+      expect(kiroModels).toHaveLength(18);
     });
 
     it("claude-haiku-4-5 has reasoning=false", () => {
