@@ -210,7 +210,23 @@ export async function loginKiroBuilderID(callbacks: OAuthLoginCallbacks): Promis
 // The actual AWS token is valid for this much longer than credentials.expires indicates.
 const EXPIRES_BUFFER_MS = 5 * 60 * 1000;
 
+// Refresh lock: prevents concurrent refresh attempts from racing.
+let refreshPromise: Promise<OAuthCredentials> | null = null;
+
 export async function refreshKiroToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
+  // If a refresh is already in progress, return the existing promise to avoid races
+  if (refreshPromise) {
+    return refreshPromise;
+  }
+
+  refreshPromise = refreshKiroTokenInner(credentials).finally(() => {
+    refreshPromise = null;
+  });
+
+  return refreshPromise;
+}
+
+async function refreshKiroTokenInner(credentials: OAuthCredentials): Promise<OAuthCredentials> {
   const { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, saveKiroCliCredentials, getKiroCliSocialToken } =
     await import("./kiro-cli.js");
 

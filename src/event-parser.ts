@@ -129,7 +129,7 @@ export function parseKiroEvents(buffer: string): { events: KiroStreamEvent[]; re
     }
 
     try {
-      const parsed = JSON.parse(buffer.substring(jsonStart, jsonEnd + 1));
+      const parsed = JSON.parse(buffer.substring(jsonStart, jsonEnd + 1).trim());
       const event = parseKiroEvent(parsed);
       if (event) events.push(event);
     } catch {
