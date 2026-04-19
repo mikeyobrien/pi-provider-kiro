@@ -18,9 +18,10 @@ import type {
 } from "@mariozechner/pi-ai";
 import { calculateCost, createAssistantMessageEventStream } from "@mariozechner/pi-ai";
 import { parseBracketToolCalls } from "./bracket-tool-parser.js";
+import { debugEnabled, debugLog } from "./debug.js";
 import { parseKiroEvents } from "./event-parser.js";
 import { addPlaceholderTools, HISTORY_LIMIT, HISTORY_LIMIT_CONTEXT_WINDOW, truncateHistory } from "./history.js";
-import { getKiroCliCredentials } from "./kiro-cli.js";
+import { getKiroCliCredentials, refreshViaKiroCli } from "./kiro-cli.js";
 import { resolveKiroModel } from "./models.js";
 import {
   capacityRetryConfig,
@@ -222,6 +223,19 @@ export function streamKiro(
       let profileArn = await resolveProfileArn(accessToken, endpoint);
       const kiroModelId = resolveKiroModel(model.id);
       const thinkingEnabled = !!options?.reasoning || model.reasoning;
+      debugLog("request.init", {
+        endpoint,
+        model: model.id,
+        kiroModelId,
+        contextWindow: model.contextWindow,
+        thinkingEnabled,
+        reasoning: options?.reasoning,
+        messageCount: context.messages.length,
+        toolCount: context.tools?.length ?? 0,
+        hasSystemPrompt: !!context.systemPrompt,
+        profileArn,
+        sessionId: options?.sessionId,
+      });
       let systemPrompt = context.systemPrompt ?? "";
       if (thinkingEnabled) {
         const budget =
@@ -380,6 +394,15 @@ export function streamKiro(
         while (true) {
           const mid = crypto.randomUUID().replace(/-/g, "");
           const ua = `aws-sdk-rust/1.0.0 ua/2.1 os/other lang/rust api/codewhispererstreaming#1.28.3 m/E app/AmazonQ-For-CLI md/appVersion-1.28.3-${mid}`;
+          debugLog("request.send", {
+            attempt: retryCount,
+            capacityAttempt: capacityRetryCount,
+            historyLen: history.length,
+            currentContentLen: currentContent.length,
+            hasImages: !!currentImages,
+            toolResultCount: currentToolResults.length,
+            request,
+          });
           response = await fetch(endpoint, {
             method: "POST",
             headers: {
@@ -404,6 +427,7 @@ export function streamKiro(
             } catch {
               errText = "";
             }
+            debugLog("response.error", { status: response.status, statusText: response.statusText, body: errText });
             // Retry transient capacity errors with longer backoff
             if (isCapacityError(errText) && capacityRetryCount < capacityRetryConfig.maxRetries) {
               capacityRetryCount++;
@@ -422,8 +446,9 @@ export function streamKiro(
             if (response.status === 403 && !isCapacityError(errText) && retryCount < maxRetries) {
               retryCount++;
               // On 403, try to get a fresh token before retrying — the current
-              // one may have been rotated by kiro-cli or another session.
-              const freshCreds = getKiroCliCredentials();
+              // one may have been rotated by kiro-cli or another session. If
+              // the cached kiro-cli token is also stale, actively refresh it.
+              const freshCreds = getKiroCliCredentials() ?? refreshViaKiroCli();
               if (freshCreds?.access) accessToken = freshCreds.access;
 
               // Re-resolve profileArn with fresh credentials
@@ -517,6 +542,7 @@ export function streamKiro(
           buffer += decoder.decode(value, { stream: true });
           const { events, remaining } = parseKiroEvents(buffer);
           buffer = remaining;
+          if (debugEnabled() && events.length > 0) debugLog("stream.events", events);
           // Reset idle timer on any bytes received — large tool call inputs
           // span many chunks that parse as zero events (incomplete JSON) but
           // the stream is still actively flowing.
@@ -720,12 +746,21 @@ export function streamKiro(
           output.stopReason = emittedToolCalls > 0 ? "toolUse" : "stop";
         }
         stream.push({ type: "done", reason: output.stopReason as "stop" | "toolUse", message: output });
+        debugLog("response.done", {
+          stopReason: output.stopReason,
+          emittedToolCalls,
+          sawAnyToolCalls,
+          textLen: textBlockIndex !== null ? (output.content[textBlockIndex] as TextContent).text.length : 0,
+          usage: output.usage,
+          content: output.content,
+        });
         stream.end();
         break;
       }
     } catch (error) {
       output.stopReason = options?.signal?.aborted ? "aborted" : "error";
       output.errorMessage = error instanceof Error ? error.message : String(error);
+      debugLog("response.caught", { stopReason: output.stopReason, error: output.errorMessage });
       stream.push({ type: "error", reason: output.stopReason, error: output });
       stream.end();
     }
