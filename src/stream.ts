@@ -83,6 +83,9 @@ function looksLikeTruncatedToolPreamble(content: AssistantMessage["content"]): b
   if (!lastText) return false;
   // Strong signal: text ends with a colon (about to show/do something)
   if (lastText.endsWith(":")) return true;
+  // If text ends with terminal punctuation, it's a complete thought — not truncated
+  const lastChar = lastText.slice(-1);
+  if ([".", "!", "?", ")", "]", "}", "`", '"', "'"].includes(lastChar)) return false;
   // Check the tail for action-announcing patterns
   const tail = lastText.slice(-200).toLowerCase();
   const actionPatterns = ["let me ", "i'll ", "now ", "going to ", "need to ", "let's ", "updating ", "i will "];
