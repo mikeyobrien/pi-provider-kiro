@@ -47,6 +47,10 @@ describe("Feature 2: Model Definitions", () => {
       expect(resolveApiRegion("eu-west-1")).toBe("eu-central-1");
     });
 
+    it("maps ap-southeast-2 to us-east-1", () => {
+      expect(resolveApiRegion("ap-southeast-2")).toBe("us-east-1");
+    });
+
     it("passes through us-east-1 unchanged", () => {
       expect(resolveApiRegion("us-east-1")).toBe("us-east-1");
     });
@@ -70,7 +74,7 @@ describe("Feature 2: Model Definitions", () => {
     });
 
     it("unknown region returns no models", () => {
-      expect(filterModelsByRegion(kiroModels, "ap-southeast-1")).toHaveLength(0);
+      expect(filterModelsByRegion(kiroModels, "af-south-1")).toHaveLength(0);
     });
   });
 
