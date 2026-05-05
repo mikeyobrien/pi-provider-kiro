@@ -134,4 +134,58 @@ describe("Feature 2: Model Definitions", () => {
       expect(nonClaudeModels.every((m) => m.maxTokens === 8192)).toBe(true);
     });
   });
+
+  // pi's UI exposes the `xhigh` thinking level only when a model's
+  // `thinkingLevelMap.xhigh` is explicitly defined (not undefined, not null).
+  // All other levels are opt-out. Mirror the pi-ai filter locally so this test
+  // is self-contained and version-independent from @mariozechner/pi-ai.
+  //
+  // Source: @mariozechner/pi-ai models.ts → getSupportedThinkingLevels
+  describe("thinkingLevelMap — pi UI exposes xhigh", () => {
+    const EXTENDED_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+    type Level = (typeof EXTENDED_LEVELS)[number];
+
+    function supportedLevels(model: (typeof kiroModels)[number]): Level[] {
+      if (!model.reasoning) return ["off"];
+      return EXTENDED_LEVELS.filter((level) => {
+        const mapped = (model as { thinkingLevelMap?: Partial<Record<Level, string | null>> }).thinkingLevelMap?.[level];
+        if (mapped === null) return false;
+        if (level === "xhigh") return mapped !== undefined;
+        return true;
+      });
+    }
+
+    const XHIGH_MODELS = ["claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-6-1m"];
+
+    it("Opus 4.7/4.6 models offer xhigh (and all other levels)", () => {
+      for (const m of kiroModels.filter((x) => XHIGH_MODELS.includes(x.id))) {
+        expect(supportedLevels(m), `${m.id} supported levels`).toEqual([
+          "off",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+        ]);
+      }
+    });
+
+    it("other reasoning models offer up to high (no xhigh)", () => {
+      for (const m of kiroModels.filter((x) => x.reasoning && !XHIGH_MODELS.includes(x.id))) {
+        expect(supportedLevels(m), `${m.id} supported levels`).toEqual([
+          "off",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+        ]);
+      }
+    });
+
+    it("non-reasoning models still collapse to ['off']", () => {
+      for (const m of kiroModels.filter((x) => !x.reasoning)) {
+        expect(supportedLevels(m), `${m.id} supported levels`).toEqual(["off"]);
+      }
+    });
+  });
 });
