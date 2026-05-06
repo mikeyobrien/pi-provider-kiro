@@ -135,11 +135,12 @@ export function buildHistory(
         origin: "KIRO_CLI",
         ...(images.length > 0 ? { images: convertImagesToKiro(images) } : {}),
       };
-      if (history[history.length - 1]?.userInputMessage) {
+      const lastEntryForUim = history[history.length - 1];
+      const prevUim = lastEntryForUim?.userInputMessage;
+      if (prevUim) {
         // Merge into previous user message to maintain alternation without synthetic padding
-        const prev = history[history.length - 1].userInputMessage!;
-        prev.content += "\n\n" + uim.content;
-        if (uim.images) prev.images = [...(prev.images || []), ...uim.images];
+        prevUim.content += `\n\n${uim.content}`;
+        if (uim.images) prevUim.images = [...(prevUim.images || []), ...uim.images];
       } else {
         history.push({ userInputMessage: uim });
       }
@@ -190,14 +191,15 @@ export function buildHistory(
         j++;
       }
       i = j - 1;
-      if (history[history.length - 1]?.userInputMessage) {
+      const lastEntryForTr = history[history.length - 1];
+      const prevTr = lastEntryForTr?.userInputMessage;
+      if (prevTr) {
         // Merge tool results into previous user message to maintain alternation without synthetic padding
-        const prev = history[history.length - 1].userInputMessage!;
-        prev.content += "\n\nTool results provided.";
-        if (trImages.length > 0) prev.images = [...(prev.images || []), ...convertImagesToKiro(trImages)];
-        if (!prev.userInputMessageContext) prev.userInputMessageContext = {};
-        prev.userInputMessageContext.toolResults = [
-          ...(prev.userInputMessageContext.toolResults || []),
+        prevTr.content += "\n\nTool results provided.";
+        if (trImages.length > 0) prevTr.images = [...(prevTr.images || []), ...convertImagesToKiro(trImages)];
+        if (!prevTr.userInputMessageContext) prevTr.userInputMessageContext = {};
+        prevTr.userInputMessageContext.toolResults = [
+          ...(prevTr.userInputMessageContext.toolResults || []),
           ...toolResults,
         ];
       } else {

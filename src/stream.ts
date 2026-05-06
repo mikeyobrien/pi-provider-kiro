@@ -31,7 +31,6 @@ import {
   isNonRetryableBodyError,
   isTooBigError,
   MAX_RETRY_DELAY,
-  retryConfig,
 } from "./retry.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
 import { countTokens } from "./tokenizer.js";
@@ -292,11 +291,12 @@ export function streamKiro(
               }
             }
           if (armContent || armToolUses.length > 0) {
-            if (history.length > 0 && !history[history.length - 1].userInputMessage) {
+            const lastEntryForArm = history[history.length - 1];
+            const prevArm = lastEntryForArm?.assistantResponseMessage;
+            if (history.length > 0 && !lastEntryForArm?.userInputMessage && prevArm) {
               // Merge into previous assistant message to maintain alternation without synthetic padding
-              const prev = history[history.length - 1].assistantResponseMessage!;
-              prev.content += "\n\n" + armContent;
-              if (armToolUses.length > 0) prev.toolUses = [...(prev.toolUses || []), ...armToolUses];
+              prevArm.content += `\n\n${armContent}`;
+              if (armToolUses.length > 0) prevArm.toolUses = [...(prevArm.toolUses || []), ...armToolUses];
             } else {
               history.push({
                 assistantResponseMessage: {
@@ -708,7 +708,7 @@ export function streamKiro(
         // tool calls. Retrying would likely produce the same result. The
         // stopReason fix below prevents the agent loop stall.
         const hasText = textBlockIndex !== null && (output.content[textBlockIndex] as TextContent).text.length > 0;
-        const responseText = hasText ? (output.content[textBlockIndex!] as TextContent).text : "";
+        const responseText = hasText ? (output.content[textBlockIndex as number] as TextContent).text : "";
         const isEchoLoop = hasText && !sawAnyToolCalls && /^\s*(continue|\.+)\s*$/i.test(responseText);
         if ((!hasText && !sawAnyToolCalls) || isEchoLoop) {
           if (retryCount < maxRetries) {
@@ -726,7 +726,7 @@ export function streamKiro(
           if (isEchoLoop) {
             // After max retries, strip the echo text to prevent the agent
             // loop from interpreting "Continue" as a continuation signal.
-            (output.content[textBlockIndex!] as TextContent).text = "";
+            (output.content[textBlockIndex as number] as TextContent).text = "";
             console.warn(
               `[pi-provider-kiro] Echo loop persisted after ${maxRetries} retries — stripping "Continue" response`,
             );

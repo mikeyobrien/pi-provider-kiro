@@ -11,6 +11,7 @@ import type {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { capacityRetryConfig, retryConfig } from "../src/retry.js";
 import { resetProfileArnCache, streamKiro } from "../src/stream.js";
+import type { KiroHistoryEntry } from "../src/transform.js";
 
 const ts = Date.now();
 const zeroUsage = {
@@ -2203,7 +2204,7 @@ describe("Feature 9: Streaming Integration", () => {
     // Padding uses "..." which is caught by echo stripping — not "Continue" or "."
     const history = body.conversationState.history || [];
     const badPadding = history.filter(
-      (h: any) =>
+      (h: KiroHistoryEntry) =>
         (h.assistantResponseMessage && /^(Continue|\.)$/i.test(h.assistantResponseMessage.content)) ||
         (h.userInputMessage && /^(Continue|\.)$/i.test(h.userInputMessage.content)),
     );
