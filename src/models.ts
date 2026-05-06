@@ -91,7 +91,7 @@ const MODELS_BY_REGION: Record<string, Set<string>> = {
     "agi-nova-beta-1m",
     "auto",
   ]),
-  // API-verified 2026-04-14 (eu-west-1 IdC token)
+  // API-verified 2026-04-14 (eu-west-1 IdC token), glm-5 removed 2026-05-05 (us-east-1 only)
   "eu-central-1": new Set([
     "claude-opus-4-7",
     "claude-opus-4-6",
@@ -102,7 +102,6 @@ const MODELS_BY_REGION: Record<string, Set<string>> = {
     "claude-haiku-4-5",
     "minimax-m2-1",
     "minimax-m2-5",
-    "glm-5",
     "qwen3-coder-next",
     "auto",
   ]),
