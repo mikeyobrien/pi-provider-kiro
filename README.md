@@ -1,6 +1,6 @@
 # pi-provider-kiro
 
-A [pi](https://shittycodingagent.ai/) provider extension that connects pi to the **Kiro API** (AWS CodeWhisperer/Q), exposing **19 free models across 8 families** through one provider surface.
+A [pi](https://shittycodingagent.ai/) provider extension that connects pi to the **Kiro API** (AWS CodeWhisperer/Q), exposing **12 kiro-cli-verified models** through one provider surface.
 
 ## Why this exists
 
@@ -43,19 +43,16 @@ If you already use [kiro-cli](https://kiro.dev), the provider can reuse those cr
 
 | Family | Models | Context | Reasoning |
 |--------|--------|---------|-----------|
-| Claude Opus 4.6 | `claude-opus-4-6`, `claude-opus-4-6-1m` | 200K / 1M | ✓ |
-| Claude Sonnet 4.6 | `claude-sonnet-4-6`, `claude-sonnet-4-6-1m` | 200K / 1M | ✓ |
-| Claude Opus 4.5 | `claude-opus-4-5` | 200K | ✓ |
-| Claude Sonnet 4.5 | `claude-sonnet-4-5`, `claude-sonnet-4-5-1m` | 200K / 1M | ✓ |
+| Claude Opus | `claude-opus-4-7`, `claude-opus-4-6` | 1M | ✓ |
+| Claude Sonnet 4.6 | `claude-sonnet-4-6` | 1M | ✓ |
+| Claude Sonnet 4.5 | `claude-sonnet-4-5` | 200K | ✓ |
 | Claude Sonnet 4 | `claude-sonnet-4` | 200K | ✓ |
 | Claude Haiku 4.5 | `claude-haiku-4-5` | 200K | ✗ |
-| DeepSeek 3.2 | `deepseek-3-2` | 128K | ✓ |
-| Kimi K2.5 | `kimi-k2-5` | 200K | ✓ |
-| MiniMax | `minimax-m2-1`, `minimax-m2-5` | 200K | ✗ |
-| GLM 4.7 | `glm-4-7`, `glm-4-7-flash` | 128K | ✓ / ✗ |
-| Qwen3 Coder | `qwen3-coder-next`, `qwen3-coder-480b` | 256K / 128K | ✓ |
-| AGI Nova | `agi-nova-beta-1m` | 1M | ✓ |
-| Auto | `auto` | 200K | ✓ |
+| DeepSeek 3.2 | `deepseek-3-2` | 164K | ✓ |
+| MiniMax | `minimax-m2-1`, `minimax-m2-5` | 196K | ✗ |
+| GLM 5 | `glm-5` | 200K | ✓ |
+| Qwen3 Coder | `qwen3-coder-next` | 256K | ✓ |
+| Auto | `auto` | 1M | ✓ |
 
 All listed models are free to use through Kiro.
 
@@ -101,7 +98,7 @@ The extension is organized as one feature per file:
 ```
 src/
 ├── index.ts            # Extension registration
-├── models.ts           # 19 model definitions + ID resolution
+├── models.ts           # 12 model definitions + ID resolution
 ├── oauth.ts            # Multi-provider auth (Builder ID / Google / GitHub)
 ├── kiro-cli.ts         # kiro-cli credential sharing
 ├── transform.ts        # Message format conversion

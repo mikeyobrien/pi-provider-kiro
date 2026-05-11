@@ -30,6 +30,8 @@ export interface KiroCredentials extends OAuthCredentials {
   clientSecret: string;
   region: string;
   authMethod: KiroAuthMethod;
+  /** Required for Google/GitHub social profiles; ListAvailableProfiles may return empty for these tokens. */
+  profileArn?: string;
 }
 
 /**
@@ -193,7 +195,12 @@ async function refreshKiroTokenDirect(credentials: OAuthCredentials): Promise<OA
       body: JSON.stringify({ refreshToken }),
     });
     if (!response.ok) throw new Error(`Desktop token refresh failed: ${response.status}`);
-    const data = (await response.json()) as { accessToken: string; refreshToken?: string; expiresIn: number };
+    const data = (await response.json()) as {
+      accessToken: string;
+      refreshToken?: string;
+      expiresIn: number;
+      profileArn?: string;
+    };
     if (!data.accessToken) throw new Error("Desktop token refresh: missing accessToken");
     return {
       refresh: `${data.refreshToken || refreshToken}|desktop`,
@@ -203,6 +210,7 @@ async function refreshKiroTokenDirect(credentials: OAuthCredentials): Promise<OA
       clientSecret: "",
       region,
       authMethod: "desktop" as KiroAuthMethod,
+      profileArn: data.profileArn || (credentials as KiroCredentials).profileArn,
     };
   }
 

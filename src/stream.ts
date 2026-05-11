@@ -21,7 +21,7 @@ import { parseBracketToolCalls } from "./bracket-tool-parser.js";
 import { debugEnabled, debugLog } from "./debug.js";
 import { parseKiroEvents } from "./event-parser.js";
 import { addPlaceholderTools, HISTORY_LIMIT, HISTORY_LIMIT_CONTEXT_WINDOW, truncateHistory } from "./history.js";
-import { getKiroCliCredentials, refreshViaKiroCli } from "./kiro-cli.js";
+import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, refreshViaKiroCli } from "./kiro-cli.js";
 import { resolveKiroModel } from "./models.js";
 import {
   capacityRetryConfig,
@@ -145,9 +145,9 @@ async function resolveProfileArn(accessToken: string, endpoint: string): Promise
     const j = (await r.json()) as { profiles?: Array<{ arn?: string }> };
     const arn = j.profiles?.find((p) => p.arn)?.arn;
     if (!arn) {
-      console.warn(
-        "[pi-provider-kiro] Failed to resolve profileArn: ListAvailableProfiles returned no profile ARN. Will retry on the next request.",
-      );
+      debugLog("profileArn.empty", {
+        message: "ListAvailableProfiles returned no profile ARN; this is expected for some social-login tokens.",
+      });
       return undefined;
     }
     profileArnCache.set(endpoint, arn);
@@ -220,7 +220,11 @@ export function streamKiro(
       if (!accessToken) throw new Error("Kiro credentials not set. Run /login kiro or install kiro-cli.");
       const endpoint = model.baseUrl || "https://q.us-east-1.amazonaws.com/generateAssistantResponse";
 
-      let profileArn = await resolveProfileArn(accessToken, endpoint);
+      const optionProfileArn = (options as unknown as { credentials?: { profileArn?: string }; profileArn?: string })
+        ?.credentials?.profileArn || (options as unknown as { profileArn?: string })?.profileArn;
+      const cliCreds = getKiroCliCredentials() ?? getKiroCliCredentialsAllowExpired();
+      const cliProfileArn = cliCreds?.access === accessToken ? cliCreds.profileArn : undefined;
+      let profileArn = optionProfileArn || cliProfileArn || (await resolveProfileArn(accessToken, endpoint));
       const kiroModelId = resolveKiroModel(model.id);
       const thinkingEnabled = !!options?.reasoning || model.reasoning;
       debugLog("request.init", {
@@ -453,7 +457,12 @@ export function streamKiro(
 
               // Re-resolve profileArn with fresh credentials
               profileArnCache.delete(endpoint);
-              profileArn = await resolveProfileArn(accessToken, endpoint);
+              const refreshedProfileArn =
+                (options as unknown as { credentials?: { profileArn?: string }; profileArn?: string })?.credentials
+                  ?.profileArn ||
+                (options as unknown as { profileArn?: string })?.profileArn ||
+                freshCreds?.profileArn;
+              profileArn = refreshedProfileArn || (await resolveProfileArn(accessToken, endpoint));
               const delayMs = exponentialBackoff(retryCount - 1, 500, MAX_RETRY_DELAY);
               await abortableDelay(delayMs, options?.signal);
               break; // break inner loop, continue outer loop

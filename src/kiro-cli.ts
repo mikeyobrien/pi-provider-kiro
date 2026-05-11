@@ -151,6 +151,7 @@ function tryKiroCliToken(
       clientSecret: "",
       region,
       authMethod: "desktop",
+      profileArn: tokenData.profile_arn || tokenData.profileArn,
     };
   }
 
@@ -240,6 +241,7 @@ export function saveKiroCliCredentials(creds: KiroCredentials): void {
       tokenData.refresh_token = rawRefreshToken;
       tokenData.expires_at = expiresAt;
       if (creds.region) tokenData.region = creds.region;
+      if (creds.profileArn) tokenData.profile_arn = creds.profileArn;
 
       const escaped = JSON.stringify(tokenData).replace(/'/g, "''");
       const sql = `UPDATE auth_kv SET value = '${escaped}' WHERE key = '${key}';`;

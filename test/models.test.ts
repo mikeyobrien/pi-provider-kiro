@@ -7,21 +7,15 @@ describe("Feature 2: Model Definitions", () => {
       // Claude models - dash to dot conversion
       ["claude-opus-4-7", "claude-opus-4.7"],
       ["claude-opus-4-6", "claude-opus-4.6"],
-      ["claude-opus-4-6-1m", "claude-opus-4.6-1m"],
       ["claude-sonnet-4-6", "claude-sonnet-4.6"],
-      ["claude-sonnet-4-6-1m", "claude-sonnet-4.6-1m"],
-      ["claude-opus-4-5", "claude-opus-4.5"],
       ["claude-sonnet-4-5", "claude-sonnet-4.5"],
       ["claude-sonnet-4", "claude-sonnet-4"],
       ["claude-haiku-4-5", "claude-haiku-4.5"],
       // Non-Claude models
       ["deepseek-3-2", "deepseek-3.2"],
-      ["kimi-k2-5", "kimi-k2.5"],
       ["minimax-m2-1", "minimax-m2.1"],
       ["glm-5", "glm-5"],
       ["qwen3-coder-next", "qwen3-coder-next"],
-      ["agi-nova-beta-1m", "agi-nova-beta-1m"],
-      ["qwen3-coder-480b", "qwen3-coder-480b"],
     ])("maps %s → %s", (piId, kiroId) => {
       expect(resolveKiroModel(piId)).toBe(kiroId);
     });
@@ -32,8 +26,8 @@ describe("Feature 2: Model Definitions", () => {
   });
 
   describe("KIRO_MODEL_IDS", () => {
-    it("contains 19 model IDs", () => {
-      expect(KIRO_MODEL_IDS.size).toBe(18);
+    it("contains 12 model IDs", () => {
+      expect(KIRO_MODEL_IDS.size).toBe(12);
     });
   });
 
@@ -78,8 +72,8 @@ describe("Feature 2: Model Definitions", () => {
   });
 
   describe("model catalog", () => {
-    it("defines 19 models", () => {
-      expect(kiroModels).toHaveLength(18);
+    it("defines 12 models", () => {
+      expect(kiroModels).toHaveLength(12);
     });
 
     it("claude-haiku-4-5 has reasoning=false", () => {
@@ -95,27 +89,16 @@ describe("Feature 2: Model Definitions", () => {
       expect(kiroModels.find((m) => m.id === "minimax-m2-1")?.reasoning).toBe(false);
     });
 
-    it("1M context models have 1M context window", () => {
-      const oneMillionModels = kiroModels.filter((m) => m.id.includes("1m"));
-      expect(oneMillionModels.every((m) => m.contextWindow === 1000000)).toBe(true);
-    });
-
     it("Claude models support text and image input", () => {
       const claudeModels = kiroModels.filter((m) => m.id.startsWith("claude-"));
       expect(claudeModels.every((m) => m.input.includes("text") && m.input.includes("image"))).toBe(true);
     });
 
-    it("non-Claude models (except agi-nova and auto) support text only", () => {
+    it("non-Claude models (except auto) support text only", () => {
       const textOnlyModels = kiroModels.filter(
-        (m) => !m.id.startsWith("claude-") && !m.id.startsWith("agi-nova") && m.id !== "auto",
+        (m) => !m.id.startsWith("claude-") && m.id !== "auto",
       );
       expect(textOnlyModels.every((m) => m.input.includes("text") && !m.input.includes("image"))).toBe(true);
-    });
-
-    it("agi-nova supports text and image", () => {
-      const agiNova = kiroModels.find((m) => m.id === "agi-nova-beta-1m");
-      expect(agiNova?.input).toContain("text");
-      expect(agiNova?.input).toContain("image");
     });
 
     it("all models have zero cost", () => {
@@ -129,7 +112,7 @@ describe("Feature 2: Model Definitions", () => {
 
     it("non-Claude models (except auto) have 8K max tokens", () => {
       const nonClaudeModels = kiroModels.filter(
-        (m) => !m.id.startsWith("claude-") && !m.id.startsWith("agi-nova") && m.id !== "auto",
+        (m) => !m.id.startsWith("claude-") && m.id !== "auto",
       );
       expect(nonClaudeModels.every((m) => m.maxTokens === 8192)).toBe(true);
     });
@@ -155,7 +138,7 @@ describe("Feature 2: Model Definitions", () => {
       });
     }
 
-    const XHIGH_MODELS = ["claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-6-1m"];
+    const XHIGH_MODELS = ["claude-opus-4-7", "claude-opus-4-6"];
 
     it("Opus 4.7/4.6 models offer xhigh (and all other levels)", () => {
       for (const m of kiroModels.filter((x) => XHIGH_MODELS.includes(x.id))) {
