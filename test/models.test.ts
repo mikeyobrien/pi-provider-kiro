@@ -149,7 +149,9 @@ describe("Feature 2: Model Definitions", () => {
     function supportedLevels(model: (typeof kiroModels)[number]): Level[] {
       if (!model.reasoning) return ["off"];
       return EXTENDED_LEVELS.filter((level) => {
-        const mapped = (model as { thinkingLevelMap?: Partial<Record<Level, string | null>> }).thinkingLevelMap?.[level];
+        const mapped = (model as { thinkingLevelMap?: Partial<Record<Level, string | null>> }).thinkingLevelMap?.[
+          level
+        ];
         if (mapped === null) return false;
         if (level === "xhigh") return mapped !== undefined;
         return true;
@@ -173,13 +175,7 @@ describe("Feature 2: Model Definitions", () => {
 
     it("other reasoning models offer up to high (no xhigh)", () => {
       for (const m of kiroModels.filter((x) => x.reasoning && !XHIGH_MODELS.includes(x.id))) {
-        expect(supportedLevels(m), `${m.id} supported levels`).toEqual([
-          "off",
-          "minimal",
-          "low",
-          "medium",
-          "high",
-        ]);
+        expect(supportedLevels(m), `${m.id} supported levels`).toEqual(["off", "minimal", "low", "medium", "high"]);
       }
     });
 

@@ -37,11 +37,15 @@ export async function showLoginUI(): Promise<LoginChoice> {
         const { execFileSync } = require("node:child_process");
         execFileSync("kiro-cli", ["--version"], { stdio: "pipe", timeout: 3000 });
         return true;
-      } catch { return false; }
+      } catch {
+        return false;
+      }
     })();
 
     const items: SelectItem[] = [
-      ...(hasKiroCli ? [{ value: "kiro-cli", label: "kiro-cli (browser)", description: "Open browser login via kiro-cli" }] : []),
+      ...(hasKiroCli
+        ? [{ value: "kiro-cli", label: "kiro-cli (browser)", description: "Open browser login via kiro-cli" }]
+        : []),
       { value: "builder-id", label: "Builder ID", description: "AWS Builder ID (default)" },
       { value: "idc", label: "Your organization", description: "IAM Identity Center (SSO)" },
       { value: "google", label: "Google", description: "Social login via kiro-cli" },

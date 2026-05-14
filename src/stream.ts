@@ -31,7 +31,6 @@ import {
   isNonRetryableBodyError,
   isTooBigError,
   MAX_RETRY_DELAY,
-  retryConfig,
 } from "./retry.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
 import { countTokens } from "./tokenizer.js";
@@ -295,7 +294,7 @@ export function streamKiro(
             if (history.length > 0 && !history[history.length - 1].userInputMessage) {
               // Merge into previous assistant message to maintain alternation without synthetic padding
               const prev = history[history.length - 1].assistantResponseMessage!;
-              prev.content += "\n\n" + armContent;
+              prev.content += `\n\n${armContent}`;
               if (armToolUses.length > 0) prev.toolUses = [...(prev.toolUses || []), ...armToolUses];
             } else {
               history.push({

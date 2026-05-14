@@ -138,7 +138,7 @@ export function buildHistory(
       if (history[history.length - 1]?.userInputMessage) {
         // Merge into previous user message to maintain alternation without synthetic padding
         const prev = history[history.length - 1].userInputMessage!;
-        prev.content += "\n\n" + uim.content;
+        prev.content += `\n\n${uim.content}`;
         if (uim.images) prev.images = [...(prev.images || []), ...uim.images];
       } else {
         history.push({ userInputMessage: uim });
