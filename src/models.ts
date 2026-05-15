@@ -1,26 +1,20 @@
 // Feature 2: Model Definitions
 
+import { execFileSync } from "node:child_process";
+
 // Valid Kiro model IDs - API accepts friendly names directly
 export const KIRO_MODEL_IDS = new Set([
-  "claude-opus-4.7",
   "claude-opus-4.6",
-  "claude-opus-4.6-1m",
   "claude-sonnet-4.6",
-  "claude-sonnet-4.6-1m",
   "claude-opus-4.5",
   "claude-sonnet-4.5",
-  "claude-sonnet-4.5-1m",
   "claude-sonnet-4",
   "claude-haiku-4.5",
   "deepseek-3.2",
-  "kimi-k2.5",
   "minimax-m2.1",
   "minimax-m2.5",
-  "glm-4.7",
-  "glm-4.7-flash",
+  "glm-5",
   "qwen3-coder-next",
-  "agi-nova-beta-1m",
-  "qwen3-coder-480b",
   "auto",
 ]);
 
@@ -89,30 +83,20 @@ export function resolveApiRegion(ssoRegion: string | undefined): string {
  */
 const MODELS_BY_REGION: Record<string, Set<string>> = {
   "us-east-1": new Set([
-    "claude-opus-4-7",
     "claude-opus-4-6",
-    "claude-opus-4-6-1m",
     "claude-sonnet-4-6",
-    "claude-sonnet-4-6-1m",
     "claude-opus-4-5",
     "claude-sonnet-4-5",
-    "claude-sonnet-4-5-1m",
     "claude-sonnet-4",
     "claude-haiku-4-5",
     "deepseek-3-2",
-    "kimi-k2-5",
     "minimax-m2-1",
     "minimax-m2-5",
-    "glm-4-7",
-    "glm-4-7-flash",
+    "glm-5",
     "qwen3-coder-next",
-    "qwen3-coder-480b",
-    "agi-nova-beta-1m",
     "auto",
   ]),
-  // API-verified 2026-04-14 (eu-west-1 IdC token)
   "eu-central-1": new Set([
-    "claude-opus-4-7",
     "claude-opus-4-6",
     "claude-sonnet-4-6",
     "claude-opus-4-5",
@@ -127,7 +111,28 @@ const MODELS_BY_REGION: Record<string, Set<string>> = {
 };
 
 /** Filter a model list to only those available in the given API region.
- *  Unknown regions return an empty list — add the region to MODELS_BY_REGION. */
+ *  Falls back to MODELS_BY_REGION allowlist when kiro-cli is unavailable. */
+
+type KiroCliModel = { model_id: string };
+let cachedCliModels: KiroCliModel[] | null = null;
+
+function fetchKiroCliModels(): KiroCliModel[] | null {
+  if (cachedCliModels !== null) return cachedCliModels;
+  try {
+    const out = execFileSync("kiro-cli", ["chat", "--list-models", "--format", "json"], {
+      timeout: 5000,
+      stdio: ["pipe", "pipe", "pipe"],
+      encoding: "utf-8",
+    });
+    const data = JSON.parse(out) as { models: KiroCliModel[] };
+    cachedCliModels = data.models ?? [];
+    return cachedCliModels;
+  } catch {
+    cachedCliModels = []; // don't retry on failure
+    return null;
+  }
+}
+
 export function filterModelsByRegion<T extends { id: string }>(models: T[], apiRegion: string): T[] {
   const allowed = MODELS_BY_REGION[apiRegion];
   if (!allowed) {
@@ -136,28 +141,22 @@ export function filterModelsByRegion<T extends { id: string }>(models: T[], apiR
     );
     return [];
   }
-  return models.filter((m) => allowed.has(m.id));
+  let filtered = models.filter((m) => allowed.has(m.id));
+
+  // Intersect with live kiro-cli model list to remove IDs no longer valid
+  const cliModels = fetchKiroCliModels();
+  if (cliModels && cliModels.length > 0) {
+    const cliIds = new Set(cliModels.map((m) => m.model_id.replace(/(\d)\.(\d)/g, "$1-$2")));
+    filtered = filtered.filter((m) => cliIds.has(m.id));
+  }
+
+  return filtered;
 }
 
 const BASE_URL = "https://q.us-east-1.amazonaws.com/generateAssistantResponse";
 const ZERO_COST = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 
 export const kiroModels = [
-  // Claude Opus 4.7
-  {
-    id: "claude-opus-4-7",
-    name: "Claude Opus 4.7",
-    api: "kiro-api" as const,
-    provider: "kiro" as const,
-    baseUrl: BASE_URL,
-    reasoning: true,
-    thinkingLevelMap: { xhigh: "xhigh" },
-    input: ["text", "image"] as ("text" | "image")[],
-    cost: ZERO_COST,
-    contextWindow: 1000000,
-    maxTokens: 128000,
-    firstTokenTimeout: 180_000,
-  },
   // Claude Opus 4.6
   {
     id: "claude-opus-4-6",
@@ -171,36 +170,12 @@ export const kiroModels = [
     cost: ZERO_COST,
     contextWindow: 1000000,
     maxTokens: 32768,
-  },
-  {
-    id: "claude-opus-4-6-1m",
-    name: "Claude Opus 4.6 (1M) [Deprecated]",
-    api: "kiro-api" as const,
-    provider: "kiro" as const,
-    baseUrl: BASE_URL,
-    reasoning: true,
-    thinkingLevelMap: { xhigh: "xhigh" },
-    input: ["text", "image"] as ("text" | "image")[],
-    cost: ZERO_COST,
-    contextWindow: 1000000,
-    maxTokens: 32768,
+    firstTokenTimeout: 180_000,
   },
   // Claude Sonnet 4.6
   {
     id: "claude-sonnet-4-6",
     name: "Claude Sonnet 4.6",
-    api: "kiro-api" as const,
-    provider: "kiro" as const,
-    baseUrl: BASE_URL,
-    reasoning: true,
-    input: ["text", "image"] as ("text" | "image")[],
-    cost: ZERO_COST,
-    contextWindow: 1000000,
-    maxTokens: 65536,
-  },
-  {
-    id: "claude-sonnet-4-6-1m",
-    name: "Claude Sonnet 4.6 (1M) [Deprecated]",
     api: "kiro-api" as const,
     provider: "kiro" as const,
     baseUrl: BASE_URL,
@@ -234,18 +209,6 @@ export const kiroModels = [
     input: ["text", "image"] as ("text" | "image")[],
     cost: ZERO_COST,
     contextWindow: 200000,
-    maxTokens: 65536,
-  },
-  {
-    id: "claude-sonnet-4-5-1m",
-    name: "Claude Sonnet 4.5 (1M)",
-    api: "kiro-api" as const,
-    provider: "kiro" as const,
-    baseUrl: BASE_URL,
-    reasoning: true,
-    input: ["text", "image"] as ("text" | "image")[],
-    cost: ZERO_COST,
-    contextWindow: 1000000,
     maxTokens: 65536,
   },
   // Claude Sonnet 4
@@ -287,19 +250,6 @@ export const kiroModels = [
     contextWindow: 128000,
     maxTokens: 8192,
   },
-  // Kimi (Moonshot AI)
-  {
-    id: "kimi-k2-5",
-    name: "Kimi K2.5",
-    api: "kiro-api" as const,
-    provider: "kiro" as const,
-    baseUrl: BASE_URL,
-    reasoning: true,
-    input: ["text"] as ("text" | "image")[],
-    cost: ZERO_COST,
-    contextWindow: 200000,
-    maxTokens: 8192,
-  },
   // MiniMax
   {
     id: "minimax-m2-5",
@@ -327,27 +277,15 @@ export const kiroModels = [
   },
   // GLM (Zhipu AI)
   {
-    id: "glm-4-7",
-    name: "GLM 4.7",
+    id: "glm-5",
+    name: "GLM 5",
     api: "kiro-api" as const,
     provider: "kiro" as const,
     baseUrl: BASE_URL,
     reasoning: true,
     input: ["text"] as ("text" | "image")[],
     cost: ZERO_COST,
-    contextWindow: 128000,
-    maxTokens: 8192,
-  },
-  {
-    id: "glm-4-7-flash",
-    name: "GLM 4.7 Flash",
-    api: "kiro-api" as const,
-    provider: "kiro" as const,
-    baseUrl: BASE_URL,
-    reasoning: false,
-    input: ["text"] as ("text" | "image")[],
-    cost: ZERO_COST,
-    contextWindow: 128000,
+    contextWindow: 200000,
     maxTokens: 8192,
   },
   // Qwen (Alibaba)
@@ -362,31 +300,6 @@ export const kiroModels = [
     cost: ZERO_COST,
     contextWindow: 256000,
     maxTokens: 8192,
-  },
-  {
-    id: "qwen3-coder-480b",
-    name: "Qwen3 Coder 480B",
-    api: "kiro-api" as const,
-    provider: "kiro" as const,
-    baseUrl: BASE_URL,
-    reasoning: true,
-    input: ["text"] as ("text" | "image")[],
-    cost: ZERO_COST,
-    contextWindow: 128000,
-    maxTokens: 8192,
-  },
-  // AGI Nova
-  {
-    id: "agi-nova-beta-1m",
-    name: "AGI Nova Beta (1M)",
-    api: "kiro-api" as const,
-    provider: "kiro" as const,
-    baseUrl: BASE_URL,
-    reasoning: true,
-    input: ["text", "image"] as ("text" | "image")[],
-    cost: ZERO_COST,
-    contextWindow: 1000000,
-    maxTokens: 65536,
   },
   // Auto — routes to optimal model per task
   {
