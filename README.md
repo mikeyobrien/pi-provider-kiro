@@ -1,3 +1,69 @@
+# @vsm/pi-provider-kiro
+
+[pi-provider-kiro](https://github.com/anthropics/pi-provider-kiro) 포크. Kiro API(AWS CodeWhisperer/Q) 프로바이더 확장.
+
+## 설치
+
+### 방법 1: pi install (권장)
+
+`~/.pi/agent/npm/.npmrc`에 다음 내용 추가:
+
+```
+registry=https://registry.npmjs.org/
+@vsm:registry=https://nexus.tmapmp.com/repository/npm-private/
+```
+
+```bash
+pi install npm:@vsm/pi-provider-kiro
+```
+
+### 방법 2: 전역 npm
+
+`~/.npmrc`에 다음 내용 추가:
+
+```
+registry=https://registry.npmjs.org/
+@vsm:registry=https://nexus.tmapmp.com/repository/npm-private/
+```
+
+```bash
+npm install -g @vsm/pi-provider-kiro
+```
+
+### 사전 요구사항
+
+- [kiro-cli](https://github.com/anthropics/kiro-cli) 설치 필수 (인증 전담)
+
+## Fork Changes
+
+### 원본 문제점
+
+원본의 `refreshKiroTokenDirect`가 리전 매핑 문제로 토큰 리프레시에 실패하여,
+토큰 만료 시 반복적으로 로그인 페이지가 표시되고 결국 kiro-cli로 직접 로그인하지 않으면 사용 불가한 상태였음.
+
+### 해결: Token Refresh를 kiro-cli에 전임
+
+- 직접 OAuth 리프레시 엔드포인트 호출 로직(`refreshKiroTokenDirect`) 제거
+- 토큰 갱신은 kiro-cli DB 확인만 수행, 유효한 토큰 없으면 재로그인 유도
+- `refreshViaKiroCli` (kiro-cli debug 명령 호출) 제거
+- 403 응답 시 kiro-cli DB에 유효 토큰 없으면 즉시 에러 (무의미한 재시도 방지)
+
+### 인증 흐름
+
+```
+토큰 만료 감지
+  → refreshKiroToken: IDE/kiro-cli DB 확인
+  → 유효 토큰 없음 → throw
+  → pi 프레임워크가 loginKiro 호출
+  → kiro-cli login 실행 (브라우저 인증)
+  → 토큰 저장 → 정상 동작 재개
+```
+---
+
+## Original README (pi-provider-kiro)
+
+> 이하 원본 README 내용입니다.
+
 # pi-provider-kiro
 
 A [pi](https://shittycodingagent.ai/) provider extension that connects pi to the **Kiro API** (AWS CodeWhisperer/Q), exposing **19 free models across 8 families** through one provider surface.
@@ -112,7 +178,6 @@ src/
 ```
 
 See [AGENTS.md](AGENTS.md) for detailed development guidance and [.agents/summary/](/.agents/summary/index.md) for full architecture documentation.
-
 ## License
 
 MIT
