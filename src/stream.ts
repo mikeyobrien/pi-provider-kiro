@@ -16,7 +16,7 @@ import type {
   ToolCall,
   ToolResultMessage,
 } from "@mariozechner/pi-ai";
-import { calculateCost, createAssistantMessageEventStream } from "@mariozechner/pi-ai";
+import * as PiAi from "@mariozechner/pi-ai";
 import { parseBracketToolCalls } from "./bracket-tool-parser.js";
 import { debugEnabled, debugLog } from "./debug.js";
 import { parseKiroEvents } from "./event-parser.js";
@@ -196,7 +196,13 @@ export function streamKiro(
   context: Context,
   options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-  const stream = createAssistantMessageEventStream();
+  // pi-ai's barrel re-exports the class as type-only before the runtime class re-export, so
+  // a named import of AssistantMessageEventStream resolves to a type. Read it from the
+  // namespace import to get the actual constructor. Replaces the removed
+  // createAssistantMessageEventStream() factory (gone in @oh-my-pi/pi-ai).
+  const StreamCtor = (PiAi as unknown as { AssistantMessageEventStream: new () => AssistantMessageEventStream })
+    .AssistantMessageEventStream;
+  const stream = new StreamCtor();
   (async () => {
     const output: AssistantMessage = {
       role: "assistant",
@@ -687,7 +693,7 @@ export function streamKiro(
         output.usage.output = usageEvent?.outputTokens ?? countTokens(totalContent);
         output.usage.totalTokens = output.usage.input + output.usage.output;
         try {
-          calculateCost(model, output.usage);
+          PiAi.calculateCost(model, output.usage);
         } catch {
           // Model might not have cost info, use zeros
           output.usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
