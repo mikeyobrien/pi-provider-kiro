@@ -17,9 +17,11 @@ import type {
   ToolResultMessage,
 } from "@earendil-works/pi-ai";
 import * as PiAi from "@earendil-works/pi-ai";
+import { UniversalEventStreamMarshaller } from "@smithy/core/event-streams";
+import type { Message } from "@smithy/types";
 import { parseBracketToolCalls } from "./bracket-tool-parser.js";
 import { debugEnabled, debugLog } from "./debug.js";
-import { parseKiroEvents } from "./event-parser.js";
+import { parseKiroEvent } from "./event-parser.js";
 import { addPlaceholderTools, HISTORY_LIMIT, HISTORY_LIMIT_CONTEXT_WINDOW, truncateHistory } from "./history.js";
 import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, refreshViaKiroCli } from "./kiro-cli.js";
 import { resolveKiroModel } from "./models.js";
@@ -54,6 +56,11 @@ import { TRUNCATION_NOTICE, wasPreviousResponseTruncated } from "./truncation.js
 
 const CAPACITY_LOG_DIR = join(homedir(), ".pi", "logs");
 const CAPACITY_LOG_FILE = join(CAPACITY_LOG_DIR, "capacity-retries.log");
+
+const eventStreamMarshaller = new UniversalEventStreamMarshaller({
+  utf8Encoder: (input: Uint8Array) => new TextDecoder().decode(input),
+  utf8Decoder: (input: string) => new TextEncoder().encode(input),
+});
 
 let capacityLogDirCreated = false;
 
@@ -504,10 +511,8 @@ export function streamKiro(
         // 403 retry: continue outer loop
         if (!response.ok) continue;
         stream.push({ type: "start", partial: output });
-        const reader = response.body?.getReader();
-        if (!reader) throw new Error("No response body");
-        const decoder = new TextDecoder();
-        let buffer = "";
+        if (!response.body) throw new Error("No response body");
+        const bodyReader = (response.body as unknown as ReadableStream<Uint8Array>).getReader();
         let totalContent = "";
         let lastContentData = "";
         let usageEvent: { inputTokens?: number; outputTokens?: number } | null = null;
@@ -524,119 +529,140 @@ export function streamKiro(
         };
         const IDLE_TIMEOUT = 300_000;
         let idleTimer: ReturnType<typeof setTimeout> | null = null;
+        let idleCancelled = false;
         const resetIdle = () => {
           if (idleTimer) clearTimeout(idleTimer);
           idleTimer = setTimeout(() => {
             idleCancelled = true;
-            void reader.cancel().catch(() => {});
+            void bodyReader.cancel().catch(() => {});
           }, IDLE_TIMEOUT);
         };
         let gotFirstToken = false;
         let firstTokenTimedOut = false;
-        let idleCancelled = false;
         let streamError: string | null = null;
         const FIRST_TOKEN_SENTINEL = Symbol("firstTokenTimeout");
+
+        // Smithy EventStreamMarshaller handles: chunk reassembly, CRC validation,
+        // protocol error/exception detection, and payload deserialization.
+        const bodyIterable: AsyncIterable<Uint8Array> = {
+          async *[Symbol.asyncIterator]() {
+            try {
+              while (true) {
+                const { done, value } = await bodyReader.read();
+                if (done) return;
+                yield value;
+              }
+            } finally {
+              bodyReader.releaseLock();
+            }
+          },
+        };
+        const utf8Decoder = new TextDecoder();
+        const eventStream = eventStreamMarshaller.deserialize(bodyIterable, async (event: Record<string, Message>) => {
+          const key = Object.keys(event)[0]!;
+          const msg = event[key]!;
+          const parsed = JSON.parse(utf8Decoder.decode(msg.body)) as Record<string, unknown>;
+          return { [key]: parsed } as Record<string, unknown>;
+        });
+        const iterator = eventStream[Symbol.asyncIterator]() as AsyncIterator<Record<string, unknown>>;
+
         while (true) {
-          let readResult: ReadableStreamReadResult<Uint8Array>;
-          if (!gotFirstToken) {
-            // First-token timeout: race the first read against a deadline.
-            // Keep a reference to the read promise so we can suppress its
-            // rejection if the timeout wins — otherwise an abort that fires
-            // after the race settles leaves a dangling rejected promise.
-            const readPromise = reader.read();
-            const result = await Promise.race([
-              readPromise,
-              new Promise<typeof FIRST_TOKEN_SENTINEL>((resolve) =>
-                setTimeout(() => resolve(FIRST_TOKEN_SENTINEL), firstTokenTimeoutForModel(model.id)),
-              ),
-            ]);
-            if (result === FIRST_TOKEN_SENTINEL) {
-              readPromise.catch(() => {}); // suppress dangling rejection
-              void reader.cancel().catch(() => {});
-              firstTokenTimedOut = true;
+          let iterResult: IteratorResult<Record<string, unknown>>;
+          try {
+            if (!gotFirstToken) {
+              const readPromise = iterator.next();
+              const result = await Promise.race([
+                readPromise,
+                new Promise<typeof FIRST_TOKEN_SENTINEL>((resolve) =>
+                  setTimeout(() => resolve(FIRST_TOKEN_SENTINEL), firstTokenTimeoutForModel(model.id)),
+                ),
+              ]);
+              if (result === FIRST_TOKEN_SENTINEL) {
+                readPromise.catch(() => {}); // suppress dangling rejection
+                void bodyReader.cancel().catch(() => {});
+                firstTokenTimedOut = true;
+                break;
+              }
+              iterResult = result as IteratorResult<Record<string, unknown>>;
+              gotFirstToken = true;
+              resetIdle();
+            } else {
+              iterResult = await iterator.next();
+            }
+          } catch (e) {
+            // Smithy throws on :message-type error/exception headers
+            streamError =
+              e instanceof Error
+                ? e.message
+                : (typeof e === "object" && e !== null ? JSON.stringify(e) : String(e)) || "Unknown stream error";
+            break;
+          }
+          const { done, value } = iterResult;
+          if (done) break;
+          resetIdle();
+          const eventPayload = Object.values(value as Record<string, unknown>)[0] as Record<string, unknown>;
+          const event = parseKiroEvent(eventPayload);
+          if (!event) continue;
+          if (debugEnabled()) debugLog("stream.events", [event]);
+          switch (event.type) {
+            case "contextUsage": {
+              const pct = event.data.contextUsagePercentage;
+              output.usage.input = Math.round((pct / 100) * model.contextWindow);
+              (output.usage as unknown as Record<string, unknown>).contextPercent = pct;
+              receivedContextUsage = true;
               break;
             }
-            readResult = result as ReadableStreamReadResult<Uint8Array>;
-            gotFirstToken = true;
-            resetIdle(); // Start idle timer after first token received
-          } else {
-            readResult = await reader.read();
-          }
-          const { done, value } = readResult;
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const { events, remaining } = parseKiroEvents(buffer);
-          buffer = remaining;
-          if (debugEnabled() && events.length > 0) debugLog("stream.events", events);
-          // Reset idle timer on any bytes received — large tool call inputs
-          // span many chunks that parse as zero events (incomplete JSON) but
-          // the stream is still actively flowing.
-          resetIdle();
-          for (const event of events) {
-            switch (event.type) {
-              case "contextUsage": {
-                const pct = event.data.contextUsagePercentage;
-                output.usage.input = Math.round((pct / 100) * model.contextWindow);
-                // Pass through the raw percentage so rho-web (and other UIs)
-                // can display it directly instead of back-calculating from
-                // input tokens / guessed context window — which breaks when
-                // the usage event later overwrites usage.input.
-                (output.usage as unknown as Record<string, unknown>).contextPercent = pct;
-                receivedContextUsage = true;
-                break;
-              }
-              case "content": {
-                if (event.data === lastContentData) continue;
-                lastContentData = event.data;
-                totalContent += event.data;
-                if (thinkingParser) {
-                  thinkingParser.processChunk(event.data);
-                } else {
-                  if (textBlockIndex === null) {
-                    textBlockIndex = output.content.length;
-                    output.content.push({ type: "text", text: "" });
-                    stream.push({ type: "text_start", contentIndex: textBlockIndex, partial: output });
-                  }
-                  (output.content[textBlockIndex] as TextContent).text += event.data;
-                  stream.push({ type: "text_delta", contentIndex: textBlockIndex, delta: event.data, partial: output });
+            case "content": {
+              if (event.data === lastContentData) continue;
+              lastContentData = event.data;
+              totalContent += event.data;
+              if (thinkingParser) {
+                thinkingParser.processChunk(event.data);
+              } else {
+                if (textBlockIndex === null) {
+                  textBlockIndex = output.content.length;
+                  output.content.push({ type: "text", text: "" });
+                  stream.push({ type: "text_start", contentIndex: textBlockIndex, partial: output });
                 }
-                break;
+                (output.content[textBlockIndex] as TextContent).text += event.data;
+                stream.push({ type: "text_delta", contentIndex: textBlockIndex, delta: event.data, partial: output });
               }
-              case "toolUse": {
-                const tc = event.data;
-                sawAnyToolCalls = true;
-                if (!currentToolCall || currentToolCall.toolUseId !== tc.toolUseId) {
-                  flushToolCall();
-                  currentToolCall = { toolUseId: tc.toolUseId, name: tc.name, input: "" };
-                }
-                currentToolCall.input += tc.input || "";
-                if (tc.input) totalContent += tc.input;
-                if (tc.stop) flushToolCall();
-                break;
-              }
-              case "toolUseInput": {
-                if (currentToolCall) currentToolCall.input += event.data.input || "";
-                if (event.data.input) totalContent += event.data.input;
-                break;
-              }
-              case "toolUseStop": {
-                if (event.data.stop) flushToolCall();
-                break;
-              }
-              case "usage": {
-                usageEvent = event.data;
-                break;
-              }
-              case "error": {
-                const errMsg = event.data.message ? `${event.data.error}: ${event.data.message}` : event.data.error;
-                streamError = errMsg;
-                void reader.cancel().catch(() => {});
-                break;
-              }
-              // followupPrompt events are intentionally ignored
+              break;
             }
-            if (streamError) break;
+            case "toolUse": {
+              const tc = event.data;
+              sawAnyToolCalls = true;
+              if (!currentToolCall || currentToolCall.toolUseId !== tc.toolUseId) {
+                flushToolCall();
+                currentToolCall = { toolUseId: tc.toolUseId, name: tc.name, input: "" };
+              }
+              currentToolCall.input += tc.input || "";
+              if (tc.input) totalContent += tc.input;
+              if (tc.stop) flushToolCall();
+              break;
+            }
+            case "toolUseInput": {
+              if (currentToolCall) currentToolCall.input += event.data.input || "";
+              if (event.data.input) totalContent += event.data.input;
+              break;
+            }
+            case "toolUseStop": {
+              if (event.data.stop) flushToolCall();
+              break;
+            }
+            case "usage": {
+              usageEvent = event.data;
+              break;
+            }
+            case "error": {
+              const errMsg = event.data.message ? `${event.data.error}: ${event.data.message}` : event.data.error;
+              streamError = errMsg;
+              void bodyReader.cancel().catch(() => {});
+              break;
+            }
+            // followupPrompt events are intentionally ignored
           }
+          if (streamError) break;
         }
         if (idleTimer) clearTimeout(idleTimer);
         if (firstTokenTimedOut || idleCancelled || streamError) {

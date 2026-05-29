@@ -1,5 +1,5 @@
-// ABOUTME: Kiro stream event parsing for JSON-based streaming responses.
-// ABOUTME: Extracts typed events from raw buffered stream data.
+// ABOUTME: Kiro stream event type definitions and JSON-to-typed-event mapping.
+// ABOUTME: Binary framing is handled by @smithy/core EventStreamMarshaller in stream.ts.
 
 export type KiroStreamEvent =
   | { type: "content"; data: string }
@@ -10,35 +10,6 @@ export type KiroStreamEvent =
   | { type: "followupPrompt"; data: string }
   | { type: "usage"; data: { inputTokens?: number; outputTokens?: number } }
   | { type: "error"; data: { error: string; message?: string } };
-
-export function findJsonEnd(text: string, start: number): number {
-  let braceCount = 0;
-  let inString = false;
-  let escapeNext = false;
-  for (let i = start; i < text.length; i++) {
-    const char = text[i];
-    if (escapeNext) {
-      escapeNext = false;
-      continue;
-    }
-    if (char === "\\") {
-      escapeNext = true;
-      continue;
-    }
-    if (char === '"') {
-      inString = !inString;
-      continue;
-    }
-    if (!inString) {
-      if (char === "{") braceCount++;
-      else if (char === "}") {
-        braceCount--;
-        if (braceCount === 0) return i;
-      }
-    }
-  }
-  return -1;
-}
 
 export function parseKiroEvent(parsed: Record<string, unknown>): KiroStreamEvent | null {
   if (parsed.content !== undefined) return { type: "content", data: parsed.content as string };
@@ -85,58 +56,4 @@ export function parseKiroEvent(parsed: Record<string, unknown>): KiroStreamEvent
     };
   }
   return null;
-}
-
-// Known JSON key patterns that start Kiro event objects. Using specific
-// patterns avoids matching stray '{"' sequences in the binary AWS Event
-// Stream framing that wraps each JSON payload.
-const EVENT_PATTERNS = [
-  '{"content":',
-  '{"name":',
-  '{"input":',
-  '{"stop":',
-  '{"contextUsagePercentage":',
-  '{"followupPrompt":',
-  '{"usage":',
-  '{"toolUseId":',
-  '{"unit":',
-  '{"error":',
-  '{"Error":',
-  '{"message":',
-];
-
-function findNextEventStart(buffer: string, from: number): number {
-  let earliest = -1;
-  for (const pattern of EVENT_PATTERNS) {
-    const idx = buffer.indexOf(pattern, from);
-    if (idx >= 0 && (earliest < 0 || idx < earliest)) earliest = idx;
-  }
-  return earliest;
-}
-
-export function parseKiroEvents(buffer: string): { events: KiroStreamEvent[]; remaining: string } {
-  const events: KiroStreamEvent[] = [];
-  let pos = 0;
-
-  while (pos < buffer.length) {
-    const jsonStart = findNextEventStart(buffer, pos);
-    if (jsonStart < 0) break;
-
-    const jsonEnd = findJsonEnd(buffer, jsonStart);
-    if (jsonEnd < 0) {
-      // Incomplete JSON at end of buffer — preserve for next call
-      return { events, remaining: buffer.substring(jsonStart) };
-    }
-
-    try {
-      const parsed = JSON.parse(buffer.substring(jsonStart, jsonEnd + 1));
-      const event = parseKiroEvent(parsed);
-      if (event) events.push(event);
-    } catch {
-      /* skip brace-balanced but non-JSON content */
-    }
-    pos = jsonEnd + 1;
-  }
-
-  return { events, remaining: "" };
 }

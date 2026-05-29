@@ -38,6 +38,7 @@
     ]
   },
   "dependencies": {
+    "@smithy/core": "^3.24.5",
     "esbuild": "^0.25.0",
     "js-tiktoken": "^1.0.21"
   },

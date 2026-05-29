@@ -9,9 +9,11 @@ import type {
   ToolResultMessage,
 } from "@earendil-works/pi-ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { findJsonEnd } from "../src/bracket-tool-parser.js";
 import { capacityRetryConfig, retryConfig } from "../src/retry.js";
 import { resetProfileArnCache, streamKiro } from "../src/stream.js";
 import type { KiroHistoryEntry } from "../src/transform.js";
+import { concatMessages, encodeEventMessage } from "./helpers/event-stream.js";
 
 const ts = Date.now();
 const zeroUsage = {
@@ -58,16 +60,39 @@ async function collect(stream: ReturnType<typeof streamKiro>): Promise<Assistant
   return events;
 }
 
+/** Parse concatenated JSON objects from a string (e.g. '{"a":1}{"b":2}') into individual objects */
+function parseJsonObjects(body: string): object[] {
+  const objects: object[] = [];
+  let pos = 0;
+  while (pos < body.length) {
+    const start = body.indexOf("{", pos);
+    if (start < 0) break;
+    const end = findJsonEnd(body, start);
+    if (end < 0) break;
+    objects.push(JSON.parse(body.substring(start, end + 1)));
+    pos = end + 1;
+  }
+  return objects;
+}
+
+/** Encode a concatenated-JSON string into binary Event Stream frames */
+function encodeBody(body: string): Uint8Array {
+  return concatMessages(...parseJsonObjects(body).map((o) => encodeEventMessage(o)));
+}
+
 function mockFetchOk(body: string) {
+  const frames = encodeBody(body);
   return vi.fn().mockResolvedValueOnce({
     ok: true,
     body: {
       getReader: () => ({
         read: vi
           .fn()
-          .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(body) })
+          .mockResolvedValueOnce({ done: false, value: frames })
           .mockResolvedValueOnce({ done: true, value: undefined }),
+        releaseLock: () => {},
       }),
+      cancel: async () => {},
     },
   });
 }
@@ -75,12 +100,12 @@ function mockFetchOk(body: string) {
 function mockFetchChunked(chunks: string[]) {
   const readMock = vi.fn();
   for (const chunk of chunks) {
-    readMock.mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(chunk) });
+    readMock.mockResolvedValueOnce({ done: false, value: encodeBody(chunk) });
   }
   readMock.mockResolvedValueOnce({ done: true, value: undefined });
   return vi.fn().mockResolvedValueOnce({
     ok: true,
-    body: { getReader: () => ({ read: readMock }) },
+    body: { getReader: () => ({ read: readMock, releaseLock: () => {} }), cancel: async () => {} },
   });
 }
 
@@ -151,9 +176,10 @@ describe("Feature 9: Streaming Integration", () => {
               .fn()
               .mockResolvedValueOnce({
                 done: false,
-                value: new TextEncoder().encode('{"content":"Hi"}{"contextUsagePercentage":5}'),
+                value: encodeBody('{"content":"Hi"}{"contextUsagePercentage":5}'),
               })
               .mockResolvedValueOnce({ done: true, value: undefined }),
+            releaseLock: () => {},
           }),
         },
       });
@@ -422,7 +448,7 @@ describe("Feature 9: Streaming Integration", () => {
     const readMock = vi.fn().mockImplementation(async () => {
       readCount++;
       if (readCount === 1) {
-        return { done: false, value: new TextEncoder().encode('{"content":"chunk1"}') };
+        return { done: false, value: encodeBody('{"content":"chunk1"}') };
       }
       // Abort after first chunk
       ac.abort();
@@ -431,7 +457,7 @@ describe("Feature 9: Streaming Integration", () => {
     });
     const mockFetch = vi.fn().mockResolvedValueOnce({
       ok: true,
-      body: { getReader: () => ({ read: readMock }) },
+      body: { getReader: () => ({ read: readMock, releaseLock: () => {} }), cancel: async () => {} },
     });
     vi.stubGlobal("fetch", mockFetch);
 
@@ -821,9 +847,10 @@ describe("Feature 9: Streaming Integration", () => {
               .fn()
               .mockResolvedValueOnce({
                 done: false,
-                value: new TextEncoder().encode('{"content":"ok"}{"contextUsagePercentage":5}'),
+                value: encodeBody('{"content":"ok"}{"contextUsagePercentage":5}'),
               })
               .mockResolvedValueOnce({ done: true, value: undefined }),
+            releaseLock: () => {},
           }),
         },
       });
@@ -906,9 +933,10 @@ describe("Feature 9: Streaming Integration", () => {
               .fn()
               .mockResolvedValueOnce({
                 done: false,
-                value: new TextEncoder().encode('{"content":"ok"}{"contextUsagePercentage":5}'),
+                value: encodeBody('{"content":"ok"}{"contextUsagePercentage":5}'),
               })
               .mockResolvedValueOnce({ done: true, value: undefined }),
+            releaseLock: () => {},
           }),
         },
       });
@@ -1260,6 +1288,7 @@ describe("Feature 9: Streaming Integration", () => {
             getReader: () => ({
               read: () => new Promise(() => {}), // never resolves
               cancel: vi.fn().mockResolvedValue(undefined),
+              releaseLock: () => {},
             }),
           },
         };
@@ -1273,9 +1302,10 @@ describe("Feature 9: Streaming Integration", () => {
               .fn()
               .mockResolvedValueOnce({
                 done: false,
-                value: new TextEncoder().encode('{"content":"ok"}{"contextUsagePercentage":5}'),
+                value: encodeBody('{"content":"ok"}{"contextUsagePercentage":5}'),
               })
               .mockResolvedValueOnce({ done: true, value: undefined }),
+            releaseLock: () => {},
           }),
         },
       };
@@ -1321,6 +1351,7 @@ describe("Feature 9: Streaming Integration", () => {
           cancel: () => {
             return Promise.reject(cancelError);
           },
+          releaseLock: () => {},
         }),
       },
     });
@@ -1370,9 +1401,10 @@ describe("Feature 9: Streaming Integration", () => {
               .fn()
               .mockResolvedValueOnce({
                 done: false,
-                value: new TextEncoder().encode('{"content":"ok"}{"contextUsagePercentage":5}'),
+                value: encodeBody('{"content":"ok"}{"contextUsagePercentage":5}'),
               })
               .mockResolvedValueOnce({ done: true, value: undefined }),
+            releaseLock: () => {},
           }),
         },
       });
@@ -1406,9 +1438,10 @@ describe("Feature 9: Streaming Integration", () => {
               .fn()
               .mockResolvedValueOnce({
                 done: false,
-                value: new TextEncoder().encode('{"content":"ok"}{"contextUsagePercentage":5}'),
+                value: encodeBody('{"content":"ok"}{"contextUsagePercentage":5}'),
               })
               .mockResolvedValueOnce({ done: true, value: undefined }),
+            releaseLock: () => {},
           }),
         },
       });
@@ -1442,9 +1475,10 @@ describe("Feature 9: Streaming Integration", () => {
               .fn()
               .mockResolvedValueOnce({
                 done: false,
-                value: new TextEncoder().encode('{"content":"ok"}{"contextUsagePercentage":5}'),
+                value: encodeBody('{"content":"ok"}{"contextUsagePercentage":5}'),
               })
               .mockResolvedValueOnce({ done: true, value: undefined }),
+            releaseLock: () => {},
           }),
         },
       });
@@ -1490,9 +1524,10 @@ describe("Feature 9: Streaming Integration", () => {
               .fn()
               .mockResolvedValueOnce({
                 done: false,
-                value: new TextEncoder().encode('{"content":"ok"}{"contextUsagePercentage":5}'),
+                value: encodeBody('{"content":"ok"}{"contextUsagePercentage":5}'),
               })
               .mockResolvedValueOnce({ done: true, value: undefined }),
+            releaseLock: () => {},
           }),
         },
       });
@@ -1832,8 +1867,9 @@ describe("Feature 9: Streaming Integration", () => {
           getReader: () => ({
             read: vi
               .fn()
-              .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(emptyResponse) })
+              .mockResolvedValueOnce({ done: false, value: encodeBody(emptyResponse) })
               .mockResolvedValueOnce({ done: true, value: undefined }),
+            releaseLock: () => {},
           }),
         },
       })
@@ -1843,8 +1879,9 @@ describe("Feature 9: Streaming Integration", () => {
           getReader: () => ({
             read: vi
               .fn()
-              .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(goodResponse) })
+              .mockResolvedValueOnce({ done: false, value: encodeBody(goodResponse) })
               .mockResolvedValueOnce({ done: true, value: undefined }),
+            releaseLock: () => {},
           }),
         },
       });
@@ -1878,8 +1915,9 @@ describe("Feature 9: Streaming Integration", () => {
         getReader: () => ({
           read: vi
             .fn()
-            .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(emptyResponse) })
+            .mockResolvedValueOnce({ done: false, value: encodeBody(emptyResponse) })
             .mockResolvedValueOnce({ done: true, value: undefined }),
+          releaseLock: () => {},
         }),
       },
     });
@@ -1957,8 +1995,9 @@ describe("Feature 9: Streaming Integration", () => {
         getReader: () => ({
           read: vi
             .fn()
-            .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(echoResponse) })
+            .mockResolvedValueOnce({ done: false, value: encodeBody(echoResponse) })
             .mockResolvedValueOnce({ done: true, value: undefined }),
+          releaseLock: () => {},
         }),
       },
     });
@@ -1971,8 +2010,9 @@ describe("Feature 9: Streaming Integration", () => {
           getReader: () => ({
             read: vi
               .fn()
-              .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(goodResponse) })
+              .mockResolvedValueOnce({ done: false, value: encodeBody(goodResponse) })
               .mockResolvedValueOnce({ done: true, value: undefined }),
+            releaseLock: () => {},
           }),
         },
       });
@@ -2007,8 +2047,9 @@ describe("Feature 9: Streaming Integration", () => {
             getReader: () => ({
               read: vi
                 .fn()
-                .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(echoResponse) })
+                .mockResolvedValueOnce({ done: false, value: encodeBody(echoResponse) })
                 .mockResolvedValueOnce({ done: true, value: undefined }),
+              releaseLock: () => {},
             }),
           },
         })
@@ -2018,8 +2059,9 @@ describe("Feature 9: Streaming Integration", () => {
             getReader: () => ({
               read: vi
                 .fn()
-                .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(goodResponse) })
+                .mockResolvedValueOnce({ done: false, value: encodeBody(goodResponse) })
                 .mockResolvedValueOnce({ done: true, value: undefined }),
+              releaseLock: () => {},
             }),
           },
         });
@@ -2050,8 +2092,9 @@ describe("Feature 9: Streaming Integration", () => {
         getReader: () => ({
           read: vi
             .fn()
-            .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(echoResponse) })
+            .mockResolvedValueOnce({ done: false, value: encodeBody(echoResponse) })
             .mockResolvedValueOnce({ done: true, value: undefined }),
+          releaseLock: () => {},
         }),
       },
     });

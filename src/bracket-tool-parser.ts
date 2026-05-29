@@ -1,7 +1,34 @@
 // ABOUTME: Extracts bracket-style tool calls from content text as a fallback.
 // ABOUTME: Parses [Called func_name with args: {...}] patterns from model output.
 
-import { findJsonEnd } from "./event-parser.js";
+export function findJsonEnd(text: string, start: number): number {
+  let braceCount = 0;
+  let inString = false;
+  let escapeNext = false;
+  for (let i = start; i < text.length; i++) {
+    const char = text[i];
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    if (char === "\\") {
+      escapeNext = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (!inString) {
+      if (char === "{") braceCount++;
+      else if (char === "}") {
+        braceCount--;
+        if (braceCount === 0) return i;
+      }
+    }
+  }
+  return -1;
+}
 
 export interface BracketToolCall {
   toolUseId: string;
