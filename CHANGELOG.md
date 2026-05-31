@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-05-29
+
+### Added
+
+- Claude Opus 4.8 model ([#78](https://github.com/mikeyobrien/pi-provider-kiro/pull/78))
+
 ## [0.7.0] - 2026-05-26
 
 ### Added
