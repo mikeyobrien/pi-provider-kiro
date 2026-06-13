@@ -12,6 +12,7 @@ describe("Feature 2: Model Definitions", () => {
       ["claude-sonnet-4-5", "claude-sonnet-4.5"],
       ["claude-sonnet-4", "claude-sonnet-4"],
       ["claude-haiku-4-5", "claude-haiku-4.5"],
+      ["claude-fable-5", "claude-fable-5"],
       // Non-Claude models
       ["deepseek-3-2", "deepseek-3.2"],
       ["minimax-m2-1", "minimax-m2.1"],
@@ -27,8 +28,8 @@ describe("Feature 2: Model Definitions", () => {
   });
 
   describe("KIRO_MODEL_IDS", () => {
-    it("contains 13 model IDs", () => {
-      expect(KIRO_MODEL_IDS.size).toBe(13);
+    it("contains 14 model IDs", () => {
+      expect(KIRO_MODEL_IDS.size).toBe(14);
     });
   });
 
@@ -73,8 +74,8 @@ describe("Feature 2: Model Definitions", () => {
   });
 
   describe("model catalog", () => {
-    it("defines 13 models", () => {
-      expect(kiroModels).toHaveLength(13);
+    it("defines 14 models", () => {
+      expect(kiroModels).toHaveLength(14);
     });
 
     it("claude-haiku-4-5 has reasoning=false", () => {
