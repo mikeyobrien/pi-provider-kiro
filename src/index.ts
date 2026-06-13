@@ -12,6 +12,10 @@ import { loginKiro, refreshKiroToken } from "./oauth.js";
 import { streamKiro } from "./stream.js";
 import { fetchKiroUsage } from "./usage.js";
 
+export type { KiroStreamEvent } from "./event-parser.js";
+export { KIRO_MODEL_IDS, kiroModels, resolveApiRegion, resolveKiroModel } from "./models.js";
+export { streamKiro } from "./stream.js";
+
 export default function (pi: ExtensionAPI) {
   // Capture ctx for the custom TUI login component
   pi.on("session_start", async (_event, ctx) => {
