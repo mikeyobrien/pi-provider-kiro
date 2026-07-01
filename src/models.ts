@@ -11,6 +11,7 @@ export const KIRO_MODEL_IDS = new Set([
   "claude-opus-4.8",
   "claude-opus-4.7",
   "claude-opus-4.6",
+  "claude-sonnet-5",
   "claude-sonnet-4.6",
   "claude-sonnet-4.5",
   "claude-sonnet-4",
@@ -218,6 +219,7 @@ const MODELS_BY_REGION: Record<string, Set<string>> = {
     "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-6",
+    "claude-sonnet-5",
     "claude-sonnet-4-6",
     "claude-sonnet-4-5",
     "claude-sonnet-4",
@@ -303,6 +305,19 @@ export const kiroModels = [
     cost: ZERO_COST,
     contextWindow: 1000000,
     maxTokens: 32768,
+  },
+  // Claude Sonnet 5
+  {
+    id: "claude-sonnet-5",
+    name: "Claude Sonnet 5",
+    api: "kiro-api" as const,
+    provider: "kiro" as const,
+    baseUrl: BASE_URL,
+    reasoning: true,
+    input: ["text", "image"] as ("text" | "image")[],
+    cost: ZERO_COST,
+    contextWindow: 1000000,
+    maxTokens: 65536,
   },
   // Claude Sonnet 4.6
   {

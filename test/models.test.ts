@@ -27,8 +27,8 @@ describe("Feature 2: Model Definitions", () => {
   });
 
   describe("KIRO_MODEL_IDS", () => {
-    it("contains 13 model IDs", () => {
-      expect(KIRO_MODEL_IDS.size).toBe(13);
+    it("contains 14 model IDs", () => {
+      expect(KIRO_MODEL_IDS.size).toBe(14);
     });
   });
 
@@ -64,6 +64,7 @@ describe("Feature 2: Model Definitions", () => {
       expect(ids).toContain("claude-sonnet-4-6");
       expect(ids).toContain("minimax-m2-1");
       expect(ids).not.toContain("deepseek-3-2");
+      expect(ids).not.toContain("claude-sonnet-5");
       expect(ids).not.toContain("agi-nova-beta-1m");
     });
 
@@ -73,8 +74,8 @@ describe("Feature 2: Model Definitions", () => {
   });
 
   describe("model catalog", () => {
-    it("defines 13 models", () => {
-      expect(kiroModels).toHaveLength(13);
+    it("defines 14 models", () => {
+      expect(kiroModels).toHaveLength(14);
     });
 
     it("claude-haiku-4-5 has reasoning=false", () => {
