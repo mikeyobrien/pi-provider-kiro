@@ -17,6 +17,7 @@ export { KIRO_MODEL_IDS, kiroModels, resolveApiRegion, resolveKiroModel } from "
 export { streamKiro } from "./stream.js";
 
 export default function (pi: ExtensionAPI) {
+  console.log("🤖 💬 🧠 🤖 💬 🧠 🤖 💬 🧠 🤖 💬 🧠 🤖 💬 🧠 🤖 💬 🧠 🤖 💬 🧠 🤖 💬 🧠 🤖 💬 🧠 🤖 💬 🧠 🤖 💬 🧠");
   // Capture ctx for the custom TUI login component
   pi.on("session_start", async (_event, ctx) => {
     setExtensionContext(ctx);
