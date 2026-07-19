@@ -5,6 +5,7 @@ import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "nod
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Model, ThinkingLevelMap } from "@earendil-works/pi-ai";
+import { deriveKiroEffort } from "./effort.js";
 import { getKiroEndpoints } from "./endpoints.js";
 import { fetchKiroModelCatalog, type KiroCatalogModel } from "./management.js";
 
@@ -381,21 +382,7 @@ function humanizeModelId(modelId: string): string {
     .join(" ");
 }
 
-function deriveEffortValues(schema: Record<string, unknown> | undefined): string[] | undefined {
-  if (!schema || !isRecord(schema.properties)) return undefined;
-  for (const field of ["reasoning", "output_config"]) {
-    const fieldSchema = schema.properties[field];
-    if (!isRecord(fieldSchema) || !isRecord(fieldSchema.properties)) continue;
-    const effortSchema = fieldSchema.properties.effort;
-    if (!isRecord(effortSchema) || !Array.isArray(effortSchema.enum)) continue;
-    if (effortSchema.enum.length > 0 && effortSchema.enum.every((value) => typeof value === "string")) {
-      return effortSchema.enum;
-    }
-  }
-  return undefined;
-}
-
-function deriveThinkingLevelMap(effortValues: string[] | undefined): ThinkingLevelMap | undefined {
+function deriveThinkingLevelMap(effortValues: readonly string[] | undefined): ThinkingLevelMap | undefined {
   if (!effortValues) return undefined;
   const thinkingLevelMap: ThinkingLevelMap = {};
   if (effortValues.includes("xhigh")) thinkingLevelMap.xhigh = "xhigh";
@@ -452,7 +439,7 @@ export function mapKiroCatalogModels(catalogModels: KiroCatalogModel[], region: 
 
     const existing = kiroModels.find((model) => model.id === id);
     const { schema, tokenLimits } = validateCatalogMetadata(catalogModel);
-    const effortValues = deriveEffortValues(schema);
+    const effortValues = deriveKiroEffort(schema)?.values;
     const thinkingLevelMap = deriveThinkingLevelMap(effortValues);
     const catalogName =
       typeof catalogModel.displayName === "string" && catalogModel.displayName.length > 0

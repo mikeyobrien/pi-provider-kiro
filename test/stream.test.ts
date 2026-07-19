@@ -25,7 +25,14 @@ const zeroUsage = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-function makeModel(overrides?: Partial<Model<Api>>): Model<Api> {
+type TestKiroModel = Model<Api> & {
+  kiroModelId?: string;
+  kiroRegion?: string;
+  kiroProfileArn?: string;
+  additionalModelRequestFieldsSchema?: Record<string, unknown>;
+};
+
+function makeModel(overrides?: Partial<TestKiroModel>): TestKiroModel {
   return {
     id: "claude-sonnet-4-5",
     name: "Sonnet",
@@ -46,6 +53,20 @@ function makeContext(userMsg = "Hello"): Context {
     systemPrompt: "You are helpful",
     messages: [{ role: "user", content: userMsg, timestamp: Date.now() }],
     tools: [],
+  };
+}
+
+function effortSchema(field: "reasoning" | "output_config", values: string[]): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      [field]: {
+        type: "object",
+        properties: { effort: { type: "string", enum: values } },
+        additionalProperties: false,
+      },
+    },
+    additionalProperties: false,
   };
 }
 
@@ -160,15 +181,134 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
-  it("uses the 70K prompt budget for max reasoning fallback", async () => {
+  it.each([
+    {
+      name: "maps GPT minimal to low",
+      model: {
+        id: "openai-gpt-5-6",
+        kiroModelId: "openai-gpt-5.6",
+        name: "GPT 5.6",
+        input: ["text"] as ("text" | "image")[],
+        thinkingLevelMap: { xhigh: "xhigh" },
+        additionalModelRequestFieldsSchema: effortSchema("reasoning", ["low", "medium", "high", "xhigh"]),
+      },
+      reasoning: "minimal" as const,
+      expected: { reasoning: { effort: "low" } },
+    },
+    {
+      name: "keeps GPT xhigh",
+      model: {
+        id: "openai-gpt-5-6",
+        kiroModelId: "openai-gpt-5.6",
+        name: "GPT 5.6",
+        input: ["text"] as ("text" | "image")[],
+        thinkingLevelMap: { xhigh: "xhigh" },
+        additionalModelRequestFieldsSchema: effortSchema("reasoning", ["low", "medium", "high", "xhigh"]),
+      },
+      reasoning: "xhigh" as const,
+      expected: { reasoning: { effort: "xhigh" } },
+    },
+    {
+      name: "keeps Claude xhigh distinct from max",
+      model: {
+        id: "claude-opus-4-8",
+        kiroModelId: "claude-opus-4.8",
+        name: "Claude Opus 4.8",
+        thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+        additionalModelRequestFieldsSchema: effortSchema("output_config", ["low", "medium", "high", "xhigh", "max"]),
+      },
+      reasoning: "xhigh" as const,
+      expected: { output_config: { effort: "xhigh" }, thinking: { type: "adaptive" } },
+    },
+    {
+      name: "keeps Claude max distinct from xhigh",
+      model: {
+        id: "claude-opus-4-8",
+        kiroModelId: "claude-opus-4.8",
+        name: "Claude Opus 4.8",
+        thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+        additionalModelRequestFieldsSchema: effortSchema("output_config", ["low", "medium", "high", "xhigh", "max"]),
+      },
+      reasoning: "max" as const,
+      expected: { output_config: { effort: "max" }, thinking: { type: "adaptive" } },
+    },
+    {
+      name: "uses the known Claude max fallback only when schema is unavailable",
+      model: {
+        id: "claude-opus-4-8",
+        kiroModelId: "claude-opus-4.8",
+        name: "Claude Opus 4.8",
+        thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+      },
+      reasoning: "max" as const,
+      expected: { output_config: { effort: "max" }, thinking: { type: "adaptive" } },
+    },
+    {
+      name: "clamps the xhigh hole to max before building Claude fields",
+      model: {
+        id: "claude-sonnet-4-6",
+        kiroModelId: "claude-sonnet-4.6",
+        name: "Claude Sonnet 4.6",
+        thinkingLevelMap: { max: "max" },
+        additionalModelRequestFieldsSchema: effortSchema("output_config", ["low", "medium", "high", "max"]),
+      },
+      reasoning: "xhigh" as const,
+      expected: { output_config: { effort: "max" }, thinking: { type: "adaptive" } },
+    },
+  ])("sends structured effort: $name", async ({ model, reasoning, expected }) => {
+    const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":10}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    try {
+      await collect(streamKiro(makeModel(model), makeContext(), { apiKey: "test-token", reasoning }));
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.additionalModelRequestFields).toEqual(expected);
+      const content = body.conversationState.currentMessage.userInputMessage.content;
+      expect(content).not.toContain("<thinking_mode>");
+      expect(content).not.toContain("<max_thinking_length>");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("uses prompt injection only when a reasoning model has no structured effort mechanism", async () => {
     const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":10}');
     vi.stubGlobal("fetch", mockFetch);
 
     await collect(streamKiro(makeModel(), makeContext(), { apiKey: "test-token", reasoning: "max" }));
 
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.additionalModelRequestFields).toBeUndefined();
     expect(body.conversationState.currentMessage.userInputMessage.content).toContain(
       "<max_thinking_length>70000</max_thinking_length>",
+    );
+
+    vi.unstubAllGlobals();
+  });
+
+  it("does not guess a known-model effort mechanism over a present catalog schema", async () => {
+    const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":10}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    await collect(
+      streamKiro(
+        makeModel({
+          id: "claude-opus-4-8",
+          kiroModelId: "claude-opus-4.8",
+          name: "Claude Opus 4.8",
+          thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+          additionalModelRequestFieldsSchema: { type: "object", properties: {}, additionalProperties: false },
+        }),
+        makeContext(),
+        { apiKey: "test-token", reasoning: "high" },
+      ),
+    );
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.additionalModelRequestFields).toBeUndefined();
+    expect(body.conversationState.currentMessage.userInputMessage.content).toContain(
+      "<thinking_mode>enabled</thinking_mode>",
     );
 
     vi.unstubAllGlobals();

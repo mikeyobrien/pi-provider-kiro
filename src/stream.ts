@@ -21,6 +21,11 @@ import { UniversalEventStreamMarshaller } from "@smithy/core/event-streams";
 import type { Message } from "@smithy/types";
 import { parseBracketToolCalls } from "./bracket-tool-parser.js";
 import { debugEnabled, debugLog } from "./debug.js";
+import {
+  buildKiroAdditionalModelRequestFields,
+  getKiroEffortConfig,
+  type KiroAdditionalModelRequestFields,
+} from "./effort.js";
 import { getKiroEndpoints, getKiroRegionFromEndpoint } from "./endpoints.js";
 import { parseKiroEvent } from "./event-parser.js";
 import { addPlaceholderTools, HISTORY_LIMIT, HISTORY_LIMIT_CONTEXT_WINDOW, truncateHistory } from "./history.js";
@@ -110,6 +115,7 @@ interface KiroRequest {
     currentMessage: { userInputMessage: KiroUserInputMessage };
     history?: KiroHistoryEntry[];
   };
+  additionalModelRequestFields?: KiroAdditionalModelRequestFields;
   profileArn: string;
   agentMode?: string;
 }
@@ -196,6 +202,7 @@ export function streamKiro(
         kiroModelId?: string;
         kiroRegion?: string;
         kiroProfileArn?: string;
+        additionalModelRequestFieldsSchema?: Record<string, unknown>;
       };
       const region = modelMetadata.kiroRegion ?? getKiroRegionFromEndpoint(model.baseUrl) ?? "us-east-1";
       const endpoint = getKiroEndpoints(region).runtime;
@@ -222,6 +229,12 @@ export function streamKiro(
       }
 
       const kiroModelId = resolveKiroModel(model.id, modelMetadata.kiroModelId);
+      const effortConfig = getKiroEffortConfig(modelMetadata, kiroModelId);
+      const additionalModelRequestFields = buildKiroAdditionalModelRequestFields(
+        modelMetadata,
+        kiroModelId,
+        options?.reasoning,
+      );
       const thinkingEnabled = !!options?.reasoning || model.reasoning;
       debugLog("request.init", {
         endpoint,
@@ -237,7 +250,7 @@ export function streamKiro(
         sessionId: options?.sessionId,
       });
       let systemPrompt = context.systemPrompt ?? "";
-      if (thinkingEnabled) {
+      if (thinkingEnabled && !effortConfig) {
         const budget =
           options?.reasoning === "max"
             ? 70000
@@ -390,6 +403,7 @@ export function streamKiro(
             },
             ...(history.length > 0 ? { history } : {}),
           },
+          ...(additionalModelRequestFields ? { additionalModelRequestFields } : {}),
           profileArn,
           agentMode: "vibe",
         };
