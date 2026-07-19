@@ -83,7 +83,7 @@ describe("Feature 1: Extension Registration", () => {
     expect(modified[0].baseUrl).toBe(`https://q.${expectedApiRegion}.amazonaws.com/generateAssistantResponse`);
   });
 
-  it("modifyModels filters out unavailable models for EU regions", async () => {
+  it("modifyModels does not apply a hardcoded regional allowlist", async () => {
     const mod = await import("../src/index.js");
     const { pi, registerProvider } = mockPi();
     mod.default(pi);
@@ -93,8 +93,8 @@ describe("Feature 1: Extension Registration", () => {
     const creds = { access: "x", refresh: "x", expires: 0, clientId: "", clientSecret: "", region: "eu-west-1" };
     const modified = config.oauth.modifyModels(models, creds);
     const ids = modified.map((m: { id: string }) => m.id);
-    expect(modified.length).toBeLessThan(models.length);
-    expect(ids).not.toContain("deepseek-3-2");
+    expect(modified).toHaveLength(models.length);
+    expect(ids).toContain("deepseek-3-2");
     expect(ids).toContain("claude-sonnet-4-6");
   });
 

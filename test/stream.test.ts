@@ -157,6 +157,20 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
+  it("uses the 70K prompt budget for max reasoning fallback", async () => {
+    const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":10}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    await collect(streamKiro(makeModel(), makeContext(), { apiKey: "test-token", reasoning: "max" }));
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.conversationState.currentMessage.userInputMessage.content).toContain(
+      "<max_thinking_length>70000</max_thinking_length>",
+    );
+
+    vi.unstubAllGlobals();
+  });
+
   it("resolves profileArn via ListAvailableProfiles and includes it in request body", async () => {
     resetProfileArnCache(false);
     const testArn = "arn:aws:codewhisperer:us-east-1:123:profile/TEST";

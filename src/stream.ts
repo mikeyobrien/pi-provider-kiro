@@ -203,10 +203,8 @@ export function streamKiro(
       let accessToken = options?.apiKey;
       if (!accessToken) throw new Error("Kiro credentials not set. Run /login kiro or install kiro-cli.");
       const endpoint = model.baseUrl || "https://q.us-east-1.amazonaws.com/generateAssistantResponse";
-      const region =
-        (model as Model<Api> & { kiroRegion?: string }).kiroRegion ??
-        getKiroRegionFromEndpoint(endpoint) ??
-        "us-east-1";
+      const modelMetadata = model as Model<Api> & { kiroModelId?: string; kiroRegion?: string };
+      const region = modelMetadata.kiroRegion ?? getKiroRegionFromEndpoint(endpoint) ?? "us-east-1";
       let managementAuth: KiroManagementAuth = { accessToken, region };
 
       const optionProfileArn =
@@ -229,7 +227,7 @@ export function streamKiro(
         });
       }
 
-      const kiroModelId = resolveKiroModel(model.id);
+      const kiroModelId = resolveKiroModel(model.id, modelMetadata.kiroModelId);
       const thinkingEnabled = !!options?.reasoning || model.reasoning;
       debugLog("request.init", {
         endpoint,
@@ -247,13 +245,15 @@ export function streamKiro(
       let systemPrompt = context.systemPrompt ?? "";
       if (thinkingEnabled) {
         const budget =
-          options?.reasoning === "xhigh"
-            ? 50000
-            : options?.reasoning === "high"
-              ? 30000
-              : options?.reasoning === "medium"
-                ? 20000
-                : 10000;
+          options?.reasoning === "max"
+            ? 70000
+            : options?.reasoning === "xhigh"
+              ? 50000
+              : options?.reasoning === "high"
+                ? 30000
+                : options?.reasoning === "medium"
+                  ? 20000
+                  : 10000;
         systemPrompt = `<thinking_mode>enabled</thinking_mode><max_thinking_length>${budget}</max_thinking_length>${systemPrompt ? `\n${systemPrompt}` : ""}`;
       }
       let retryCount = 0;
