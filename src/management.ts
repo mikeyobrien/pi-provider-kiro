@@ -29,12 +29,29 @@ export interface KiroListAvailableModelsResponse {
   [key: string]: unknown;
 }
 
+export interface KiroGetUsageLimitsRequest {
+  profileArn?: string;
+  origin: "KIRO_CLI";
+  resourceType: "CREDIT";
+  isEmailRequired: false;
+}
+
 interface KiroListAvailableProfilesResponse {
   profiles?: Array<{ arn?: string; [key: string]: unknown }>;
 }
 
 const profileArnCache = new Map<string, string>();
 const pendingProfileRequests = new Map<string, Promise<string>>();
+
+export class KiroManagementHttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "KiroManagementHttpError";
+  }
+}
 
 function operationName(target: string): string {
   return target.slice(target.lastIndexOf(".") + 1);
@@ -43,6 +60,26 @@ function operationName(target: string): string {
 function profileCacheKey(auth: KiroManagementAuth): string {
   const tokenHash = createHash("sha256").update(auth.accessToken).digest("base64url");
   return `${auth.region}:${tokenHash}`;
+}
+
+async function parseManagementResponse<TResponse>(
+  response: Response,
+  operation: string,
+  region: string,
+): Promise<TResponse> {
+  if (!response.ok) {
+    const statusText = response.statusText ? ` ${redactSensitiveText(response.statusText)}` : "";
+    throw new KiroManagementHttpError(
+      `Kiro management ${operation} failed in ${region}: ${response.status}${statusText}`,
+      response.status,
+    );
+  }
+
+  try {
+    return (await response.json()) as TResponse;
+  } catch (error) {
+    throw new Error(`Kiro management ${operation} returned invalid JSON in ${region}`, { cause: error });
+  }
 }
 
 async function postManagement<TResponse>(
@@ -67,16 +104,7 @@ async function postManagement<TResponse>(
     throw new Error(`Kiro management ${operation} request failed in ${auth.region}`, { cause: error });
   }
 
-  if (!response.ok) {
-    const statusText = response.statusText ? ` ${redactSensitiveText(response.statusText)}` : "";
-    throw new Error(`Kiro management ${operation} failed in ${auth.region}: ${response.status}${statusText}`);
-  }
-
-  try {
-    return (await response.json()) as TResponse;
-  } catch (error) {
-    throw new Error(`Kiro management ${operation} returned invalid JSON in ${auth.region}`, { cause: error });
-  }
+  return parseManagementResponse<TResponse>(response, operation, auth.region);
 }
 
 export function resetKiroProfileArnCache(): void {
@@ -143,4 +171,31 @@ export async function fetchKiroModelCatalog(
 ): Promise<KiroListAvailableModelsResponse> {
   const profileArn = await resolveKiroProfileArn(auth, providedProfileArn);
   return listAvailableModels(auth, profileArn);
+}
+
+export async function getUsageLimits<TResponse>(
+  auth: KiroManagementAuth,
+  request: KiroGetUsageLimitsRequest,
+): Promise<TResponse> {
+  const operation = "GetUsageLimits";
+  const url = new URL("Get-Usage-Limits", getKiroEndpoints(auth.region).management);
+  for (const [name, value] of Object.entries(request)) {
+    if (value !== undefined) url.searchParams.set(name, String(value));
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(url.toString(), {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${auth.accessToken}`,
+        "User-Agent": "pi-provider-kiro",
+      },
+    });
+  } catch (error) {
+    throw new Error(`Kiro management ${operation} request failed in ${auth.region}`, { cause: error });
+  }
+
+  return parseManagementResponse<TResponse>(response, operation, auth.region);
 }
