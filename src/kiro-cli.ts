@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
+import { formatSafeError } from "./debug.js";
 import type { KiroAuthMethod, KiroCredentials } from "./oauth.js";
 
 const require = createRequire(import.meta.url);
@@ -265,8 +266,7 @@ export function refreshViaKiroCli(): KiroCredentials | undefined {
     });
     return getKiroCliCredentials();
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.warn(`[pi-provider-kiro] kiro-cli refresh failed: ${msg}`);
+    console.warn(`[pi-provider-kiro] kiro-cli refresh failed: ${formatSafeError(error)}`);
     return undefined;
   }
 }

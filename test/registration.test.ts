@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
+import { getKiroCliCredentials } from "../src/kiro-cli.js";
 import { kiroModels } from "../src/models.js";
 
 const mockPi = () => {
@@ -32,7 +33,7 @@ describe("Feature 1: Extension Registration", () => {
     expect(config.models).toHaveLength(15);
   });
 
-  it("registers OAuth with name 'Kiro (Builder ID / Google / GitHub)'", async () => {
+  it("preserves the existing OAuth and kiro-cli credential contract", async () => {
     const mod = await import("../src/index.js");
     const { pi, registerProvider } = mockPi();
     mod.default(pi);
@@ -41,7 +42,8 @@ describe("Feature 1: Extension Registration", () => {
     expect(config.oauth.name).toBe("Kiro (Builder ID / Google / GitHub)");
     expect(typeof config.oauth.login).toBe("function");
     expect(typeof config.oauth.refreshToken).toBe("function");
-    expect(typeof config.oauth.getApiKey).toBe("function");
+    expect(config.oauth.getCliCredentials).toBe(getKiroCliCredentials);
+    expect(config.oauth.getApiKey({ access: "existing-access-token" })).toBe("existing-access-token");
     expect(typeof config.oauth.fetchUsage).toBe("function");
   });
 

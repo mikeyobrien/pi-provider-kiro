@@ -2,6 +2,7 @@
 // ABOUTME: Resolves profiles and discovers the current per-profile model catalog.
 
 import { createHash } from "node:crypto";
+import { redactSensitiveText } from "./debug.js";
 import { getKiroEndpoints } from "./endpoints.js";
 
 const LIST_PROFILES_TARGET = "AmazonCodeWhispererService.ListAvailableProfiles";
@@ -67,7 +68,7 @@ async function postManagement<TResponse>(
   }
 
   if (!response.ok) {
-    const statusText = response.statusText ? ` ${response.statusText}` : "";
+    const statusText = response.statusText ? ` ${redactSensitiveText(response.statusText)}` : "";
     throw new Error(`Kiro management ${operation} failed in ${auth.region}: ${response.status}${statusText}`);
   }
 

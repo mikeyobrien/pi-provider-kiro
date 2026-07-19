@@ -20,7 +20,7 @@ import * as PiAi from "@earendil-works/pi-ai";
 import { UniversalEventStreamMarshaller } from "@smithy/core/event-streams";
 import type { Message } from "@smithy/types";
 import { parseBracketToolCalls } from "./bracket-tool-parser.js";
-import { debugEnabled, debugLog } from "./debug.js";
+import { debugEnabled, debugLog, formatSafeError, redactSensitiveText } from "./debug.js";
 import {
   buildKiroAdditionalModelRequestFields,
   getKiroEffortConfig,
@@ -151,7 +151,7 @@ function emitToolCall(
     args = JSON.parse(state.input) as Record<string, unknown>;
   } catch (e) {
     console.warn(
-      `[pi-provider-kiro] Failed to parse tool input for "${state.name}" (toolUseId: ${state.toolUseId}): ${e instanceof Error ? e.message : String(e)}. Raw input (${state.input.length} chars): ${state.input.substring(0, 200)}`,
+      `[pi-provider-kiro] Failed to parse tool input for "${state.name}" (toolUseId: ${state.toolUseId}): ${formatSafeError(e)}. Raw input (${state.input.length} chars): ${redactSensitiveText(state.input.substring(0, 200))}`,
     );
     return false;
   }
@@ -196,8 +196,9 @@ export function streamKiro(
       timestamp: Date.now(),
     };
     try {
-      let accessToken = options?.apiKey;
-      if (!accessToken) throw new Error("Kiro credentials not set. Run /login kiro or install kiro-cli.");
+      const initialAccessToken = options?.apiKey;
+      if (!initialAccessToken) throw new Error("Kiro credentials not set. Run /login kiro or install kiro-cli.");
+      let accessToken: string = initialAccessToken;
       const modelMetadata = model as Model<Api> & {
         kiroModelId?: string;
         kiroRegion?: string;
@@ -213,17 +214,17 @@ export function streamKiro(
           ?.profileArn || (options as unknown as { profileArn?: string })?.profileArn;
       const cliCreds = getKiroCliCredentials() ?? getKiroCliCredentialsAllowExpired();
       const cliProfileArn = cliCreds?.access === accessToken ? cliCreds.profileArn : undefined;
-      let profileArn = modelMetadata.kiroProfileArn || optionProfileArn || cliProfileArn;
-      if (!profileArn) {
-        profileArn = skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth);
-      }
+      const initialProfileArn = modelMetadata.kiroProfileArn || optionProfileArn || cliProfileArn;
+      let profileArn: string =
+        initialProfileArn ||
+        (skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth));
 
       // Trigger dynamic models cache update in the background if empty or stale
       const { isCacheStale, updateKiroModelsCache } = await import("./models.js");
       if (!process.env.VITEST && isCacheStale(region)) {
         updateKiroModelsCache(accessToken, region, profileArn).catch((error) => {
           console.warn(
-            `[pi-provider-kiro] Failed to refresh Kiro model catalog in ${region}: ${error instanceof Error ? error.message : String(error)}`,
+            `[pi-provider-kiro] Failed to refresh Kiro model catalog in ${region}: ${formatSafeError(error)}`,
           );
         });
       }
@@ -443,11 +444,12 @@ export function streamKiro(
           if (!response.ok) {
             let errText = "";
             try {
-              errText = await response.text();
+              errText = redactSensitiveText(await response.text());
             } catch {
               errText = "";
             }
-            debugLog("response.error", { status: response.status, statusText: response.statusText, body: errText });
+            const safeStatusText = redactSensitiveText(response.statusText);
+            debugLog("response.error", { status: response.status, statusText: safeStatusText, body: errText });
             // Retry transient capacity errors with longer backoff
             if (isCapacityError(errText) && capacityRetryCount < capacityRetryConfig.maxRetries) {
               capacityRetryCount++;
@@ -465,23 +467,34 @@ export function streamKiro(
             }
             if (response.status === 403 && !isCapacityError(errText) && retryCount < maxRetries) {
               retryCount++;
-              // On 403, try to get a fresh token before retrying — the current
-              // one may have been rotated by kiro-cli or another session. If
-              // the cached kiro-cli token is also stale, actively refresh it.
+              // Re-read the shared store first in case another process already
+              // rotated the token. If it still contains the rejected token,
+              // force kiro-cli to refresh before retrying runtime.
               invalidateKiroProfileArn(managementAuth);
-              const freshCreds = getKiroCliCredentials() ?? refreshViaKiroCli();
+              const rejectedAccessToken = accessToken;
+              const rejectedProfileArn = profileArn;
+              const storedCreds = getKiroCliCredentials();
+              const rejectedCliCreds =
+                storedCreds?.access === rejectedAccessToken
+                  ? storedCreds
+                  : cliCreds?.access === rejectedAccessToken
+                    ? cliCreds
+                    : undefined;
+              const freshCreds: ReturnType<typeof getKiroCliCredentials> =
+                storedCreds?.access && storedCreds.access !== rejectedAccessToken ? storedCreds : refreshViaKiroCli();
               if (freshCreds?.access) accessToken = freshCreds.access;
               managementAuth = { accessToken, region };
 
-              // Re-resolve profileArn with fresh credentials through management.
-              const refreshedProfileArn =
-                freshCreds?.profileArn ||
-                modelMetadata.kiroProfileArn ||
-                (options as unknown as { credentials?: { profileArn?: string }; profileArn?: string })?.credentials
-                  ?.profileArn ||
-                (options as unknown as { profileArn?: string })?.profileArn;
+              // Social profiles may not be discoverable through management.
+              // Carry the profile used by the rejected request only across a
+              // confirmed desktop-to-desktop credential replacement.
+              const inheritedDesktopProfileArn =
+                rejectedCliCreds?.authMethod === "desktop" && freshCreds?.authMethod === "desktop"
+                  ? rejectedProfileArn
+                  : undefined;
               profileArn =
-                refreshedProfileArn ||
+                freshCreds?.profileArn ||
+                inheritedDesktopProfileArn ||
                 (skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth));
               const delayMs = exponentialBackoff(retryCount - 1, 500, MAX_RETRY_DELAY);
               await abortableDelay(delayMs, options?.signal);
@@ -492,13 +505,13 @@ export function streamKiro(
             // This covers both hard quota (MONTHLY_REQUEST_COUNT) and
             // exhausted capacity retries (INSUFFICIENT_MODEL_CAPACITY).
             if (isNonRetryableBodyError(errText) || isCapacityError(errText)) {
-              throw new Error(`Kiro API error: ${errText || response.statusText}`);
+              throw new Error(`Kiro API error: ${errText || safeStatusText}`);
             }
             // Format error so pi-ai's isContextOverflow() recognizes it
             if (isTooBigError(response.status, errText)) {
               throw new Error(`Kiro API error: context_length_exceeded (${response.status} ${errText})`);
             }
-            throw new Error(`Kiro API error: ${response.status} ${response.statusText} ${errText}`);
+            throw new Error(`Kiro API error: ${response.status} ${safeStatusText} ${errText}`);
           }
           break; // success, break inner loop
         }
@@ -807,7 +820,7 @@ export function streamKiro(
       }
     } catch (error) {
       output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-      output.errorMessage = error instanceof Error ? error.message : String(error);
+      output.errorMessage = formatSafeError(error);
       debugLog("response.caught", { stopReason: output.stopReason, error: output.errorMessage });
       stream.push({ type: "error", reason: output.stopReason, error: output });
       stream.end();

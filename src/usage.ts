@@ -2,6 +2,7 @@
 // ABOUTME: Maps the backend response into pi's generic OAuthProviderUsage shape for /settings.
 
 import type { OAuthCredentials } from "@earendil-works/pi-ai";
+import { redactSensitiveText } from "./debug.js";
 import { resolveApiRegion } from "./endpoints.js";
 import { resolveKiroProfileArn } from "./management.js";
 import type { KiroCredentials } from "./oauth.js";
@@ -188,8 +189,9 @@ async function postOperation<TResponse>(
   });
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`${target} failed: ${response.status} ${response.statusText}${text ? ` ${text}` : ""}`);
+    const text = redactSensitiveText(await response.text());
+    const statusText = redactSensitiveText(response.statusText);
+    throw new Error(`${target} failed: ${response.status} ${statusText}${text ? ` ${text}` : ""}`);
   }
 
   return (await response.json()) as TResponse;

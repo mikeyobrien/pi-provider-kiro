@@ -15,6 +15,7 @@
 
 import { execFileSync } from "node:child_process";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
+import { formatSafeError } from "./debug.js";
 import { showLoginUI } from "./login-ui.js";
 import { BUILDER_ID_START_URL, type KiroAuthMethod, type KiroCredentials, SSO_SCOPES } from "./oauth.js";
 
@@ -262,8 +263,7 @@ export async function loginViaKiroCli(
       stdio: "inherit",
     });
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    throw new Error(`kiro-cli login failed: ${msg}. Ensure kiro-cli is installed and in PATH.`);
+    throw new Error(`kiro-cli login failed: ${formatSafeError(error)}. Ensure kiro-cli is installed and in PATH.`);
   }
 
   const creds = getKiroCliSocialToken() || getKiroCliCredentials();
