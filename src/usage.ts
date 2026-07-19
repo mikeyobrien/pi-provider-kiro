@@ -2,6 +2,8 @@
 // ABOUTME: Maps the backend response into pi's generic OAuthProviderUsage shape for /settings.
 
 import type { OAuthCredentials } from "@earendil-works/pi-ai";
+import { resolveApiRegion } from "./endpoints.js";
+import { resolveKiroProfileArn } from "./management.js";
 import type { KiroCredentials } from "./oauth.js";
 
 const USAGE_ENDPOINT = "https://q.{region}.amazonaws.com/";
@@ -108,16 +110,8 @@ export interface KiroProviderUsage {
   raw?: Record<string, unknown>;
 }
 
-interface KiroProfileInfo {
-  arn?: string;
-}
-
-interface KiroListProfilesResponse {
-  profiles?: KiroProfileInfo[];
-}
-
 function getRegion(credentials: OAuthCredentials): string {
-  return (credentials as KiroCredentials).region || "us-east-1";
+  return resolveApiRegion((credentials as KiroCredentials).region);
 }
 
 function getEndpoint(credentials: OAuthCredentials): string {
@@ -203,12 +197,10 @@ async function postOperation<TResponse>(
 
 async function listProfileArn(credentials: OAuthCredentials): Promise<string | undefined> {
   try {
-    const response = await postOperation<KiroListProfilesResponse>(
-      credentials,
-      "AmazonCodeWhispererService.ListAvailableProfiles",
-      {},
+    return await resolveKiroProfileArn(
+      { accessToken: credentials.access, region: getRegion(credentials) },
+      (credentials as KiroCredentials).profileArn,
     );
-    return response.profiles?.find((profile) => profile.arn)?.arn;
   } catch {
     return undefined;
   }

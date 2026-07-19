@@ -21,9 +21,16 @@ import { UniversalEventStreamMarshaller } from "@smithy/core/event-streams";
 import type { Message } from "@smithy/types";
 import { parseBracketToolCalls } from "./bracket-tool-parser.js";
 import { debugEnabled, debugLog } from "./debug.js";
+import { getKiroRegionFromEndpoint } from "./endpoints.js";
 import { parseKiroEvent } from "./event-parser.js";
 import { addPlaceholderTools, HISTORY_LIMIT, HISTORY_LIMIT_CONTEXT_WINDOW, truncateHistory } from "./history.js";
 import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, refreshViaKiroCli } from "./kiro-cli.js";
+import {
+  invalidateKiroProfileArn,
+  type KiroManagementAuth,
+  resetKiroProfileArnCache,
+  resolveKiroProfileArn,
+} from "./management.js";
 import { resolveKiroModel } from "./models.js";
 import {
   capacityRetryConfig,
@@ -112,55 +119,20 @@ interface KiroToolCallState {
   input: string;
 }
 
-// --- profileArn resolution (cached per endpoint) ---
-const profileArnCache = new Map<string, string>();
-const profileArnPending = new Set<string>();
+let skipProfileResolutionForTests = false;
 
-/** Reset profileArn cache — exported for tests. */
+/** Reset profile resolution state — exported for stream tests. */
 export function resetProfileArnCache(resolved = false): void {
-  profileArnCache.clear();
-  profileArnPending.clear();
-  if (resolved) profileArnPending.add("__all__");
+  resetKiroProfileArnCache();
+  skipProfileResolutionForTests = resolved;
 }
 
-async function resolveProfileArn(accessToken: string, endpoint: string): Promise<string | undefined> {
-  if (profileArnPending.has("__all__")) return undefined;
-  if (profileArnCache.has(endpoint)) return profileArnCache.get(endpoint);
-  if (profileArnPending.has(endpoint)) return undefined;
+async function resolveOptionalProfileArn(auth: KiroManagementAuth): Promise<string | undefined> {
   try {
-    const ep = new URL(endpoint);
-    ep.pathname = ep.pathname.replace(/\/generateAssistantResponse\/?$/, "/");
-    ep.search = "";
-    ep.hash = "";
-
-    const r = await fetch(ep.toString(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-amz-json-1.0",
-        Authorization: `Bearer ${accessToken}`,
-        "X-Amz-Target": "AmazonCodeWhispererService.ListAvailableProfiles",
-      },
-      body: "{}",
-    });
-    if (!r.ok) {
-      console.warn(
-        `[pi-provider-kiro] Failed to resolve profileArn: ListAvailableProfiles returned ${r.status} ${r.statusText}. Will retry on the next request.`,
-      );
-      return undefined;
-    }
-    const j = (await r.json()) as { profiles?: Array<{ arn?: string }> };
-    const arn = j.profiles?.find((p) => p.arn)?.arn;
-    if (!arn) {
-      debugLog("profileArn.empty", {
-        message: "ListAvailableProfiles returned no profile ARN; this is expected for some social-login tokens.",
-      });
-      return undefined;
-    }
-    profileArnCache.set(endpoint, arn);
-    return arn;
+    return await resolveKiroProfileArn(auth);
   } catch (error) {
     console.warn(
-      `[pi-provider-kiro] Failed to resolve profileArn: ${error instanceof Error ? error.message : String(error)}. Will retry on the next request.`,
+      `[pi-provider-kiro] Profile discovery failed in ${auth.region}; continuing without profileArn: ${error instanceof Error ? error.message : String(error)}`,
     );
     return undefined;
   }
@@ -231,20 +203,30 @@ export function streamKiro(
       let accessToken = options?.apiKey;
       if (!accessToken) throw new Error("Kiro credentials not set. Run /login kiro or install kiro-cli.");
       const endpoint = model.baseUrl || "https://q.us-east-1.amazonaws.com/generateAssistantResponse";
+      const region =
+        (model as Model<Api> & { kiroRegion?: string }).kiroRegion ??
+        getKiroRegionFromEndpoint(endpoint) ??
+        "us-east-1";
+      let managementAuth: KiroManagementAuth = { accessToken, region };
 
       const optionProfileArn =
         (options as unknown as { credentials?: { profileArn?: string }; profileArn?: string })?.credentials
           ?.profileArn || (options as unknown as { profileArn?: string })?.profileArn;
       const cliCreds = getKiroCliCredentials() ?? getKiroCliCredentialsAllowExpired();
       const cliProfileArn = cliCreds?.access === accessToken ? cliCreds.profileArn : undefined;
-      let profileArn = optionProfileArn || cliProfileArn || (await resolveProfileArn(accessToken, endpoint));
+      let profileArn = optionProfileArn || cliProfileArn;
+      if (!profileArn && !skipProfileResolutionForTests) {
+        profileArn = await resolveOptionalProfileArn(managementAuth);
+      }
 
       // Trigger dynamic models cache update in the background if empty or stale
-      const ep = new URL(endpoint);
-      const region = ep.hostname.split(".")[1] || "us-east-1";
       const { isCacheStale, updateKiroModelsCache } = await import("./models.js");
       if (!process.env.VITEST && isCacheStale(region)) {
-        updateKiroModelsCache(accessToken, region, profileArn).catch(() => {});
+        updateKiroModelsCache(accessToken, region, profileArn).catch((error) => {
+          console.warn(
+            `[pi-provider-kiro] Failed to refresh Kiro model catalog in ${region}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
       }
 
       const kiroModelId = resolveKiroModel(model.id);
@@ -478,17 +460,21 @@ export function streamKiro(
               // On 403, try to get a fresh token before retrying — the current
               // one may have been rotated by kiro-cli or another session. If
               // the cached kiro-cli token is also stale, actively refresh it.
+              invalidateKiroProfileArn(managementAuth);
               const freshCreds = getKiroCliCredentials() ?? refreshViaKiroCli();
               if (freshCreds?.access) accessToken = freshCreds.access;
+              managementAuth = { accessToken, region };
 
-              // Re-resolve profileArn with fresh credentials
-              profileArnCache.delete(endpoint);
+              // Re-resolve profileArn with fresh credentials through management.
               const refreshedProfileArn =
                 (options as unknown as { credentials?: { profileArn?: string }; profileArn?: string })?.credentials
                   ?.profileArn ||
                 (options as unknown as { profileArn?: string })?.profileArn ||
                 freshCreds?.profileArn;
-              profileArn = refreshedProfileArn || (await resolveProfileArn(accessToken, endpoint));
+              profileArn = refreshedProfileArn;
+              if (!profileArn && !skipProfileResolutionForTests) {
+                profileArn = await resolveOptionalProfileArn(managementAuth);
+              }
               const delayMs = exponentialBackoff(retryCount - 1, 500, MAX_RETRY_DELAY);
               await abortableDelay(delayMs, options?.signal);
               break; // break inner loop, continue outer loop

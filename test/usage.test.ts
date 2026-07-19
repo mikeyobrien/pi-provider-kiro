@@ -74,6 +74,45 @@ describe("fetchKiroUsage", () => {
     });
   });
 
+  it("uses a credential-provided profileArn without a management lookup", async () => {
+    const credentialProfileArn = "arn:aws:codewhisperer:us-east-1:123:profile/from-credentials";
+    let callCount = 0;
+    const fetchMock = vi.fn().mockImplementation(() => {
+      callCount++;
+      if (callCount <= 6) {
+        return Promise.resolve({
+          ok: false,
+          status: 403,
+          statusText: "Forbidden",
+          text: () => Promise.resolve("x"),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            subscriptionInfo: { subscriptionTitle: "KIRO PRO" },
+            usageBreakdown: {
+              resourceType: "CREDIT",
+              displayName: "Credits",
+              currentUsage: 0,
+              currentOverages: 0,
+              usageLimit: 1000,
+              overageCharges: 0,
+            },
+          }),
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const usage = await fetchKiroUsage({ ...creds, profileArn: credentialProfileArn });
+
+    expect(usage.subscriptionTitle).toBe("KIRO PRO");
+    expect(fetchMock).toHaveBeenCalledTimes(7);
+    expect(fetchMock.mock.calls.every(([url]) => url === "https://q.us-east-1.amazonaws.com/")).toBe(true);
+    expect(JSON.parse(fetchMock.mock.calls[6][1].body)).toMatchObject({ profileArn: credentialProfileArn });
+  });
+
   it("falls back to a profileArn after initial GetUsageLimits attempts fail", async () => {
     const fetchMock = vi
       .fn()
@@ -109,6 +148,8 @@ describe("fetchKiroUsage", () => {
     const usage = await fetchKiroUsage(creds);
 
     expect(usage.subscriptionTitle).toBe("KIRO PRO+");
+    expect(fetchMock.mock.calls[6][0]).toBe("https://management.us-east-1.kiro.dev/");
+    expect(fetchMock.mock.calls[6][1].headers["X-Amz-Target"]).toBe("AmazonCodeWhispererService.ListAvailableProfiles");
     const finalCall = fetchMock.mock.calls.at(-1);
     expect(finalCall?.[1]?.body).toContain("profileArn");
   });

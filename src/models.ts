@@ -3,6 +3,9 @@
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fetchKiroModelCatalog } from "./management.js";
+
+export { resolveApiRegion } from "./endpoints.js";
 
 const CACHE_PATH = join(homedir(), ".kiro-models-cache.json");
 
@@ -78,92 +81,70 @@ export function isCacheStale(region: string): boolean {
 }
 
 export async function updateKiroModelsCache(accessToken: string, region: string, profileArn?: string): Promise<void> {
-  try {
-    const qHost = `https://q.${region}.amazonaws.com`;
-    const url = new URL(`${qHost}/ListAvailableModels`);
-    url.searchParams.set("origin", "AI_EDITOR");
-    if (profileArn) {
-      url.searchParams.set("profileArn", profileArn);
+  const qHost = `https://q.${region}.amazonaws.com`;
+  const data = await fetchKiroModelCatalog({ accessToken, region }, profileArn);
+  const fetchedModels = data.models;
+
+  const newModels = fetchedModels.map((fm) => {
+    const kiroId = fm.modelId;
+    const piId = kiroId.replace(/(\d)\.(\d)/g, "$1-$2");
+
+    const existing = kiroModels.find((m) => m.id === piId);
+    if (existing) {
+      return existing;
     }
 
-    const response = await fetch(url.toString(), {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-      },
+    const isClaude = piId.startsWith("claude");
+    const isReasoning =
+      piId.includes("opus") || piId.includes("sonnet") || piId.includes("coder") || piId.includes("deepseek");
+    const name = piId
+      .split("-")
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(" ");
+
+    return {
+      id: piId,
+      name: name,
+      api: "kiro-api" as const,
+      provider: "kiro" as const,
+      baseUrl: `${qHost}/generateAssistantResponse`,
+      reasoning: isReasoning,
+      input: isClaude ? (["text", "image"] as ("text" | "image")[]) : (["text"] as ("text" | "image")[]),
+      cost: ZERO_COST,
+      contextWindow: isClaude ? 1000000 : 200000,
+      maxTokens: isClaude ? 65536 : 8192,
+    };
+  });
+
+  if (!newModels.some((m) => m.id === "auto")) {
+    newModels.push({
+      id: "auto",
+      name: "Auto",
+      api: "kiro-api" as const,
+      provider: "kiro" as const,
+      baseUrl: `${qHost}/generateAssistantResponse`,
+      reasoning: true,
+      input: ["text", "image"],
+      cost: ZERO_COST,
+      contextWindow: 1000000,
+      maxTokens: 65536,
     });
-
-    if (!response.ok) {
-      return;
-    }
-
-    const data = (await response.json()) as { models?: Array<{ modelId: string }> };
-    const fetchedModels = data.models || [];
-    if (fetchedModels.length === 0) return;
-
-    const newModels = fetchedModels.map((fm) => {
-      const kiroId = fm.modelId;
-      const piId = kiroId.replace(/(\d)\.(\d)/g, "$1-$2");
-
-      const existing = kiroModels.find((m) => m.id === piId);
-      if (existing) {
-        return existing;
-      }
-
-      const isClaude = piId.startsWith("claude");
-      const isReasoning =
-        piId.includes("opus") || piId.includes("sonnet") || piId.includes("coder") || piId.includes("deepseek");
-      const name = piId
-        .split("-")
-        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-        .join(" ");
-
-      return {
-        id: piId,
-        name: name,
-        api: "kiro-api" as const,
-        provider: "kiro" as const,
-        baseUrl: `${qHost}/generateAssistantResponse`,
-        reasoning: isReasoning,
-        input: isClaude ? (["text", "image"] as ("text" | "image")[]) : (["text"] as ("text" | "image")[]),
-        cost: ZERO_COST,
-        contextWindow: isClaude ? 1000000 : 200000,
-        maxTokens: isClaude ? 65536 : 8192,
-      };
-    });
-
-    if (!newModels.some((m) => m.id === "auto")) {
-      newModels.push({
-        id: "auto",
-        name: "Auto",
-        api: "kiro-api" as const,
-        provider: "kiro" as const,
-        baseUrl: `${qHost}/generateAssistantResponse`,
-        reasoning: true,
-        input: ["text", "image"],
-        cost: ZERO_COST,
-        contextWindow: 1000000,
-        maxTokens: 65536,
-      });
-    }
-
-    let cache: Record<string, typeof kiroModels> = {};
-    if (existsSync(CACHE_PATH)) {
-      try {
-        cache = JSON.parse(readFileSync(CACHE_PATH, "utf-8"));
-      } catch {
-        // Ignore parsing errors
-      }
-    }
-
-    cache[region] = newModels;
-    writeFileSync(CACHE_PATH, JSON.stringify(cache, null, 2), "utf-8");
-
-    cachedIdsLoaded = false;
-    loadCachedModelIds();
-  } catch (_error) {
-    // Ignore fetch/cache errors
   }
+
+  let cache: Record<string, typeof kiroModels> = {};
+  if (existsSync(CACHE_PATH)) {
+    try {
+      cache = JSON.parse(readFileSync(CACHE_PATH, "utf-8"));
+    } catch {
+      // Ignore parsing errors
+    }
+  }
+
+  cache[region] = newModels;
+  writeFileSync(CACHE_PATH, JSON.stringify(cache, null, 2), "utf-8");
+
+  cachedIdsLoaded = false;
+  loadCachedModelIds();
 }
 
 export function resolveKiroModel(modelId: string): string {
@@ -175,36 +156,6 @@ export function resolveKiroModel(modelId: string): string {
     throw new Error(`Unknown Kiro model ID: ${modelId}`);
   }
   return kiroId;
-}
-
-/**
- * Map an SSO/OIDC region to the Kiro API region.
- *
- * The Kiro Q API is only deployed in a subset of regions. Tokens issued by
- * an SSO instance in e.g. eu-west-1 must be sent to the eu-central-1 API
- * endpoint. This mirrors the endpoint resolution that kiro-cli performs
- * internally via the AWS SDK partition resolver.
- */
-const API_REGION_MAP: Record<string, string> = {
-  "us-west-1": "us-east-1",
-  "us-west-2": "us-east-1",
-  "us-east-2": "us-east-1",
-  "ap-southeast-1": "us-east-1",
-  "ap-southeast-2": "us-east-1",
-  "ap-northeast-1": "us-east-1",
-  "ap-south-1": "us-east-1",
-  "eu-west-1": "eu-central-1",
-  "eu-west-2": "eu-central-1",
-  "eu-west-3": "eu-central-1",
-  "eu-north-1": "eu-central-1",
-  "eu-south-1": "eu-central-1",
-  "eu-south-2": "eu-central-1",
-  "eu-central-2": "eu-central-1",
-};
-
-export function resolveApiRegion(ssoRegion: string | undefined): string {
-  if (!ssoRegion) return "us-east-1";
-  return API_REGION_MAP[ssoRegion] ?? ssoRegion;
 }
 
 /**
