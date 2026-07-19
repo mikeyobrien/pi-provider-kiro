@@ -23,7 +23,7 @@
   ],
   "scripts": {
     "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:@earendil-works/pi-ai --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-tui",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
@@ -44,9 +44,9 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.2",
-    "@earendil-works/pi-ai": "^0.75.5",
-    "@earendil-works/pi-coding-agent": "^0.75.5",
-    "@earendil-works/pi-tui": "^0.75.5",
+    "@earendil-works/pi-ai": "0.80.10",
+    "@earendil-works/pi-coding-agent": "0.80.10",
+    "@earendil-works/pi-tui": "0.80.10",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   }

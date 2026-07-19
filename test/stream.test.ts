@@ -1774,13 +1774,15 @@ describe("Feature 9: Streaming Integration", () => {
     const events = await collect(stream);
     const done = events.find((e) => e.type === "done");
     const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
 
     // tiktoken count should differ from chars/4 (which would be ~8)
     // "Hello there, this is a response." is 8 tokens with cl100k_base
-    expect(msg?.usage.output).toBeGreaterThan(0);
+    expect(msg.usage.output).toBeGreaterThan(0);
     // The old method (chars/4) would give ceil(32/4) = 8
     // tiktoken gives an accurate count that won't be exactly chars/4 for most strings
-    expect(msg?.usage.totalTokens).toBe(msg?.usage.input + msg?.usage.output);
+    expect(msg.usage.totalTokens).toBe(msg.usage.input + msg.usage.output);
 
     vi.unstubAllGlobals();
   });
@@ -1797,15 +1799,17 @@ describe("Feature 9: Streaming Integration", () => {
     const events = await collect(stream);
     const done = events.find((e) => e.type === "done");
     const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
 
     // Usage event values should take precedence
-    expect(msg?.usage.input).toBe(500);
-    expect(msg?.usage.output).toBe(200);
-    expect(msg?.usage.totalTokens).toBe(700);
+    expect(msg.usage.input).toBe(500);
+    expect(msg.usage.output).toBe(200);
+    expect(msg.usage.totalTokens).toBe(700);
 
     // contextPercent should still reflect the API's contextUsagePercentage,
     // not be derived from the (overwritten) input token count
-    expect((msg?.usage as Record<string, unknown>).contextPercent).toBe(10);
+    expect((msg.usage as unknown as Record<string, unknown>).contextPercent).toBe(10);
 
     vi.unstubAllGlobals();
   });
@@ -1818,10 +1822,12 @@ describe("Feature 9: Streaming Integration", () => {
     const events = await collect(stream);
     const done = events.find((e) => e.type === "done");
     const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
 
-    expect((msg?.usage as Record<string, unknown>).contextPercent).toBe(42);
+    expect((msg.usage as unknown as Record<string, unknown>).contextPercent).toBe(42);
     // input should be back-calculated from percentage
-    expect(msg?.usage.input).toBe(Math.round(0.42 * 200000));
+    expect(msg.usage.input).toBe(Math.round(0.42 * 200000));
 
     vi.unstubAllGlobals();
   });

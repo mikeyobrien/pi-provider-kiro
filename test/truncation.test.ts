@@ -1,7 +1,7 @@
 // ABOUTME: Tests for truncation detection and recovery notice injection.
 // ABOUTME: Validates wasPreviousResponseTruncated and TRUNCATION_NOTICE.
 
-import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Message, StopReason } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { TRUNCATION_NOTICE, wasPreviousResponseTruncated } from "../src/truncation.js";
 
@@ -15,7 +15,7 @@ const zeroUsage = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-function makeAssistant(stopReason: string): AssistantMessage {
+function makeAssistant(stopReason: StopReason): AssistantMessage {
   return {
     role: "assistant",
     content: [{ type: "text", text: "some response" }],

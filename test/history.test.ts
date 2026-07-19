@@ -15,7 +15,7 @@ const userEntry = (content: string, toolResults?: KiroToolResult[]): KiroHistory
   userInputMessage: {
     content,
     modelId: "M",
-    origin: "AI_EDITOR",
+    origin: "KIRO_CLI",
     ...(toolResults ? { userInputMessageContext: { toolResults } } : {}),
   },
 });
@@ -192,7 +192,7 @@ describe("Feature 6: History Management", () => {
           userInputMessage: {
             content: "Look at this image",
             modelId: "M",
-            origin: "AI_EDITOR",
+            origin: "KIRO_CLI",
             images: [{ format: "png", source: { bytes: "base64data" } }],
           },
         },
@@ -218,7 +218,7 @@ describe("Feature 6: History Management", () => {
           userInputMessage: {
             content: "Tool results provided.",
             modelId: "M",
-            origin: "AI_EDITOR",
+            origin: "KIRO_CLI",
             images: [{ format: "png", source: { bytes: "screenshot-data" } }],
             userInputMessageContext: {
               toolResults: [{ toolUseId: "tc1", content: [{ text: "ok" }], status: "success" as const }],
@@ -235,7 +235,7 @@ describe("Feature 6: History Management", () => {
       const images = [{ format: "png", source: { bytes: "data" } }];
       const h: KiroHistoryEntry[] = [
         {
-          userInputMessage: { content: "hi", modelId: "M", origin: "AI_EDITOR", images },
+          userInputMessage: { content: "hi", modelId: "M", origin: "KIRO_CLI", images },
         },
       ];
       stripHistoryImages(h);
@@ -250,7 +250,7 @@ describe("Feature 6: History Management", () => {
           userInputMessage: {
             content: "Look at this",
             modelId: "M",
-            origin: "AI_EDITOR",
+            origin: "KIRO_CLI",
             images: [{ format: "png", source: { bytes: "x".repeat(1000) } }],
           },
         },
@@ -272,7 +272,7 @@ describe("Feature 6: History Management", () => {
           userInputMessage: {
             content: "Look at this huge image",
             modelId: "M",
-            origin: "AI_EDITOR",
+            origin: "KIRO_CLI",
             images: [{ format: "png", source: { bytes: hugeImage } }],
           },
         },
