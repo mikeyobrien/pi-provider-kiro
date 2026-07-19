@@ -41,7 +41,6 @@ export function getKiroRegionFromEndpoint(endpoint: string): string | undefined 
   try {
     const [service, region, ...suffix] = new URL(endpoint).hostname.split(".");
     const domain = suffix.join(".");
-    if (service === "q" && domain === "amazonaws.com") return region;
     if ((service === "management" || service === "runtime") && domain === "kiro.dev") return region;
     return undefined;
   } catch {

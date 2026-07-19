@@ -80,7 +80,32 @@ describe("Feature 1: Extension Registration", () => {
     const models = kiroModels.map((m) => ({ ...m, provider: "kiro", api: "kiro-api", baseUrl: "old" }));
     const creds = { access: "x", refresh: "x", expires: 0, clientId: "", clientSecret: "", region: ssoRegion };
     const modified = config.oauth.modifyModels(models, creds);
-    expect(modified[0].baseUrl).toBe(`https://q.${expectedApiRegion}.amazonaws.com/generateAssistantResponse`);
+    expect(modified[0].baseUrl).toBe(`https://runtime.${expectedApiRegion}.kiro.dev/`);
+  });
+
+  it("modifyModels carries the OAuth profile ARN on Kiro models only", async () => {
+    const mod = await import("../src/index.js");
+    const { pi, registerProvider } = mockPi();
+    mod.default(pi);
+
+    const config = registerProvider.mock.calls[0][1];
+    const profileArn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/social";
+    const models = kiroModels.map((model) => ({ ...model, baseUrl: "old" }));
+    const creds = {
+      access: "social-access",
+      refresh: "social-refresh|desktop",
+      expires: Date.now() + 60_000,
+      clientId: "",
+      clientSecret: "",
+      region: "us-east-1",
+      authMethod: "desktop",
+      profileArn,
+    };
+
+    const modified = config.oauth.modifyModels(models, creds);
+
+    expect(modified).toHaveLength(models.length);
+    expect(modified.every((model: { kiroProfileArn?: string }) => model.kiroProfileArn === profileArn)).toBe(true);
   });
 
   it("modifyModels does not apply a hardcoded regional allowlist", async () => {

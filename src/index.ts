@@ -4,7 +4,7 @@
 
 import type { Api, Model, OAuthCredentials } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { resolveApiRegion } from "./endpoints.js";
+import { getKiroEndpoints, resolveApiRegion } from "./endpoints.js";
 import { getKiroCliCredentials } from "./kiro-cli.js";
 import { setExtensionContext } from "./login-ui.js";
 import { getCachedModels, kiroModels } from "./models.js";
@@ -24,7 +24,7 @@ export default function (pi: ExtensionAPI) {
     setExtensionContext(ctx);
   });
   pi.registerProvider("kiro", {
-    baseUrl: "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
+    baseUrl: getKiroEndpoints("us-east-1").runtime,
     api: "kiro-api",
     models: kiroModels,
     oauth: {
@@ -38,10 +38,12 @@ export default function (pi: ExtensionAPI) {
         const apiRegion = resolveApiRegion((cred as KiroCredentials).region);
         const cachedKiro = getCachedModels(apiRegion);
         const nonKiro = models.filter((m: Model<Api>) => m.provider !== "kiro");
+        const credentialProfileArn = (cred as KiroCredentials).profileArn;
         const modifiedKiro = cachedKiro.map((m: Model<Api>) => ({
           ...m,
-          baseUrl: `https://q.${apiRegion}.amazonaws.com/generateAssistantResponse`,
+          baseUrl: getKiroEndpoints(apiRegion).runtime,
           kiroRegion: apiRegion,
+          ...(credentialProfileArn ? { kiroProfileArn: credentialProfileArn } : {}),
         }));
 
         return [...nonKiro, ...modifiedKiro];

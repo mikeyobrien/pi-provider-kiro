@@ -21,7 +21,7 @@ import { UniversalEventStreamMarshaller } from "@smithy/core/event-streams";
 import type { Message } from "@smithy/types";
 import { parseBracketToolCalls } from "./bracket-tool-parser.js";
 import { debugEnabled, debugLog } from "./debug.js";
-import { getKiroRegionFromEndpoint } from "./endpoints.js";
+import { getKiroEndpoints, getKiroRegionFromEndpoint } from "./endpoints.js";
 import { parseKiroEvent } from "./event-parser.js";
 import { addPlaceholderTools, HISTORY_LIMIT, HISTORY_LIMIT_CONTEXT_WINDOW, truncateHistory } from "./history.js";
 import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, refreshViaKiroCli } from "./kiro-cli.js";
@@ -110,7 +110,7 @@ interface KiroRequest {
     currentMessage: { userInputMessage: KiroUserInputMessage };
     history?: KiroHistoryEntry[];
   };
-  profileArn?: string;
+  profileArn: string;
   agentMode?: string;
 }
 interface KiroToolCallState {
@@ -120,22 +120,12 @@ interface KiroToolCallState {
 }
 
 let skipProfileResolutionForTests = false;
+const TEST_PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:000000000000:profile/test";
 
 /** Reset profile resolution state — exported for stream tests. */
 export function resetProfileArnCache(resolved = false): void {
   resetKiroProfileArnCache();
   skipProfileResolutionForTests = resolved;
-}
-
-async function resolveOptionalProfileArn(auth: KiroManagementAuth): Promise<string | undefined> {
-  try {
-    return await resolveKiroProfileArn(auth);
-  } catch (error) {
-    console.warn(
-      `[pi-provider-kiro] Profile discovery failed in ${auth.region}; continuing without profileArn: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    return undefined;
-  }
 }
 
 function emitToolCall(
@@ -202,9 +192,13 @@ export function streamKiro(
     try {
       let accessToken = options?.apiKey;
       if (!accessToken) throw new Error("Kiro credentials not set. Run /login kiro or install kiro-cli.");
-      const endpoint = model.baseUrl || "https://q.us-east-1.amazonaws.com/generateAssistantResponse";
-      const modelMetadata = model as Model<Api> & { kiroModelId?: string; kiroRegion?: string };
-      const region = modelMetadata.kiroRegion ?? getKiroRegionFromEndpoint(endpoint) ?? "us-east-1";
+      const modelMetadata = model as Model<Api> & {
+        kiroModelId?: string;
+        kiroRegion?: string;
+        kiroProfileArn?: string;
+      };
+      const region = modelMetadata.kiroRegion ?? getKiroRegionFromEndpoint(model.baseUrl) ?? "us-east-1";
+      const endpoint = getKiroEndpoints(region).runtime;
       let managementAuth: KiroManagementAuth = { accessToken, region };
 
       const optionProfileArn =
@@ -212,9 +206,9 @@ export function streamKiro(
           ?.profileArn || (options as unknown as { profileArn?: string })?.profileArn;
       const cliCreds = getKiroCliCredentials() ?? getKiroCliCredentialsAllowExpired();
       const cliProfileArn = cliCreds?.access === accessToken ? cliCreds.profileArn : undefined;
-      let profileArn = optionProfileArn || cliProfileArn;
-      if (!profileArn && !skipProfileResolutionForTests) {
-        profileArn = await resolveOptionalProfileArn(managementAuth);
+      let profileArn = modelMetadata.kiroProfileArn || optionProfileArn || cliProfileArn;
+      if (!profileArn) {
+        profileArn = skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth);
       }
 
       // Trigger dynamic models cache update in the background if empty or stale
@@ -396,7 +390,7 @@ export function streamKiro(
             },
             ...(history.length > 0 ? { history } : {}),
           },
-          ...(profileArn ? { profileArn } : {}),
+          profileArn,
           agentMode: "vibe",
         };
         let response!: Response;
@@ -467,14 +461,14 @@ export function streamKiro(
 
               // Re-resolve profileArn with fresh credentials through management.
               const refreshedProfileArn =
+                freshCreds?.profileArn ||
+                modelMetadata.kiroProfileArn ||
                 (options as unknown as { credentials?: { profileArn?: string }; profileArn?: string })?.credentials
                   ?.profileArn ||
-                (options as unknown as { profileArn?: string })?.profileArn ||
-                freshCreds?.profileArn;
-              profileArn = refreshedProfileArn;
-              if (!profileArn && !skipProfileResolutionForTests) {
-                profileArn = await resolveOptionalProfileArn(managementAuth);
-              }
+                (options as unknown as { profileArn?: string })?.profileArn;
+              profileArn =
+                refreshedProfileArn ||
+                (skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth));
               const delayMs = exponentialBackoff(retryCount - 1, 500, MAX_RETRY_DELAY);
               await abortableDelay(delayMs, options?.signal);
               break; // break inner loop, continue outer loop

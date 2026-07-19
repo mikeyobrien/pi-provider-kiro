@@ -5,6 +5,7 @@ import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "nod
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Model, ThinkingLevelMap } from "@earendil-works/pi-ai";
+import { getKiroEndpoints } from "./endpoints.js";
 import { fetchKiroModelCatalog, type KiroCatalogModel } from "./management.js";
 
 export { resolveApiRegion } from "./endpoints.js";
@@ -16,7 +17,7 @@ export const KIRO_MANAGEMENT_CACHE_PATH = join(homedir(), ".kiro-management-mode
 const CACHE_MAX_AGE_MS = 3600_000;
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_MAX_TOKENS = 8_192;
-const BASE_URL = "https://q.us-east-1.amazonaws.com/generateAssistantResponse";
+const BASE_URL = getKiroEndpoints("us-east-1").runtime;
 const ZERO_COST = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 const REASONING_FAMILY_MARKERS = ["opus", "sonnet", "fable", "coder", "deepseek", "gpt", "glm", "qwen"];
 
@@ -30,6 +31,8 @@ export interface KiroModel extends Model<"kiro-api"> {
   tokenLimits?: KiroTokenLimits;
   firstTokenTimeout?: number;
   kiroRegion?: string;
+  /** Credential-scoped profile ARN attached only to the in-memory model projection. */
+  kiroProfileArn?: string;
 }
 
 interface ManagementCacheRegion {
@@ -463,7 +466,7 @@ export function mapKiroCatalogModels(catalogModels: KiroCatalogModel[], region: 
       name: catalogName ?? existing?.name ?? humanizeModelId(id),
       api: "kiro-api",
       provider: "kiro",
-      baseUrl: `https://q.${region}.amazonaws.com/generateAssistantResponse`,
+      baseUrl: getKiroEndpoints(region).runtime,
       reasoning: effortValues !== undefined || (schema === undefined && hasReasoningFamilyFallback(id)),
       ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
       input: existing ? [...existing.input] : isClaude ? ["text", "image"] : ["text"],

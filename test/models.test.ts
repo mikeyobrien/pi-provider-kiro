@@ -166,6 +166,7 @@ describe("Feature 2: Model Definitions", () => {
     it("preserves the exact service ID for request-time model resolution", () => {
       const dynamicModel = mapped.find((model) => model.id === "openai-gpt-5-6");
       expect(dynamicModel).toBeDefined();
+      expect(dynamicModel?.baseUrl).toBe(`https://runtime.${TEST_REGION}.kiro.dev/`);
       expect(resolveKiroModel(dynamicModel?.id ?? "", dynamicModel?.kiroModelId)).toBe("openai-gpt-5.6");
     });
   });
@@ -247,6 +248,7 @@ describe("Feature 2: Model Definitions", () => {
   describe("bootstrap model catalog", () => {
     it("keeps conservative, zero-cost bootstrap metadata", () => {
       expect(kiroModels).toHaveLength(15);
+      expect(kiroModels.every((model) => model.baseUrl === "https://runtime.us-east-1.kiro.dev/")).toBe(true);
       expect(kiroModels.every((model) => model.cost.input === 0 && model.cost.output === 0)).toBe(true);
       expect(kiroModels.find((model) => model.id === "claude-haiku-4-5")?.reasoning).toBe(false);
       expect(kiroModels.find((model) => model.id === "minimax-m2-1")?.reasoning).toBe(false);
