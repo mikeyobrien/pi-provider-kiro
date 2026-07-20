@@ -124,7 +124,7 @@ describe("Feature 2: Model Definitions", () => {
         id: "claude-opus-4-8",
         kiroModelId: "claude-opus-4.8",
         reasoning: true,
-        thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+        thinkingLevelMap: { xhigh: "xhigh" },
         contextWindow: 900_000,
         maxTokens: 100_000,
       },
@@ -132,7 +132,7 @@ describe("Feature 2: Model Definitions", () => {
         id: "claude-sonnet-4-6",
         kiroModelId: "claude-sonnet-4.6",
         reasoning: true,
-        thinkingLevelMap: { max: "max" },
+        thinkingLevelMap: { xhigh: "max" },
         contextWindow: 200_000,
         maxTokens: 8_192,
       },
@@ -147,7 +147,7 @@ describe("Feature 2: Model Definitions", () => {
         id: "claude-fable-5",
         kiroModelId: "claude-fable-5",
         reasoning: true,
-        thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+        thinkingLevelMap: { xhigh: "xhigh" },
         contextWindow: 1_000_000,
         maxTokens: 128_000,
       },
@@ -161,6 +161,22 @@ describe("Feature 2: Model Definitions", () => {
       expect(opus?.additionalModelRequestFieldsSchema).toEqual(catalogFixture[1].additionalModelRequestFieldsSchema);
       expect(opus?.tokenLimits).toEqual(catalogFixture[1].tokenLimits);
       expect(opus?.contextWindow).not.toBe(kiroModels.find((model) => model.id === opus?.id)?.contextWindow);
+    });
+
+    it("treats a null schema as absent for auto", () => {
+      const [auto] = mapKiroCatalogModels([{ modelId: "auto", additionalModelRequestFieldsSchema: null }], TEST_REGION);
+
+      expect(auto).toMatchObject({ id: "auto", reasoning: true });
+      expect(auto.additionalModelRequestFieldsSchema).toBeUndefined();
+    });
+
+    it("rejects malformed non-null schemas", () => {
+      expect(() =>
+        mapKiroCatalogModels(
+          [{ modelId: "auto", additionalModelRequestFieldsSchema: "invalid" as never }],
+          TEST_REGION,
+        ),
+      ).toThrow("invalid request-fields schema");
     });
 
     it("preserves the exact service ID for request-time model resolution", () => {
@@ -264,29 +280,33 @@ describe("Feature 2: Model Definitions", () => {
 
   describe("thinkingLevelMap", () => {
     const THROUGH_HIGH = ["off", "minimal", "low", "medium", "high"] satisfies ModelThinkingLevel[];
-    const THROUGH_XHIGH_AND_MAX = [...THROUGH_HIGH, "xhigh", "max"] satisfies ModelThinkingLevel[];
-    const THROUGH_HIGH_AND_MAX = [...THROUGH_HIGH, "max"] satisfies ModelThinkingLevel[];
-    const XHIGH_AND_MAX_MODELS = ["claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-5", "claude-fable-5"];
-    const MAX_WITHOUT_XHIGH_MODELS = ["claude-opus-4-6", "claude-sonnet-4-6"];
+    const THROUGH_XHIGH = [...THROUGH_HIGH, "xhigh"] satisfies ModelThinkingLevel[];
+    const XHIGH_MODELS = [
+      "claude-opus-4-8",
+      "claude-opus-4-7",
+      "claude-opus-4-6",
+      "claude-sonnet-5",
+      "claude-sonnet-4-6",
+      "claude-fable-5",
+    ];
 
-    it("advertises xhigh and max only when both are mapped", () => {
-      for (const model of kiroModels.filter((candidate) => XHIGH_AND_MAX_MODELS.includes(candidate.id))) {
-        expect(getSupportedThinkingLevels(model), `${model.id} supported levels`).toEqual(THROUGH_XHIGH_AND_MAX);
+    it("advertises xhigh for models with xhigh or max effort", () => {
+      for (const model of kiroModels.filter((candidate) => XHIGH_MODELS.includes(candidate.id))) {
+        expect(getSupportedThinkingLevels(model), `${model.id} supported levels`).toEqual(THROUGH_XHIGH);
       }
     });
 
-    it("supports the max-without-xhigh hole", () => {
-      for (const model of kiroModels.filter((candidate) => MAX_WITHOUT_XHIGH_MODELS.includes(candidate.id))) {
-        expect(getSupportedThinkingLevels(model), `${model.id} supported levels`).toEqual(THROUGH_HIGH_AND_MAX);
+    it("maps xhigh to max when max is the model's highest effort", () => {
+      for (const model of kiroModels.filter((candidate) =>
+        ["claude-opus-4-6", "claude-sonnet-4-6"].includes(candidate.id),
+      )) {
+        expect(model.thinkingLevelMap?.xhigh).toBe("max");
       }
     });
 
     it("limits other reasoning models to standard levels", () => {
       for (const model of kiroModels.filter(
-        (candidate) =>
-          candidate.reasoning &&
-          !XHIGH_AND_MAX_MODELS.includes(candidate.id) &&
-          !MAX_WITHOUT_XHIGH_MODELS.includes(candidate.id),
+        (candidate) => candidate.reasoning && !XHIGH_MODELS.includes(candidate.id),
       )) {
         expect(getSupportedThinkingLevels(model), `${model.id} supported levels`).toEqual(THROUGH_HIGH);
       }

@@ -206,7 +206,7 @@ export function streamKiro(
         additionalModelRequestFieldsSchema?: Record<string, unknown>;
       };
       const region = modelMetadata.kiroRegion ?? getKiroRegionFromEndpoint(model.baseUrl) ?? "us-east-1";
-      const endpoint = getKiroEndpoints(region).runtime;
+      const endpoint = new URL("generateAssistantResponse", getKiroEndpoints(region).runtime).toString();
       let managementAuth: KiroManagementAuth = { accessToken, region };
 
       const optionProfileArn =
@@ -253,15 +253,13 @@ export function streamKiro(
       let systemPrompt = context.systemPrompt ?? "";
       if (thinkingEnabled && !effortConfig) {
         const budget =
-          options?.reasoning === "max"
-            ? 70000
-            : options?.reasoning === "xhigh"
-              ? 50000
-              : options?.reasoning === "high"
-                ? 30000
-                : options?.reasoning === "medium"
-                  ? 20000
-                  : 10000;
+          options?.reasoning === "xhigh"
+            ? 50000
+            : options?.reasoning === "high"
+              ? 30000
+              : options?.reasoning === "medium"
+                ? 20000
+                : 10000;
         systemPrompt = `<thinking_mode>enabled</thinking_mode><max_thinking_length>${budget}</max_thinking_length>${systemPrompt ? `\n${systemPrompt}` : ""}`;
       }
       let retryCount = 0;
@@ -427,10 +425,9 @@ export function streamKiro(
           response = await fetch(endpoint, {
             method: "POST",
             headers: {
-              "Content-Type": "application/x-amz-json-1.0",
-              Accept: "application/json",
+              "Content-Type": "application/json",
+              Accept: "application/vnd.amazon.eventstream",
               Authorization: `Bearer ${accessToken}`,
-              "X-Amz-Target": "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
               "x-amzn-codewhisperer-optout": "true",
               "amz-sdk-invocation-id": crypto.randomUUID(),
               "amz-sdk-request": "attempt=1; max=1",
@@ -569,8 +566,9 @@ export function streamKiro(
         };
         const utf8Decoder = new TextDecoder();
         const eventStream = eventStreamMarshaller.deserialize(bodyIterable, async (event: Record<string, Message>) => {
-          const key = Object.keys(event)[0]!;
-          const msg = event[key]!;
+          const entry = Object.entries(event)[0];
+          if (!entry) throw new Error("Received an empty event stream message");
+          const [key, msg] = entry;
           const parsed = JSON.parse(utf8Decoder.decode(msg.body)) as Record<string, unknown>;
           return { [key]: parsed } as Record<string, unknown>;
         });

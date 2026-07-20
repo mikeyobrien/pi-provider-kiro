@@ -38,7 +38,7 @@ function makeModel(overrides?: Partial<TestKiroModel>): TestKiroModel {
     name: "Sonnet",
     api: "kiro-api",
     provider: "kiro",
-    baseUrl: "https://runtime.us-east-1.kiro.dev/",
+    baseUrl: "https://runtime.us-east-1.kiro.dev/generateAssistantResponse",
     reasoning: true,
     input: ["text", "image"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -163,10 +163,10 @@ describe("Feature 9: Streaming Integration", () => {
 
     expect(mockFetch).toHaveBeenCalledOnce();
     const [url, opts] = mockFetch.mock.calls[0];
-    expect(url).toBe("https://runtime.us-east-1.kiro.dev/");
+    expect(url).toBe("https://runtime.us-east-1.kiro.dev/generateAssistantResponse");
     expect(opts.method).toBe("POST");
     expect(opts.headers.Authorization).toBe("Bearer test-token");
-    expect(opts.headers["X-Amz-Target"]).toBe("AmazonCodeWhispererStreamingService.GenerateAssistantResponse");
+    expect(opts.headers["X-Amz-Target"]).toBeUndefined();
     expect(JSON.parse(opts.body).profileArn).toBeDefined();
 
     const done = events.find((e) => e.type === "done");
@@ -214,42 +214,19 @@ describe("Feature 9: Streaming Integration", () => {
         id: "claude-opus-4-8",
         kiroModelId: "claude-opus-4.8",
         name: "Claude Opus 4.8",
-        thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+        thinkingLevelMap: { xhigh: "xhigh" },
         additionalModelRequestFieldsSchema: effortSchema("output_config", ["low", "medium", "high", "xhigh", "max"]),
       },
       reasoning: "xhigh" as const,
       expected: { output_config: { effort: "xhigh" }, thinking: { type: "adaptive" } },
     },
     {
-      name: "keeps Claude max distinct from xhigh",
-      model: {
-        id: "claude-opus-4-8",
-        kiroModelId: "claude-opus-4.8",
-        name: "Claude Opus 4.8",
-        thinkingLevelMap: { xhigh: "xhigh", max: "max" },
-        additionalModelRequestFieldsSchema: effortSchema("output_config", ["low", "medium", "high", "xhigh", "max"]),
-      },
-      reasoning: "max" as const,
-      expected: { output_config: { effort: "max" }, thinking: { type: "adaptive" } },
-    },
-    {
-      name: "uses the known Claude max fallback only when schema is unavailable",
-      model: {
-        id: "claude-opus-4-8",
-        kiroModelId: "claude-opus-4.8",
-        name: "Claude Opus 4.8",
-        thinkingLevelMap: { xhigh: "xhigh", max: "max" },
-      },
-      reasoning: "max" as const,
-      expected: { output_config: { effort: "max" }, thinking: { type: "adaptive" } },
-    },
-    {
-      name: "clamps the xhigh hole to max before building Claude fields",
+      name: "maps Pi xhigh to Kiro max when xhigh is unavailable",
       model: {
         id: "claude-sonnet-4-6",
         kiroModelId: "claude-sonnet-4.6",
         name: "Claude Sonnet 4.6",
-        thinkingLevelMap: { max: "max" },
+        thinkingLevelMap: { xhigh: "max" },
         additionalModelRequestFieldsSchema: effortSchema("output_config", ["low", "medium", "high", "max"]),
       },
       reasoning: "xhigh" as const,
@@ -276,12 +253,12 @@ describe("Feature 9: Streaming Integration", () => {
     const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":10}');
     vi.stubGlobal("fetch", mockFetch);
 
-    await collect(streamKiro(makeModel(), makeContext(), { apiKey: "test-token", reasoning: "max" }));
+    await collect(streamKiro(makeModel(), makeContext(), { apiKey: "test-token", reasoning: "xhigh" }));
 
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body.additionalModelRequestFields).toBeUndefined();
     expect(body.conversationState.currentMessage.userInputMessage.content).toContain(
-      "<max_thinking_length>70000</max_thinking_length>",
+      "<max_thinking_length>50000</max_thinking_length>",
     );
 
     vi.unstubAllGlobals();
@@ -297,7 +274,7 @@ describe("Feature 9: Streaming Integration", () => {
           id: "claude-opus-4-8",
           kiroModelId: "claude-opus-4.8",
           name: "Claude Opus 4.8",
-          thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+          thinkingLevelMap: { xhigh: "xhigh" },
           additionalModelRequestFieldsSchema: { type: "object", properties: {}, additionalProperties: false },
         }),
         makeContext(),
@@ -347,8 +324,8 @@ describe("Feature 9: Streaming Integration", () => {
 
     expect(mockFetch).toHaveBeenCalledTimes(2);
     // First call is ListAvailableProfiles on the management host.
-    expect(mockFetch.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/");
-    expect(mockFetch.mock.calls[0][1].headers["X-Amz-Target"]).toBe("AmazonCodeWhispererService.ListAvailableProfiles");
+    expect(mockFetch.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
+    expect(mockFetch.mock.calls[0][1].headers["X-Amz-Target"]).toBeUndefined();
     // Second call includes profileArn in the body
     const body = JSON.parse(mockFetch.mock.calls[1][1].body);
     expect(body.profileArn).toBe(testArn);
@@ -378,7 +355,7 @@ describe("Feature 9: Streaming Integration", () => {
     );
 
     expect(mockFetch).toHaveBeenCalledOnce();
-    expect(mockFetch.mock.calls[0][0]).toBe("https://runtime.us-east-1.kiro.dev/");
+    expect(mockFetch.mock.calls[0][0]).toBe("https://runtime.us-east-1.kiro.dev/generateAssistantResponse");
     expect(JSON.parse(mockFetch.mock.calls[0][1].body).profileArn).toBe(profileArn);
     expect(events.find((event) => event.type === "done")).toBeDefined();
 
@@ -396,7 +373,7 @@ describe("Feature 9: Streaming Integration", () => {
     const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
 
     expect(mockFetch).toHaveBeenCalledOnce();
-    expect(mockFetch.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/");
+    expect(mockFetch.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
     const error = events.find((event) => event.type === "error");
     expect(error?.type === "error" && error.error.errorMessage).toContain("returned no profile");
 
@@ -415,7 +392,7 @@ describe("Feature 9: Streaming Integration", () => {
     const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
 
     expect(mockFetch).toHaveBeenCalledOnce();
-    expect(mockFetch.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/");
+    expect(mockFetch.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
     const error = events.find((event) => event.type === "error");
     expect(error?.type === "error" && error.error.errorMessage).toContain("ListAvailableProfiles failed");
 
@@ -451,8 +428,8 @@ describe("Feature 9: Streaming Integration", () => {
 
     const events = await collect(streamKiro(makeModel({ baseUrl: endpoint }), makeContext(), { apiKey: "tok" }));
 
-    expect(mockFetch.mock.calls[0][0]).toBe("https://management.eu-central-1.kiro.dev/");
-    expect(mockFetch.mock.calls[1][0]).toBe(endpoint);
+    expect(mockFetch.mock.calls[0][0]).toBe("https://management.eu-central-1.kiro.dev/List-Available-Profiles");
+    expect(mockFetch.mock.calls[1][0]).toBe(`${endpoint}generateAssistantResponse`);
     expect(events.find((event) => event.type === "done")).toBeDefined();
 
     vi.unstubAllGlobals();
@@ -1929,9 +1906,9 @@ describe("Feature 9: Streaming Integration", () => {
     expect(refreshSpy).toHaveBeenCalledOnce();
     expect(mockFetch).toHaveBeenCalledTimes(3);
     expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
-      "https://runtime.us-east-1.kiro.dev/",
-      "https://management.us-east-1.kiro.dev/",
-      "https://runtime.us-east-1.kiro.dev/",
+      "https://runtime.us-east-1.kiro.dev/generateAssistantResponse",
+      "https://management.us-east-1.kiro.dev/List-Available-Profiles",
+      "https://runtime.us-east-1.kiro.dev/generateAssistantResponse",
     ]);
     expect(mockFetch.mock.calls[0][1].headers.Authorization).toBe("Bearer stale-token");
     expect(JSON.parse(mockFetch.mock.calls[0][1].body).profileArn).toBe(staleProfileArn);
@@ -2000,8 +1977,8 @@ describe("Feature 9: Streaming Integration", () => {
     expect(refreshSpy).toHaveBeenCalledOnce();
     expect(mockFetch).toHaveBeenCalledTimes(2);
     expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
-      "https://runtime.us-east-1.kiro.dev/",
-      "https://runtime.us-east-1.kiro.dev/",
+      "https://runtime.us-east-1.kiro.dev/generateAssistantResponse",
+      "https://runtime.us-east-1.kiro.dev/generateAssistantResponse",
     ]);
     expect(mockFetch.mock.calls[1][1].headers.Authorization).toBe("Bearer fresh-social-token");
     expect(JSON.parse(mockFetch.mock.calls[1][1].body).profileArn).toBe(socialProfileArn);
@@ -2054,12 +2031,12 @@ describe("Feature 9: Streaming Integration", () => {
 
     expect(mockFetch).toHaveBeenCalledTimes(3);
     // 1st: ListAvailableProfiles with stale token on management.
-    expect(mockFetch.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/");
+    expect(mockFetch.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
     expect(mockFetch.mock.calls[0][1].headers.Authorization).toBe("Bearer stale-token");
     // 2nd: generateAssistantResponse with stale token → 403
     expect(mockFetch.mock.calls[1][1].headers.Authorization).toBe("Bearer stale-token");
     // 3rd: ListAvailableProfiles fails with the fresh token on management.
-    expect(mockFetch.mock.calls[2][0]).toBe("https://management.us-east-1.kiro.dev/");
+    expect(mockFetch.mock.calls[2][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
     expect(mockFetch.mock.calls[2][1].headers.Authorization).toBe("Bearer fresh-access-token");
     const error = events.find((event) => event.type === "error");
     expect(error?.type === "error" && error.error.errorMessage).toContain("ListAvailableProfiles failed");

@@ -5,8 +5,8 @@ import { createHash } from "node:crypto";
 import { redactSensitiveText } from "./debug.js";
 import { getKiroEndpoints } from "./endpoints.js";
 
-const LIST_PROFILES_TARGET = "AmazonCodeWhispererService.ListAvailableProfiles";
-const LIST_MODELS_TARGET = "AmazonCodeWhispererService.ListAvailableModels";
+const LIST_PROFILES_PATH = "List-Available-Profiles";
+const LIST_MODELS_PATH = "List-Available-Models";
 
 export interface KiroManagementAuth {
   accessToken: string;
@@ -20,7 +20,7 @@ export interface KiroCatalogModel {
     maxOutputTokens?: number;
     [key: string]: unknown;
   };
-  additionalModelRequestFieldsSchema?: Record<string, unknown>;
+  additionalModelRequestFieldsSchema?: Record<string, unknown> | null;
   [key: string]: unknown;
 }
 
@@ -53,8 +53,38 @@ export class KiroManagementHttpError extends Error {
   }
 }
 
-function operationName(target: string): string {
-  return target.slice(target.lastIndexOf(".") + 1);
+async function requestManagement<TResponse>(
+  auth: KiroManagementAuth,
+  operation: string,
+  path: string,
+  method: "GET" | "POST",
+  body: Record<string, unknown>,
+): Promise<TResponse> {
+  const url = new URL(path, getKiroEndpoints(auth.region).management);
+  const request: RequestInit = {
+    method,
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${auth.accessToken}`,
+    },
+  };
+  if (method === "GET") {
+    for (const [name, value] of Object.entries(body)) {
+      if (value !== undefined) url.searchParams.set(name, String(value));
+    }
+  } else {
+    request.headers = { ...request.headers, "Content-Type": "application/json" };
+    request.body = JSON.stringify(body);
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(url.toString(), request);
+  } catch (error) {
+    throw new Error(`Kiro management ${operation} request failed in ${auth.region}`, { cause: error });
+  }
+
+  return parseManagementResponse<TResponse>(response, operation, auth.region);
 }
 
 function profileCacheKey(auth: KiroManagementAuth): string {
@@ -81,32 +111,6 @@ async function parseManagementResponse<TResponse>(
     throw new Error(`Kiro management ${operation} returned invalid JSON in ${region}`, { cause: error });
   }
 }
-
-async function postManagement<TResponse>(
-  auth: KiroManagementAuth,
-  target: string,
-  body: Record<string, unknown>,
-): Promise<TResponse> {
-  const operation = operationName(target);
-  let response: Response;
-  try {
-    response = await fetch(getKiroEndpoints(auth.region).management, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-amz-json-1.0",
-        Accept: "application/json",
-        Authorization: `Bearer ${auth.accessToken}`,
-        "X-Amz-Target": target,
-      },
-      body: JSON.stringify(body),
-    });
-  } catch (error) {
-    throw new Error(`Kiro management ${operation} request failed in ${auth.region}`, { cause: error });
-  }
-
-  return parseManagementResponse<TResponse>(response, operation, auth.region);
-}
-
 export function resetKiroProfileArnCache(): void {
   profileArnCache.clear();
   pendingProfileRequests.clear();
@@ -129,7 +133,13 @@ export async function resolveKiroProfileArn(auth: KiroManagementAuth, providedAr
   if (pending) return pending;
 
   const request = (async () => {
-    const response = await postManagement<KiroListAvailableProfilesResponse>(auth, LIST_PROFILES_TARGET, {});
+    const response = await requestManagement<KiroListAvailableProfilesResponse>(
+      auth,
+      "ListAvailableProfiles",
+      LIST_PROFILES_PATH,
+      "POST",
+      {},
+    );
     const arn = response.profiles?.find((profile) => profile.arn)?.arn;
     if (!arn) {
       throw new Error(`Kiro management ListAvailableProfiles returned no profile in ${auth.region}`);
@@ -150,10 +160,16 @@ export async function listAvailableModels(
   auth: KiroManagementAuth,
   profileArn: string,
 ): Promise<KiroListAvailableModelsResponse> {
-  const response = await postManagement<KiroListAvailableModelsResponse>(auth, LIST_MODELS_TARGET, {
-    origin: "KIRO_CLI",
-    profileArn,
-  });
+  const response = await requestManagement<KiroListAvailableModelsResponse>(
+    auth,
+    "ListAvailableModels",
+    LIST_MODELS_PATH,
+    "GET",
+    {
+      origin: "KIRO_CLI",
+      profileArn,
+    },
+  );
 
   if (!Array.isArray(response.models) || response.models.length === 0) {
     throw new Error(`Kiro management ListAvailableModels returned no models in ${auth.region}`);
