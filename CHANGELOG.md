@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-20
+
+### Added
+
+- Claude Sonnet 5 and Claude Fable 5 models ([#87](https://github.com/mikeyobrien/pi-provider-kiro/pull/87), [#83](https://github.com/mikeyobrien/pi-provider-kiro/pull/83)).
+- Schema-driven reasoning effort, model token limits, and region-keyed catalog caching.
+
+### Changed
+
+- Migrated model discovery and inference to Kiro's management and runtime services, matching the current kiro-cli and kiro-agent REST protocols ([#91](https://github.com/mikeyobrien/pi-provider-kiro/pull/91)).
+
+### Fixed
+
+- Map pi's highest supported reasoning level to Kiro `max` for models whose catalog omits `xhigh`.
+
 ## [0.8.0] - 2026-05-29
 
 ### Added
@@ -167,7 +182,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release: 17 models across 7 families, OAuth device code flow, kiro-cli SQLite credential fallback, streaming pipeline with thinking tag parser
 
-[Unreleased]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.8.1...v0.9.0
+[0.8.1]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.5.2...v0.6.0

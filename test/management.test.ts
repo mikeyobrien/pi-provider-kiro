@@ -27,9 +27,10 @@ describe("Kiro management control plane", () => {
 
     expect(fetchMock).toHaveBeenCalledOnce();
     const [url, request] = fetchMock.mock.calls[0];
-    expect(url).toBe("https://management.us-east-1.kiro.dev/");
+    expect(url).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
     expect(request.method).toBe("POST");
-    expect(request.headers["X-Amz-Target"]).toBe("AmazonCodeWhispererService.ListAvailableProfiles");
+    expect(request.headers["Content-Type"]).toBe("application/json");
+    expect(request.headers["X-Amz-Target"]).toBeUndefined();
     expect(JSON.parse(request.body)).toEqual({});
   });
 
@@ -57,11 +58,12 @@ describe("Kiro management control plane", () => {
 
     expect(catalog.models).toEqual([fable]);
     expect(catalog.defaultModelId).toBe("claude-fable-5");
-    const [url, request] = fetchMock.mock.calls[0];
-    expect(url).toBe("https://management.us-east-1.kiro.dev/");
-    expect(request.method).toBe("POST");
-    expect(request.headers["X-Amz-Target"]).toBe("AmazonCodeWhispererService.ListAvailableModels");
-    expect(JSON.parse(request.body)).toEqual({ origin: "KIRO_CLI", profileArn });
+    const [rawUrl, request] = fetchMock.mock.calls[0];
+    const url = new URL(rawUrl);
+    expect(`${url.origin}${url.pathname}`).toBe("https://management.us-east-1.kiro.dev/List-Available-Models");
+    expect(request.method).toBe("GET");
+    expect(request.headers["X-Amz-Target"]).toBeUndefined();
+    expect(Object.fromEntries(url.searchParams)).toEqual({ origin: "KIRO_CLI", profileArn });
   });
 
   it("surfaces a management failure without trying a fallback host", async () => {
@@ -77,6 +79,6 @@ describe("Kiro management control plane", () => {
     );
 
     expect(fetchMock).toHaveBeenCalledOnce();
-    expect(fetchMock.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/");
+    expect(fetchMock.mock.calls[0][0]).toContain("https://management.us-east-1.kiro.dev/List-Available-Models?");
   });
 });

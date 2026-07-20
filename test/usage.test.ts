@@ -143,8 +143,8 @@ describe("fetchKiroUsage", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expectUsageRequest(fetchMock.mock.calls[0][0]);
-    expect(fetchMock.mock.calls[1][0]).toBe("https://management.us-east-1.kiro.dev/");
-    expect(fetchMock.mock.calls[1][1].headers["X-Amz-Target"]).toBe("AmazonCodeWhispererService.ListAvailableProfiles");
+    expect(fetchMock.mock.calls[1][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
+    expect(fetchMock.mock.calls[1][1].headers["X-Amz-Target"]).toBeUndefined();
     expectUsageRequest(fetchMock.mock.calls[2][0], profileArn);
   });
 
