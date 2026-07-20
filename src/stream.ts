@@ -20,10 +20,22 @@ import * as PiAi from "@earendil-works/pi-ai";
 import { UniversalEventStreamMarshaller } from "@smithy/core/event-streams";
 import type { Message } from "@smithy/types";
 import { parseBracketToolCalls } from "./bracket-tool-parser.js";
-import { debugEnabled, debugLog } from "./debug.js";
+import { debugEnabled, debugLog, formatSafeError, redactSensitiveText } from "./debug.js";
+import {
+  buildKiroAdditionalModelRequestFields,
+  getKiroEffortConfig,
+  type KiroAdditionalModelRequestFields,
+} from "./effort.js";
+import { getKiroEndpoints, getKiroRegionFromEndpoint } from "./endpoints.js";
 import { parseKiroEvent } from "./event-parser.js";
 import { addPlaceholderTools, HISTORY_LIMIT, HISTORY_LIMIT_CONTEXT_WINDOW, truncateHistory } from "./history.js";
 import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, refreshViaKiroCli } from "./kiro-cli.js";
+import {
+  invalidateKiroProfileArn,
+  type KiroManagementAuth,
+  resetKiroProfileArnCache,
+  resolveKiroProfileArn,
+} from "./management.js";
 import { resolveKiroModel } from "./models.js";
 import {
   capacityRetryConfig,
@@ -103,7 +115,8 @@ interface KiroRequest {
     currentMessage: { userInputMessage: KiroUserInputMessage };
     history?: KiroHistoryEntry[];
   };
-  profileArn?: string;
+  additionalModelRequestFields?: KiroAdditionalModelRequestFields;
+  profileArn: string;
   agentMode?: string;
 }
 interface KiroToolCallState {
@@ -112,58 +125,13 @@ interface KiroToolCallState {
   input: string;
 }
 
-// --- profileArn resolution (cached per endpoint) ---
-const profileArnCache = new Map<string, string>();
-const profileArnPending = new Set<string>();
+let skipProfileResolutionForTests = false;
+const TEST_PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:000000000000:profile/test";
 
-/** Reset profileArn cache — exported for tests. */
+/** Reset profile resolution state — exported for stream tests. */
 export function resetProfileArnCache(resolved = false): void {
-  profileArnCache.clear();
-  profileArnPending.clear();
-  if (resolved) profileArnPending.add("__all__");
-}
-
-async function resolveProfileArn(accessToken: string, endpoint: string): Promise<string | undefined> {
-  if (profileArnPending.has("__all__")) return undefined;
-  if (profileArnCache.has(endpoint)) return profileArnCache.get(endpoint);
-  if (profileArnPending.has(endpoint)) return undefined;
-  try {
-    const ep = new URL(endpoint);
-    ep.pathname = ep.pathname.replace(/\/generateAssistantResponse\/?$/, "/");
-    ep.search = "";
-    ep.hash = "";
-
-    const r = await fetch(ep.toString(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-amz-json-1.0",
-        Authorization: `Bearer ${accessToken}`,
-        "X-Amz-Target": "AmazonCodeWhispererService.ListAvailableProfiles",
-      },
-      body: "{}",
-    });
-    if (!r.ok) {
-      console.warn(
-        `[pi-provider-kiro] Failed to resolve profileArn: ListAvailableProfiles returned ${r.status} ${r.statusText}. Will retry on the next request.`,
-      );
-      return undefined;
-    }
-    const j = (await r.json()) as { profiles?: Array<{ arn?: string }> };
-    const arn = j.profiles?.find((p) => p.arn)?.arn;
-    if (!arn) {
-      debugLog("profileArn.empty", {
-        message: "ListAvailableProfiles returned no profile ARN; this is expected for some social-login tokens.",
-      });
-      return undefined;
-    }
-    profileArnCache.set(endpoint, arn);
-    return arn;
-  } catch (error) {
-    console.warn(
-      `[pi-provider-kiro] Failed to resolve profileArn: ${error instanceof Error ? error.message : String(error)}. Will retry on the next request.`,
-    );
-    return undefined;
-  }
+  resetKiroProfileArnCache();
+  skipProfileResolutionForTests = resolved;
 }
 
 function emitToolCall(
@@ -183,7 +151,7 @@ function emitToolCall(
     args = JSON.parse(state.input) as Record<string, unknown>;
   } catch (e) {
     console.warn(
-      `[pi-provider-kiro] Failed to parse tool input for "${state.name}" (toolUseId: ${state.toolUseId}): ${e instanceof Error ? e.message : String(e)}. Raw input (${state.input.length} chars): ${state.input.substring(0, 200)}`,
+      `[pi-provider-kiro] Failed to parse tool input for "${state.name}" (toolUseId: ${state.toolUseId}): ${formatSafeError(e)}. Raw input (${state.input.length} chars): ${redactSensitiveText(state.input.substring(0, 200))}`,
     );
     return false;
   }
@@ -228,26 +196,46 @@ export function streamKiro(
       timestamp: Date.now(),
     };
     try {
-      let accessToken = options?.apiKey;
-      if (!accessToken) throw new Error("Kiro credentials not set. Run /login kiro or install kiro-cli.");
-      const endpoint = model.baseUrl || "https://q.us-east-1.amazonaws.com/generateAssistantResponse";
+      const initialAccessToken = options?.apiKey;
+      if (!initialAccessToken) throw new Error("Kiro credentials not set. Run /login kiro or install kiro-cli.");
+      let accessToken: string = initialAccessToken;
+      const modelMetadata = model as Model<Api> & {
+        kiroModelId?: string;
+        kiroRegion?: string;
+        kiroProfileArn?: string;
+        additionalModelRequestFieldsSchema?: Record<string, unknown>;
+      };
+      const region = modelMetadata.kiroRegion ?? getKiroRegionFromEndpoint(model.baseUrl) ?? "us-east-1";
+      const endpoint = getKiroEndpoints(region).runtime;
+      let managementAuth: KiroManagementAuth = { accessToken, region };
 
       const optionProfileArn =
         (options as unknown as { credentials?: { profileArn?: string }; profileArn?: string })?.credentials
           ?.profileArn || (options as unknown as { profileArn?: string })?.profileArn;
       const cliCreds = getKiroCliCredentials() ?? getKiroCliCredentialsAllowExpired();
       const cliProfileArn = cliCreds?.access === accessToken ? cliCreds.profileArn : undefined;
-      let profileArn = optionProfileArn || cliProfileArn || (await resolveProfileArn(accessToken, endpoint));
+      const initialProfileArn = modelMetadata.kiroProfileArn || optionProfileArn || cliProfileArn;
+      let profileArn: string =
+        initialProfileArn ||
+        (skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth));
 
       // Trigger dynamic models cache update in the background if empty or stale
-      const ep = new URL(endpoint);
-      const region = ep.hostname.split(".")[1] || "us-east-1";
       const { isCacheStale, updateKiroModelsCache } = await import("./models.js");
       if (!process.env.VITEST && isCacheStale(region)) {
-        updateKiroModelsCache(accessToken, region, profileArn).catch(() => {});
+        updateKiroModelsCache(accessToken, region, profileArn).catch((error) => {
+          console.warn(
+            `[pi-provider-kiro] Failed to refresh Kiro model catalog in ${region}: ${formatSafeError(error)}`,
+          );
+        });
       }
 
-      const kiroModelId = resolveKiroModel(model.id);
+      const kiroModelId = resolveKiroModel(model.id, modelMetadata.kiroModelId);
+      const effortConfig = getKiroEffortConfig(modelMetadata, kiroModelId);
+      const additionalModelRequestFields = buildKiroAdditionalModelRequestFields(
+        modelMetadata,
+        kiroModelId,
+        options?.reasoning,
+      );
       const thinkingEnabled = !!options?.reasoning || model.reasoning;
       debugLog("request.init", {
         endpoint,
@@ -263,15 +251,17 @@ export function streamKiro(
         sessionId: options?.sessionId,
       });
       let systemPrompt = context.systemPrompt ?? "";
-      if (thinkingEnabled) {
+      if (thinkingEnabled && !effortConfig) {
         const budget =
-          options?.reasoning === "xhigh"
-            ? 50000
-            : options?.reasoning === "high"
-              ? 30000
-              : options?.reasoning === "medium"
-                ? 20000
-                : 10000;
+          options?.reasoning === "max"
+            ? 70000
+            : options?.reasoning === "xhigh"
+              ? 50000
+              : options?.reasoning === "high"
+                ? 30000
+                : options?.reasoning === "medium"
+                  ? 20000
+                  : 10000;
         systemPrompt = `<thinking_mode>enabled</thinking_mode><max_thinking_length>${budget}</max_thinking_length>${systemPrompt ? `\n${systemPrompt}` : ""}`;
       }
       let retryCount = 0;
@@ -414,7 +404,8 @@ export function streamKiro(
             },
             ...(history.length > 0 ? { history } : {}),
           },
-          ...(profileArn ? { profileArn } : {}),
+          ...(additionalModelRequestFields ? { additionalModelRequestFields } : {}),
+          profileArn,
           agentMode: "vibe",
         };
         let response!: Response;
@@ -453,11 +444,12 @@ export function streamKiro(
           if (!response.ok) {
             let errText = "";
             try {
-              errText = await response.text();
+              errText = redactSensitiveText(await response.text());
             } catch {
               errText = "";
             }
-            debugLog("response.error", { status: response.status, statusText: response.statusText, body: errText });
+            const safeStatusText = redactSensitiveText(response.statusText);
+            debugLog("response.error", { status: response.status, statusText: safeStatusText, body: errText });
             // Retry transient capacity errors with longer backoff
             if (isCapacityError(errText) && capacityRetryCount < capacityRetryConfig.maxRetries) {
               capacityRetryCount++;
@@ -475,20 +467,35 @@ export function streamKiro(
             }
             if (response.status === 403 && !isCapacityError(errText) && retryCount < maxRetries) {
               retryCount++;
-              // On 403, try to get a fresh token before retrying — the current
-              // one may have been rotated by kiro-cli or another session. If
-              // the cached kiro-cli token is also stale, actively refresh it.
-              const freshCreds = getKiroCliCredentials() ?? refreshViaKiroCli();
+              // Re-read the shared store first in case another process already
+              // rotated the token. If it still contains the rejected token,
+              // force kiro-cli to refresh before retrying runtime.
+              invalidateKiroProfileArn(managementAuth);
+              const rejectedAccessToken = accessToken;
+              const rejectedProfileArn = profileArn;
+              const storedCreds = getKiroCliCredentials();
+              const rejectedCliCreds =
+                storedCreds?.access === rejectedAccessToken
+                  ? storedCreds
+                  : cliCreds?.access === rejectedAccessToken
+                    ? cliCreds
+                    : undefined;
+              const freshCreds: ReturnType<typeof getKiroCliCredentials> =
+                storedCreds?.access && storedCreds.access !== rejectedAccessToken ? storedCreds : refreshViaKiroCli();
               if (freshCreds?.access) accessToken = freshCreds.access;
+              managementAuth = { accessToken, region };
 
-              // Re-resolve profileArn with fresh credentials
-              profileArnCache.delete(endpoint);
-              const refreshedProfileArn =
-                (options as unknown as { credentials?: { profileArn?: string }; profileArn?: string })?.credentials
-                  ?.profileArn ||
-                (options as unknown as { profileArn?: string })?.profileArn ||
-                freshCreds?.profileArn;
-              profileArn = refreshedProfileArn || (await resolveProfileArn(accessToken, endpoint));
+              // Social profiles may not be discoverable through management.
+              // Carry the profile used by the rejected request only across a
+              // confirmed desktop-to-desktop credential replacement.
+              const inheritedDesktopProfileArn =
+                rejectedCliCreds?.authMethod === "desktop" && freshCreds?.authMethod === "desktop"
+                  ? rejectedProfileArn
+                  : undefined;
+              profileArn =
+                freshCreds?.profileArn ||
+                inheritedDesktopProfileArn ||
+                (skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth));
               const delayMs = exponentialBackoff(retryCount - 1, 500, MAX_RETRY_DELAY);
               await abortableDelay(delayMs, options?.signal);
               break; // break inner loop, continue outer loop
@@ -498,13 +505,13 @@ export function streamKiro(
             // This covers both hard quota (MONTHLY_REQUEST_COUNT) and
             // exhausted capacity retries (INSUFFICIENT_MODEL_CAPACITY).
             if (isNonRetryableBodyError(errText) || isCapacityError(errText)) {
-              throw new Error(`Kiro API error: ${errText || response.statusText}`);
+              throw new Error(`Kiro API error: ${errText || safeStatusText}`);
             }
             // Format error so pi-ai's isContextOverflow() recognizes it
             if (isTooBigError(response.status, errText)) {
               throw new Error(`Kiro API error: context_length_exceeded (${response.status} ${errText})`);
             }
-            throw new Error(`Kiro API error: ${response.status} ${response.statusText} ${errText}`);
+            throw new Error(`Kiro API error: ${response.status} ${safeStatusText} ${errText}`);
           }
           break; // success, break inner loop
         }
@@ -813,7 +820,7 @@ export function streamKiro(
       }
     } catch (error) {
       output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-      output.errorMessage = error instanceof Error ? error.message : String(error);
+      output.errorMessage = formatSafeError(error);
       debugLog("response.caught", { stopReason: output.stopReason, error: output.errorMessage });
       stream.push({ type: "error", reason: output.stopReason, error: output });
       stream.end();

@@ -25,13 +25,20 @@ const zeroUsage = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-function makeModel(overrides?: Partial<Model<Api>>): Model<Api> {
+type TestKiroModel = Model<Api> & {
+  kiroModelId?: string;
+  kiroRegion?: string;
+  kiroProfileArn?: string;
+  additionalModelRequestFieldsSchema?: Record<string, unknown>;
+};
+
+function makeModel(overrides?: Partial<TestKiroModel>): TestKiroModel {
   return {
     id: "claude-sonnet-4-5",
     name: "Sonnet",
     api: "kiro-api",
     provider: "kiro",
-    baseUrl: "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
+    baseUrl: "https://runtime.us-east-1.kiro.dev/",
     reasoning: true,
     input: ["text", "image"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -46,6 +53,20 @@ function makeContext(userMsg = "Hello"): Context {
     systemPrompt: "You are helpful",
     messages: [{ role: "user", content: userMsg, timestamp: Date.now() }],
     tools: [],
+  };
+}
+
+function effortSchema(field: "reasoning" | "output_config", values: string[]): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      [field]: {
+        type: "object",
+        properties: { effort: { type: "string", enum: values } },
+        additionalProperties: false,
+      },
+    },
+    additionalProperties: false,
   };
 }
 
@@ -142,8 +163,11 @@ describe("Feature 9: Streaming Integration", () => {
 
     expect(mockFetch).toHaveBeenCalledOnce();
     const [url, opts] = mockFetch.mock.calls[0];
-    expect(url).toContain("generateAssistantResponse");
+    expect(url).toBe("https://runtime.us-east-1.kiro.dev/");
+    expect(opts.method).toBe("POST");
     expect(opts.headers.Authorization).toBe("Bearer test-token");
+    expect(opts.headers["X-Amz-Target"]).toBe("AmazonCodeWhispererStreamingService.GenerateAssistantResponse");
+    expect(JSON.parse(opts.body).profileArn).toBeDefined();
 
     const done = events.find((e) => e.type === "done");
     expect(done).toBeDefined();
@@ -153,6 +177,139 @@ describe("Feature 9: Streaming Integration", () => {
     // contextUsagePercentage=10 with contextWindow=200000 -> input should be 20000
     expect(msg?.usage.input).toBe(20000);
     expect(msg?.usage.totalTokens).toBeGreaterThan(20000);
+
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    {
+      name: "maps GPT minimal to low",
+      model: {
+        id: "openai-gpt-5-6",
+        kiroModelId: "openai-gpt-5.6",
+        name: "GPT 5.6",
+        input: ["text"] as ("text" | "image")[],
+        thinkingLevelMap: { xhigh: "xhigh" },
+        additionalModelRequestFieldsSchema: effortSchema("reasoning", ["low", "medium", "high", "xhigh"]),
+      },
+      reasoning: "minimal" as const,
+      expected: { reasoning: { effort: "low" } },
+    },
+    {
+      name: "keeps GPT xhigh",
+      model: {
+        id: "openai-gpt-5-6",
+        kiroModelId: "openai-gpt-5.6",
+        name: "GPT 5.6",
+        input: ["text"] as ("text" | "image")[],
+        thinkingLevelMap: { xhigh: "xhigh" },
+        additionalModelRequestFieldsSchema: effortSchema("reasoning", ["low", "medium", "high", "xhigh"]),
+      },
+      reasoning: "xhigh" as const,
+      expected: { reasoning: { effort: "xhigh" } },
+    },
+    {
+      name: "keeps Claude xhigh distinct from max",
+      model: {
+        id: "claude-opus-4-8",
+        kiroModelId: "claude-opus-4.8",
+        name: "Claude Opus 4.8",
+        thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+        additionalModelRequestFieldsSchema: effortSchema("output_config", ["low", "medium", "high", "xhigh", "max"]),
+      },
+      reasoning: "xhigh" as const,
+      expected: { output_config: { effort: "xhigh" }, thinking: { type: "adaptive" } },
+    },
+    {
+      name: "keeps Claude max distinct from xhigh",
+      model: {
+        id: "claude-opus-4-8",
+        kiroModelId: "claude-opus-4.8",
+        name: "Claude Opus 4.8",
+        thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+        additionalModelRequestFieldsSchema: effortSchema("output_config", ["low", "medium", "high", "xhigh", "max"]),
+      },
+      reasoning: "max" as const,
+      expected: { output_config: { effort: "max" }, thinking: { type: "adaptive" } },
+    },
+    {
+      name: "uses the known Claude max fallback only when schema is unavailable",
+      model: {
+        id: "claude-opus-4-8",
+        kiroModelId: "claude-opus-4.8",
+        name: "Claude Opus 4.8",
+        thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+      },
+      reasoning: "max" as const,
+      expected: { output_config: { effort: "max" }, thinking: { type: "adaptive" } },
+    },
+    {
+      name: "clamps the xhigh hole to max before building Claude fields",
+      model: {
+        id: "claude-sonnet-4-6",
+        kiroModelId: "claude-sonnet-4.6",
+        name: "Claude Sonnet 4.6",
+        thinkingLevelMap: { max: "max" },
+        additionalModelRequestFieldsSchema: effortSchema("output_config", ["low", "medium", "high", "max"]),
+      },
+      reasoning: "xhigh" as const,
+      expected: { output_config: { effort: "max" }, thinking: { type: "adaptive" } },
+    },
+  ])("sends structured effort: $name", async ({ model, reasoning, expected }) => {
+    const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":10}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    try {
+      await collect(streamKiro(makeModel(model), makeContext(), { apiKey: "test-token", reasoning }));
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.additionalModelRequestFields).toEqual(expected);
+      const content = body.conversationState.currentMessage.userInputMessage.content;
+      expect(content).not.toContain("<thinking_mode>");
+      expect(content).not.toContain("<max_thinking_length>");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("uses prompt injection only when a reasoning model has no structured effort mechanism", async () => {
+    const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":10}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    await collect(streamKiro(makeModel(), makeContext(), { apiKey: "test-token", reasoning: "max" }));
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.additionalModelRequestFields).toBeUndefined();
+    expect(body.conversationState.currentMessage.userInputMessage.content).toContain(
+      "<max_thinking_length>70000</max_thinking_length>",
+    );
+
+    vi.unstubAllGlobals();
+  });
+
+  it("does not guess a known-model effort mechanism over a present catalog schema", async () => {
+    const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":10}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    await collect(
+      streamKiro(
+        makeModel({
+          id: "claude-opus-4-8",
+          kiroModelId: "claude-opus-4.8",
+          name: "Claude Opus 4.8",
+          thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+          additionalModelRequestFieldsSchema: { type: "object", properties: {}, additionalProperties: false },
+        }),
+        makeContext(),
+        { apiKey: "test-token", reasoning: "high" },
+      ),
+    );
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.additionalModelRequestFields).toBeUndefined();
+    expect(body.conversationState.currentMessage.userInputMessage.content).toContain(
+      "<thinking_mode>enabled</thinking_mode>",
+    );
 
     vi.unstubAllGlobals();
   });
@@ -189,7 +346,8 @@ describe("Feature 9: Streaming Integration", () => {
     await collect(stream);
 
     expect(mockFetch).toHaveBeenCalledTimes(2);
-    // First call is ListAvailableProfiles
+    // First call is ListAvailableProfiles on the management host.
+    expect(mockFetch.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/");
     expect(mockFetch.mock.calls[0][1].headers["X-Amz-Target"]).toBe("AmazonCodeWhispererService.ListAvailableProfiles");
     // Second call includes profileArn in the body
     const body = JSON.parse(mockFetch.mock.calls[1][1].body);
@@ -203,6 +361,99 @@ describe("Feature 9: Streaming Integration", () => {
     expect(mockFetch2).toHaveBeenCalledOnce();
     const body2 = JSON.parse(mockFetch2.mock.calls[0][1].body);
     expect(body2.profileArn).toBe(testArn);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("uses a credential-projected profileArn without management discovery or a matching CLI token", async () => {
+    resetProfileArnCache(false);
+    const profileArn = "arn:aws:codewhisperer:us-east-1:123:profile/SOCIAL";
+    const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":5}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    const events = await collect(
+      streamKiro(makeModel({ kiroProfileArn: profileArn } as Partial<Model<Api>>), makeContext(), {
+        apiKey: "persisted-social-token",
+      }),
+    );
+
+    expect(mockFetch).toHaveBeenCalledOnce();
+    expect(mockFetch.mock.calls[0][0]).toBe("https://runtime.us-east-1.kiro.dev/");
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).profileArn).toBe(profileArn);
+    expect(events.find((event) => event.type === "done")).toBeDefined();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("fails before inference when profile discovery returns no profile", async () => {
+    resetProfileArnCache(false);
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ profiles: [] }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+
+    expect(mockFetch).toHaveBeenCalledOnce();
+    expect(mockFetch.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/");
+    const error = events.find((event) => event.type === "error");
+    expect(error?.type === "error" && error.error.errorMessage).toContain("returned no profile");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("fails before inference when profile discovery fails", async () => {
+    resetProfileArnCache(false);
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      statusText: "Service Unavailable",
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+
+    expect(mockFetch).toHaveBeenCalledOnce();
+    expect(mockFetch.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/");
+    const error = events.find((event) => event.type === "error");
+    expect(error?.type === "error" && error.error.errorMessage).toContain("ListAvailableProfiles failed");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("derives the runtime and management region from baseUrl when kiroRegion is absent", async () => {
+    resetProfileArnCache(false);
+    const testArn = "arn:aws:codewhisperer:eu-central-1:123:profile/TEST";
+    const endpoint = "https://runtime.eu-central-1.kiro.dev/";
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ profiles: [{ arn: testArn }] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({
+                done: false,
+                value: encodeBody('{"content":"Hi"}{"contextUsagePercentage":5}'),
+              })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+            releaseLock: () => {},
+          }),
+        },
+      });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const events = await collect(streamKiro(makeModel({ baseUrl: endpoint }), makeContext(), { apiKey: "tok" }));
+
+    expect(mockFetch.mock.calls[0][0]).toBe("https://management.eu-central-1.kiro.dev/");
+    expect(mockFetch.mock.calls[1][0]).toBe(endpoint);
+    expect(events.find((event) => event.type === "done")).toBeDefined();
 
     vi.unstubAllGlobals();
   });
@@ -1616,7 +1867,152 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
-  it("refreshes token from kiro-cli on 403 before retrying", async () => {
+  it("refreshes rejected CLI credentials and re-resolves the profile before retrying runtime", async () => {
+    resetProfileArnCache(false);
+    const staleProfileArn = "arn:aws:codewhisperer:us-east-1:123:profile/STALE";
+    const freshProfileArn = "arn:aws:codewhisperer:us-east-1:123:profile/FRESH";
+    const successFrames = encodeBody('{"content":"ok"}{"contextUsagePercentage":5}');
+    const mockFetch = vi
+      .fn()
+      // Runtime rejects the token and profile projected from the original credentials.
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 403,
+        statusText: "Forbidden",
+        text: () => Promise.resolve("Access denied"),
+      })
+      // The fresh token resolves a fresh profile through management.
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ profiles: [{ arn: freshProfileArn }] }),
+      })
+      // Runtime succeeds with both refreshed identity values.
+      .mockResolvedValueOnce({
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({ done: false, value: successFrames })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+            releaseLock: () => {},
+          }),
+        },
+      });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const kiroCliModule = await import("../src/kiro-cli.js");
+    const staleCliCreds = {
+      refresh: "stale-refresh|client|secret|idc",
+      access: "stale-token",
+      expires: Date.now() + 3_600_000,
+      clientId: "client",
+      clientSecret: "secret",
+      region: "us-east-1",
+      authMethod: "idc" as const,
+      profileArn: staleProfileArn,
+    };
+    const freshCliCreds = {
+      ...staleCliCreds,
+      refresh: "fresh-refresh|client|secret|idc",
+      access: "fresh-token",
+      profileArn: undefined,
+    };
+    const getCredsSpy = vi.spyOn(kiroCliModule, "getKiroCliCredentials").mockReturnValue(staleCliCreds);
+    const refreshSpy = vi.spyOn(kiroCliModule, "refreshViaKiroCli").mockReturnValue(freshCliCreds);
+
+    const stream = streamKiro(makeModel({ kiroProfileArn: staleProfileArn }), makeContext(), {
+      apiKey: "stale-token",
+    });
+    const events = await collect(stream);
+
+    expect(refreshSpy).toHaveBeenCalledOnce();
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
+      "https://runtime.us-east-1.kiro.dev/",
+      "https://management.us-east-1.kiro.dev/",
+      "https://runtime.us-east-1.kiro.dev/",
+    ]);
+    expect(mockFetch.mock.calls[0][1].headers.Authorization).toBe("Bearer stale-token");
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).profileArn).toBe(staleProfileArn);
+    expect(mockFetch.mock.calls[1][1].headers.Authorization).toBe("Bearer fresh-token");
+    expect(mockFetch.mock.calls[2][1].headers.Authorization).toBe("Bearer fresh-token");
+    expect(JSON.parse(mockFetch.mock.calls[2][1].body).profileArn).toBe(freshProfileArn);
+    expect(events.find((event) => event.type === "done")).toBeDefined();
+
+    getCredsSpy.mockRestore();
+    refreshSpy.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
+  it("preserves a known social profile across desktop credential rotation", async () => {
+    resetProfileArnCache(false);
+    const socialProfileArn = "arn:aws:codewhisperer:us-east-1:123:profile/SOCIAL";
+    const successFrames = encodeBody('{"content":"ok"}{"contextUsagePercentage":5}');
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 403,
+        statusText: "Forbidden",
+        text: () => Promise.resolve("Access denied"),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({ done: false, value: successFrames })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+            releaseLock: () => {},
+          }),
+        },
+      });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const kiroCliModule = await import("../src/kiro-cli.js");
+    const staleSocialCreds = {
+      refresh: "stale-social-refresh|desktop",
+      access: "stale-social-token",
+      expires: Date.now() + 3_600_000,
+      clientId: "",
+      clientSecret: "",
+      region: "us-east-1",
+      authMethod: "desktop" as const,
+      profileArn: socialProfileArn,
+    };
+    const refreshedSocialCreds = {
+      ...staleSocialCreds,
+      refresh: "fresh-social-refresh|desktop",
+      access: "fresh-social-token",
+      profileArn: undefined,
+    };
+    const getCredsSpy = vi.spyOn(kiroCliModule, "getKiroCliCredentials").mockReturnValue(staleSocialCreds);
+    const refreshSpy = vi.spyOn(kiroCliModule, "refreshViaKiroCli").mockReturnValue(refreshedSocialCreds);
+
+    const events = await collect(
+      streamKiro(makeModel({ kiroProfileArn: socialProfileArn }), makeContext(), {
+        apiKey: "stale-social-token",
+      }),
+    );
+
+    expect(refreshSpy).toHaveBeenCalledOnce();
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
+      "https://runtime.us-east-1.kiro.dev/",
+      "https://runtime.us-east-1.kiro.dev/",
+    ]);
+    expect(mockFetch.mock.calls[1][1].headers.Authorization).toBe("Bearer fresh-social-token");
+    expect(JSON.parse(mockFetch.mock.calls[1][1].body).profileArn).toBe(socialProfileArn);
+    expect(events.find((event) => event.type === "done")).toBeDefined();
+
+    getCredsSpy.mockRestore();
+    refreshSpy.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
+  it("fails the 403 retry when refreshed profile discovery fails", async () => {
     // Start with unresolved cache so profileArn resolution runs
     resetProfileArnCache(false);
     const mockFetch = vi
@@ -1633,26 +2029,11 @@ describe("Feature 9: Streaming Integration", () => {
         statusText: "Forbidden",
         text: () => Promise.resolve('{"message":"The bearer token included in the request is invalid."}'),
       })
-      // 3rd call: ListAvailableProfiles (re-resolved after credential refresh)
+      // 3rd call: ListAvailableProfiles fails after credential refresh
       .mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ profiles: [{ arn: "arn:aws:codewhisperer:us-east-1:123:profile/TEST" }] }),
-      })
-      // 4th call: generateAssistantResponse retry
-      .mockResolvedValueOnce({
-        ok: true,
-        body: {
-          getReader: () => ({
-            read: vi
-              .fn()
-              .mockResolvedValueOnce({
-                done: false,
-                value: encodeBody('{"content":"ok"}{"contextUsagePercentage":5}'),
-              })
-              .mockResolvedValueOnce({ done: true, value: undefined }),
-            releaseLock: () => {},
-          }),
-        },
+        ok: false,
+        status: 503,
+        statusText: "Service Unavailable",
       });
     vi.stubGlobal("fetch", mockFetch);
 
@@ -1671,16 +2052,17 @@ describe("Feature 9: Streaming Integration", () => {
     const stream = streamKiro(makeModel(), makeContext(), { apiKey: "stale-token" });
     const events = await collect(stream);
 
-    expect(mockFetch).toHaveBeenCalledTimes(4);
-    // 1st: ListAvailableProfiles with stale token
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    // 1st: ListAvailableProfiles with stale token on management.
+    expect(mockFetch.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/");
     expect(mockFetch.mock.calls[0][1].headers.Authorization).toBe("Bearer stale-token");
     // 2nd: generateAssistantResponse with stale token → 403
     expect(mockFetch.mock.calls[1][1].headers.Authorization).toBe("Bearer stale-token");
-    // 3rd: ListAvailableProfiles re-resolved with fresh token
+    // 3rd: ListAvailableProfiles fails with the fresh token on management.
+    expect(mockFetch.mock.calls[2][0]).toBe("https://management.us-east-1.kiro.dev/");
     expect(mockFetch.mock.calls[2][1].headers.Authorization).toBe("Bearer fresh-access-token");
-    // 4th: generateAssistantResponse retry with fresh token
-    expect(mockFetch.mock.calls[3][1].headers.Authorization).toBe("Bearer fresh-access-token");
-    expect(events.find((e) => e.type === "done")).toBeDefined();
+    const error = events.find((event) => event.type === "error");
+    expect(error?.type === "error" && error.error.errorMessage).toContain("ListAvailableProfiles failed");
 
     getCredsSpy.mockRestore();
     vi.unstubAllGlobals();
@@ -1774,13 +2156,15 @@ describe("Feature 9: Streaming Integration", () => {
     const events = await collect(stream);
     const done = events.find((e) => e.type === "done");
     const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
 
     // tiktoken count should differ from chars/4 (which would be ~8)
     // "Hello there, this is a response." is 8 tokens with cl100k_base
-    expect(msg?.usage.output).toBeGreaterThan(0);
+    expect(msg.usage.output).toBeGreaterThan(0);
     // The old method (chars/4) would give ceil(32/4) = 8
     // tiktoken gives an accurate count that won't be exactly chars/4 for most strings
-    expect(msg?.usage.totalTokens).toBe(msg?.usage.input + msg?.usage.output);
+    expect(msg.usage.totalTokens).toBe(msg.usage.input + msg.usage.output);
 
     vi.unstubAllGlobals();
   });
@@ -1797,15 +2181,17 @@ describe("Feature 9: Streaming Integration", () => {
     const events = await collect(stream);
     const done = events.find((e) => e.type === "done");
     const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
 
     // Usage event values should take precedence
-    expect(msg?.usage.input).toBe(500);
-    expect(msg?.usage.output).toBe(200);
-    expect(msg?.usage.totalTokens).toBe(700);
+    expect(msg.usage.input).toBe(500);
+    expect(msg.usage.output).toBe(200);
+    expect(msg.usage.totalTokens).toBe(700);
 
     // contextPercent should still reflect the API's contextUsagePercentage,
     // not be derived from the (overwritten) input token count
-    expect((msg?.usage as Record<string, unknown>).contextPercent).toBe(10);
+    expect((msg.usage as unknown as Record<string, unknown>).contextPercent).toBe(10);
 
     vi.unstubAllGlobals();
   });
@@ -1818,10 +2204,12 @@ describe("Feature 9: Streaming Integration", () => {
     const events = await collect(stream);
     const done = events.find((e) => e.type === "done");
     const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
 
-    expect((msg?.usage as Record<string, unknown>).contextPercent).toBe(42);
+    expect((msg.usage as unknown as Record<string, unknown>).contextPercent).toBe(42);
     // input should be back-calculated from percentage
-    expect(msg?.usage.input).toBe(Math.round(0.42 * 200000));
+    expect(msg.usage.input).toBe(Math.round(0.42 * 200000));
 
     vi.unstubAllGlobals();
   });

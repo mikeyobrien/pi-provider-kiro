@@ -8,6 +8,8 @@
 // to the interactive login flow in login.ts (Feature 10).
 
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
+import { formatSafeError } from "./debug.js";
+import { resolveApiRegion } from "./endpoints.js";
 import { getKiroIdeCredentials, getKiroIdeCredentialsAllowExpired } from "./kiro-ide.js";
 import { interactiveLogin, loginViaKiroCli } from "./login.js";
 
@@ -48,11 +50,13 @@ export async function loginKiro(
   const creds = await loginKiroInternal(callbacks, preferredMethod);
   if (!process.env.VITEST) {
     try {
-      const { resolveApiRegion, updateKiroModelsCache } = await import("./models.js");
+      const { updateKiroModelsCache } = await import("./models.js");
       const region = resolveApiRegion((creds as KiroCredentials).region);
-      updateKiroModelsCache(creds.access, region, (creds as KiroCredentials).profileArn).catch(() => {});
-    } catch {
-      // Ignore cache errors
+      updateKiroModelsCache(creds.access, region, (creds as KiroCredentials).profileArn).catch((error) => {
+        console.warn(`[pi-provider-kiro] Failed to refresh Kiro model catalog in ${region}: ${formatSafeError(error)}`);
+      });
+    } catch (error) {
+      console.warn(`[pi-provider-kiro] Failed to start Kiro model catalog refresh: ${formatSafeError(error)}`);
     }
   }
   return creds;
@@ -144,11 +148,13 @@ export async function refreshKiroToken(credentials: OAuthCredentials): Promise<O
   const refreshed = await refreshKiroTokenInternal(credentials);
   if (!process.env.VITEST) {
     try {
-      const { resolveApiRegion, updateKiroModelsCache } = await import("./models.js");
+      const { updateKiroModelsCache } = await import("./models.js");
       const region = resolveApiRegion((refreshed as KiroCredentials).region);
-      updateKiroModelsCache(refreshed.access, region, (refreshed as KiroCredentials).profileArn).catch(() => {});
-    } catch {
-      // Ignore cache errors
+      updateKiroModelsCache(refreshed.access, region, (refreshed as KiroCredentials).profileArn).catch((error) => {
+        console.warn(`[pi-provider-kiro] Failed to refresh Kiro model catalog in ${region}: ${formatSafeError(error)}`);
+      });
+    } catch (error) {
+      console.warn(`[pi-provider-kiro] Failed to start Kiro model catalog refresh: ${formatSafeError(error)}`);
     }
   }
   return refreshed;

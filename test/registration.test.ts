@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
+import { getKiroCliCredentials } from "../src/kiro-cli.js";
 import { kiroModels } from "../src/models.js";
 
 const mockPi = () => {
@@ -23,16 +24,16 @@ describe("Feature 1: Extension Registration", () => {
     expect(registerProvider.mock.calls[0][0]).toBe("kiro");
   });
 
-  it("registers 14 models", async () => {
+  it("registers 15 models", async () => {
     const mod = await import("../src/index.js");
     const { pi, registerProvider } = mockPi();
     mod.default(pi);
 
     const config = registerProvider.mock.calls[0][1];
-    expect(config.models).toHaveLength(14);
+    expect(config.models).toHaveLength(15);
   });
 
-  it("registers OAuth with name 'Kiro (Builder ID / Google / GitHub)'", async () => {
+  it("preserves the existing OAuth and kiro-cli credential contract", async () => {
     const mod = await import("../src/index.js");
     const { pi, registerProvider } = mockPi();
     mod.default(pi);
@@ -41,7 +42,8 @@ describe("Feature 1: Extension Registration", () => {
     expect(config.oauth.name).toBe("Kiro (Builder ID / Google / GitHub)");
     expect(typeof config.oauth.login).toBe("function");
     expect(typeof config.oauth.refreshToken).toBe("function");
-    expect(typeof config.oauth.getApiKey).toBe("function");
+    expect(config.oauth.getCliCredentials).toBe(getKiroCliCredentials);
+    expect(config.oauth.getApiKey({ access: "existing-access-token" })).toBe("existing-access-token");
     expect(typeof config.oauth.fetchUsage).toBe("function");
   });
 
@@ -80,10 +82,35 @@ describe("Feature 1: Extension Registration", () => {
     const models = kiroModels.map((m) => ({ ...m, provider: "kiro", api: "kiro-api", baseUrl: "old" }));
     const creds = { access: "x", refresh: "x", expires: 0, clientId: "", clientSecret: "", region: ssoRegion };
     const modified = config.oauth.modifyModels(models, creds);
-    expect(modified[0].baseUrl).toBe(`https://q.${expectedApiRegion}.amazonaws.com/generateAssistantResponse`);
+    expect(modified[0].baseUrl).toBe(`https://runtime.${expectedApiRegion}.kiro.dev/`);
   });
 
-  it("modifyModels filters out unavailable models for EU regions", async () => {
+  it("modifyModels carries the OAuth profile ARN on Kiro models only", async () => {
+    const mod = await import("../src/index.js");
+    const { pi, registerProvider } = mockPi();
+    mod.default(pi);
+
+    const config = registerProvider.mock.calls[0][1];
+    const profileArn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/social";
+    const models = kiroModels.map((model) => ({ ...model, baseUrl: "old" }));
+    const creds = {
+      access: "social-access",
+      refresh: "social-refresh|desktop",
+      expires: Date.now() + 60_000,
+      clientId: "",
+      clientSecret: "",
+      region: "us-east-1",
+      authMethod: "desktop",
+      profileArn,
+    };
+
+    const modified = config.oauth.modifyModels(models, creds);
+
+    expect(modified).toHaveLength(models.length);
+    expect(modified.every((model: { kiroProfileArn?: string }) => model.kiroProfileArn === profileArn)).toBe(true);
+  });
+
+  it("modifyModels does not apply a hardcoded regional allowlist", async () => {
     const mod = await import("../src/index.js");
     const { pi, registerProvider } = mockPi();
     mod.default(pi);
@@ -93,8 +120,8 @@ describe("Feature 1: Extension Registration", () => {
     const creds = { access: "x", refresh: "x", expires: 0, clientId: "", clientSecret: "", region: "eu-west-1" };
     const modified = config.oauth.modifyModels(models, creds);
     const ids = modified.map((m: { id: string }) => m.id);
-    expect(modified.length).toBeLessThan(models.length);
-    expect(ids).not.toContain("deepseek-3-2");
+    expect(modified).toHaveLength(models.length);
+    expect(ids).toContain("deepseek-3-2");
     expect(ids).toContain("claude-sonnet-4-6");
   });
 

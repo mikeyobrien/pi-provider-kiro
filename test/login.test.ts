@@ -29,6 +29,7 @@ function makeCallbacks(...responses: string[]): OAuthLoginCallbacks & { onAuth: 
     onDeviceCode: vi.fn(),
     onPrompt,
     onProgress: vi.fn(),
+    onSelect: vi.fn(),
     signal: new AbortController().signal,
   } as OAuthLoginCallbacks & { onAuth: ReturnType<typeof vi.fn> };
 }
