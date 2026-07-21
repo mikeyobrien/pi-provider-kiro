@@ -92,6 +92,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerProvider("kiro", {
     baseUrl: getKiroEndpoints("us-east-1").runtime,
     api: "kiro-api",
+    apiKey: "$KIRO_API_KEY",
     models: kiroModels,
     refreshModels: refreshKiroModels,
     oauth: {

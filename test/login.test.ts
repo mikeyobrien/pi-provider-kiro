@@ -18,6 +18,10 @@ vi.mock("node:child_process", () => ({ execFileSync: vi.fn() }));
 vi.mock("../src/login-ui.js", () => ({
   showLoginUI: vi.fn(() => Promise.resolve(null)),
   setExtensionContext: vi.fn(),
+  hasExtensionContext: vi.fn(() => false),
+  showWaitingUI: vi.fn((_callbacks: unknown, _choice: unknown, runAuth: (c: unknown) => unknown) =>
+    runAuth(_callbacks),
+  ),
 }));
 
 function makeCallbacks(...responses: string[]): OAuthLoginCallbacks & { onAuth: ReturnType<typeof vi.fn> } {
@@ -256,7 +260,7 @@ describe("Feature 10: Interactive Login", () => {
             json: () => Promise.resolve({ accessToken: "at", refreshToken: "rt", expiresIn: 3600 }),
           }),
       );
-      expect((await interactiveLogin(makeCallbacks(""))).access).toBe("at");
+      expect(((await interactiveLogin(makeCallbacks(""))) as KiroCredentials).access).toBe("at");
       vi.unstubAllGlobals();
     });
   });
