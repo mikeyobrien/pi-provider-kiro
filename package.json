@@ -1,6 +1,6 @@
 {
   "name": "pi-provider-kiro",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "pi extension for the Kiro API (AWS CodeWhisperer/Q) — 12 kiro-cli-verified models with OAuth authentication",
   "type": "module",
   "license": "MIT",
