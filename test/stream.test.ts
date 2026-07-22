@@ -181,6 +181,39 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
+  it("keeps visible-thinking markers when Claude uses structured adaptive effort", async () => {
+    const mockFetch = mockFetchOk(
+      '{"content":"<thinking>Checked divisibility</thinking>\\n\\nNo"}{"contextUsagePercentage":10}',
+    );
+    vi.stubGlobal("fetch", mockFetch);
+
+    try {
+      const events = await collect(
+        streamKiro(
+          makeModel({
+            id: "claude-sonnet-4-6",
+            kiroModelId: "claude-sonnet-4.6",
+            additionalModelRequestFieldsSchema: effortSchema("output_config", ["low", "medium", "high", "max"]),
+          }),
+          makeContext(),
+          { apiKey: "test-token", reasoning: "high" },
+        ),
+      );
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      const content = body.conversationState.currentMessage.userInputMessage.content;
+      expect(body.additionalModelRequestFields).toEqual({
+        output_config: { effort: "high" },
+        thinking: { type: "adaptive" },
+      });
+      expect(content).toContain("<thinking_mode>enabled</thinking_mode>");
+      expect(content).toContain("<max_thinking_length>30000</max_thinking_length>");
+      expect(events.some((event) => event.type === "thinking_delta")).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it.each([
     {
       name: "maps GPT minimal to low",
@@ -194,6 +227,7 @@ describe("Feature 9: Streaming Integration", () => {
       },
       reasoning: "minimal" as const,
       expected: { reasoning: { effort: "low" } },
+      visibleThinking: false,
     },
     {
       name: "keeps GPT xhigh",
@@ -207,6 +241,7 @@ describe("Feature 9: Streaming Integration", () => {
       },
       reasoning: "xhigh" as const,
       expected: { reasoning: { effort: "xhigh" } },
+      visibleThinking: false,
     },
     {
       name: "keeps Claude xhigh distinct from max",
@@ -219,6 +254,7 @@ describe("Feature 9: Streaming Integration", () => {
       },
       reasoning: "xhigh" as const,
       expected: { output_config: { effort: "xhigh" }, thinking: { type: "adaptive" } },
+      visibleThinking: true,
     },
     {
       name: "maps Pi xhigh to Kiro max when xhigh is unavailable",
@@ -231,8 +267,9 @@ describe("Feature 9: Streaming Integration", () => {
       },
       reasoning: "xhigh" as const,
       expected: { output_config: { effort: "max" }, thinking: { type: "adaptive" } },
+      visibleThinking: true,
     },
-  ])("sends structured effort: $name", async ({ model, reasoning, expected }) => {
+  ])("sends structured effort: $name", async ({ model, reasoning, expected, visibleThinking }) => {
     const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":10}');
     vi.stubGlobal("fetch", mockFetch);
 
@@ -242,8 +279,13 @@ describe("Feature 9: Streaming Integration", () => {
       const body = JSON.parse(mockFetch.mock.calls[0][1].body);
       expect(body.additionalModelRequestFields).toEqual(expected);
       const content = body.conversationState.currentMessage.userInputMessage.content;
-      expect(content).not.toContain("<thinking_mode>");
-      expect(content).not.toContain("<max_thinking_length>");
+      if (visibleThinking) {
+        expect(content).toContain("<thinking_mode>enabled</thinking_mode>");
+        expect(content).toContain("<max_thinking_length>");
+      } else {
+        expect(content).not.toContain("<thinking_mode>");
+        expect(content).not.toContain("<max_thinking_length>");
+      }
     } finally {
       vi.unstubAllGlobals();
     }
