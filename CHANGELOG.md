@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Restore visible summarized thinking for Claude Sonnet 5, Opus 4.8, and other adaptive-thinking models by requesting and parsing Kiro's native thinking stream events.
+
 ## [0.9.1] - 2026-07-22
 
 ### Fixed

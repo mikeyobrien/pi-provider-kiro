@@ -7,11 +7,15 @@ export type KiroEffortField = "reasoning" | "output_config";
 export interface KiroEffortConfig {
   field: KiroEffortField;
   values: readonly string[];
+  summarizedThinking: boolean;
 }
 
 export type KiroAdditionalModelRequestFields =
   | { reasoning: { effort: string } }
-  | { output_config: { effort: string }; thinking: { type: "adaptive" } };
+  | {
+      output_config: { effort: string };
+      thinking: { type: "adaptive"; display?: "summarized" };
+    };
 
 type ModelWithKiroEffortMetadata = Model<Api> & {
   additionalModelRequestFieldsSchema?: unknown;
@@ -51,7 +55,13 @@ export function deriveKiroEffort(schema: unknown): KiroEffortConfig | undefined 
     if (!isRecord(effortSchema) || !Array.isArray(effortSchema.enum) || effortSchema.enum.length === 0) continue;
     if (!effortSchema.enum.every((value) => typeof value === "string" && value.length > 0)) continue;
 
-    return { field, values: [...new Set(effortSchema.enum as string[])] };
+    const thinkingSchema = schema.properties.thinking;
+    const displaySchema =
+      isRecord(thinkingSchema) && isRecord(thinkingSchema.properties) ? thinkingSchema.properties.display : undefined;
+    const summarizedThinking =
+      isRecord(displaySchema) && Array.isArray(displaySchema.enum) && displaySchema.enum.includes("summarized");
+
+    return { field, values: [...new Set(effortSchema.enum as string[])], summarizedThinking };
   }
 
   return undefined;
@@ -61,13 +71,13 @@ export function deriveKiroEffort(schema: unknown): KiroEffortConfig | undefined 
 export function fallbackKiroEffort(kiroModelId: string): KiroEffortConfig | undefined {
   const normalizedId = kiroModelId.toLowerCase().replace(/(\d)-(\d)/g, "$1.$2");
   if (normalizedId.startsWith("openai-gpt")) {
-    return { field: "reasoning", values: GPT_EFFORT_VALUES };
+    return { field: "reasoning", values: GPT_EFFORT_VALUES, summarizedThinking: false };
   }
   if (CLAUDE_EXTENDED_EFFORT_MODELS.has(normalizedId)) {
-    return { field: "output_config", values: CLAUDE_EXTENDED_EFFORT_VALUES };
+    return { field: "output_config", values: CLAUDE_EXTENDED_EFFORT_VALUES, summarizedThinking: true };
   }
   if (CLAUDE_MAX_EFFORT_MODELS.has(normalizedId)) {
-    return { field: "output_config", values: CLAUDE_MAX_EFFORT_VALUES };
+    return { field: "output_config", values: CLAUDE_MAX_EFFORT_VALUES, summarizedThinking: false };
   }
   return undefined;
 }
@@ -131,6 +141,12 @@ export function buildKiroAdditionalModelRequestFields(
   if (!effort) return undefined;
 
   return config.field === "output_config"
-    ? { output_config: { effort }, thinking: { type: "adaptive" } }
+    ? {
+        output_config: { effort },
+        thinking: {
+          type: "adaptive",
+          ...(config.summarizedThinking ? { display: "summarized" as const } : {}),
+        },
+      }
     : { reasoning: { effort } };
 }

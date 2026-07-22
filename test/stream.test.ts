@@ -181,6 +181,59 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
+  it("emits native summarized thinking text and preserves its signature", async () => {
+    const mockFetch = mockFetchOk(
+      '{"text":"Considering "}{"text":"divisibility"}{"signature":"opaque-signature"}{"content":"No"}{"contextUsagePercentage":10}',
+    );
+    vi.stubGlobal("fetch", mockFetch);
+
+    try {
+      const events = await collect(
+        streamKiro(
+          makeModel({
+            id: "claude-sonnet-5",
+            kiroModelId: "claude-sonnet-5",
+            additionalModelRequestFieldsSchema: {
+              type: "object",
+              properties: {
+                thinking: {
+                  type: "object",
+                  properties: { display: { type: "string", enum: ["summarized", "omitted"] } },
+                },
+                output_config: {
+                  type: "object",
+                  properties: { effort: { type: "string", enum: ["low", "medium", "high", "xhigh"] } },
+                },
+              },
+            },
+          }),
+          makeContext(),
+          { apiKey: "test-token", reasoning: "high" },
+        ),
+      );
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.additionalModelRequestFields).toEqual({
+        output_config: { effort: "high" },
+        thinking: { type: "adaptive", display: "summarized" },
+      });
+      const types = events.map((event) => event.type);
+      expect(types.indexOf("thinking_start")).toBeLessThan(types.indexOf("thinking_delta"));
+      expect(types.indexOf("thinking_delta")).toBeLessThan(types.indexOf("thinking_end"));
+      expect(types.indexOf("thinking_end")).toBeLessThan(types.indexOf("text_start"));
+      const done = events.find((event) => event.type === "done");
+      const thinking =
+        done?.type === "done" ? done.message.content.find((block) => block.type === "thinking") : undefined;
+      expect(thinking).toMatchObject({
+        type: "thinking",
+        thinking: "Considering divisibility",
+        thinkingSignature: "opaque-signature",
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("keeps visible-thinking markers when Claude uses structured adaptive effort", async () => {
     const mockFetch = mockFetchOk(
       '{"content":"<thinking>Checked divisibility</thinking>\\n\\nNo"}{"contextUsagePercentage":10}',

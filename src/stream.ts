@@ -13,6 +13,7 @@ import type {
   Model,
   SimpleStreamOptions,
   TextContent,
+  ThinkingContent,
   ToolCall,
   ToolResultMessage,
 } from "@earendil-works/pi-ai";
@@ -529,6 +530,30 @@ export function streamKiro(
         let usageEvent: { inputTokens?: number; outputTokens?: number } | null = null;
         let receivedContextUsage = false;
         const thinkingParser = thinkingEnabled ? new ThinkingTagParser(output, stream) : null;
+        let nativeThinkingBlockIndex: number | null = null;
+        let nativeThinkingEnded = false;
+        const ensureNativeThinkingBlock = (): { block: ThinkingContent; contentIndex: number } => {
+          if (nativeThinkingBlockIndex === null) {
+            nativeThinkingBlockIndex = output.content.length;
+            output.content.push({ type: "thinking", thinking: "" });
+            stream.push({ type: "thinking_start", contentIndex: nativeThinkingBlockIndex, partial: output });
+          }
+          return {
+            block: output.content[nativeThinkingBlockIndex] as ThinkingContent,
+            contentIndex: nativeThinkingBlockIndex,
+          };
+        };
+        const endNativeThinking = () => {
+          if (nativeThinkingBlockIndex === null || nativeThinkingEnded) return;
+          nativeThinkingEnded = true;
+          const block = output.content[nativeThinkingBlockIndex] as ThinkingContent;
+          stream.push({
+            type: "thinking_end",
+            contentIndex: nativeThinkingBlockIndex,
+            content: block.thinking,
+            partial: output,
+          });
+        };
         let textBlockIndex: number | null = null;
         let emittedToolCalls = 0;
         let sawAnyToolCalls = false;
@@ -624,7 +649,28 @@ export function streamKiro(
               receivedContextUsage = true;
               break;
             }
+            case "thinkingText": {
+              if (!thinkingEnabled) break;
+              const { block, contentIndex } = ensureNativeThinkingBlock();
+              block.thinking += event.data;
+              totalContent += event.data;
+              stream.push({
+                type: "thinking_delta",
+                contentIndex,
+                delta: event.data,
+                partial: output,
+              });
+              break;
+            }
+            case "thinkingSignature": {
+              if (!thinkingEnabled) break;
+              const { block } = ensureNativeThinkingBlock();
+              block.thinkingSignature = event.data;
+              endNativeThinking();
+              break;
+            }
             case "content": {
+              endNativeThinking();
               if (event.data === lastContentData) continue;
               lastContentData = event.data;
               totalContent += event.data;
@@ -693,6 +739,7 @@ export function streamKiro(
         if (currentToolCall && emitToolCall(currentToolCall, output, stream)) {
           emittedToolCalls++;
         }
+        endNativeThinking();
         if (thinkingParser) {
           thinkingParser.finalize();
           textBlockIndex = thinkingParser.getTextBlockIndex();
