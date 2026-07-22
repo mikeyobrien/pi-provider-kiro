@@ -87,11 +87,7 @@ describe("Feature 2: Model Definitions", () => {
       expect(resolveKiroModel(piId)).toBe(kiroId);
     });
 
-    it("throws on an unknown model ID", () => {
-      expect(() => resolveKiroModel("nonexistent")).toThrow("Unknown Kiro model ID");
-    });
-
-    it("tracks exact service IDs from the bootstrap catalog", () => {
+    it("tracks exact service IDs from catalog", () => {
       expect(KIRO_MODEL_IDS).toEqual(new Set(kiroModels.map((model) => model.kiroModelId)));
     });
   });
@@ -262,19 +258,8 @@ describe("Feature 2: Model Definitions", () => {
   });
 
   describe("bootstrap model catalog", () => {
-    it("keeps conservative, zero-cost bootstrap metadata", () => {
-      expect(kiroModels).toHaveLength(15);
-      expect(kiroModels.every((model) => model.baseUrl === "https://runtime.us-east-1.kiro.dev/")).toBe(true);
-      expect(kiroModels.every((model) => model.cost.input === 0 && model.cost.output === 0)).toBe(true);
-      expect(kiroModels.find((model) => model.id === "claude-haiku-4-5")?.reasoning).toBe(false);
-      expect(kiroModels.find((model) => model.id === "minimax-m2-1")?.reasoning).toBe(false);
-    });
-
-    it("uses image input for Claude and text input for other concrete models", () => {
-      const claudeModels = kiroModels.filter((model) => model.id.startsWith("claude-"));
-      const nonClaudeModels = kiroModels.filter((model) => !model.id.startsWith("claude-") && model.id !== "auto");
-      expect(claudeModels.every((model) => model.input.includes("text") && model.input.includes("image"))).toBe(true);
-      expect(nonClaudeModels.every((model) => model.input.length === 1 && model.input[0] === "text")).toBe(true);
+    it("has no hardcoded fallback models", () => {
+      expect(kiroModels).toHaveLength(0);
     });
   });
 

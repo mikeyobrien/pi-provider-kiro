@@ -24,13 +24,13 @@ describe("Feature 1: Extension Registration", () => {
     expect(registerProvider.mock.calls[0][0]).toBe("kiro");
   });
 
-  it("registers 15 models", async () => {
+  it("registers dynamic models array", async () => {
     const mod = await import("../src/index.js");
     const { pi, registerProvider } = mockPi();
     mod.default(pi);
 
     const config = registerProvider.mock.calls[0][1];
-    expect(config.models).toHaveLength(15);
+    expect(Array.isArray(config.models)).toBe(true);
   });
 
   it("preserves the existing OAuth and kiro-cli credential contract", async () => {
@@ -64,6 +64,11 @@ describe("Feature 1: Extension Registration", () => {
     expect(registerProvider.mock.calls[0][1].api).toBe("kiro-api");
   });
 
+  const sampleKiroModels = [
+    { id: "deepseek-3-2", kiroModelId: "deepseek-3.2", name: "DeepSeek 3.2", provider: "kiro", api: "kiro-api" as const, baseUrl: "old", reasoning: true, input: ["text"] as ("text" | "image")[], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 164000, maxTokens: 8192 },
+    { id: "claude-sonnet-4-6", kiroModelId: "claude-sonnet-4.6", name: "Claude Sonnet 4.6", provider: "kiro", api: "kiro-api" as const, baseUrl: "old", reasoning: true, input: ["text", "image"] as ("text" | "image")[], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000000, maxTokens: 65536 },
+  ];
+
   it.each([
     { ssoRegion: "eu-west-1", expectedApiRegion: "eu-central-1" },
     { ssoRegion: "eu-west-2", expectedApiRegion: "eu-central-1" },
@@ -79,9 +84,8 @@ describe("Feature 1: Extension Registration", () => {
     mod.default(pi);
 
     const config = registerProvider.mock.calls[0][1];
-    const models = kiroModels.map((m) => ({ ...m, provider: "kiro", api: "kiro-api", baseUrl: "old" }));
     const creds = { access: "x", refresh: "x", expires: 0, clientId: "", clientSecret: "", region: ssoRegion };
-    const modified = config.oauth.modifyModels(models, creds);
+    const modified = config.oauth.modifyModels(sampleKiroModels, creds);
     expect(modified[0].baseUrl).toBe(`https://runtime.${expectedApiRegion}.kiro.dev/`);
   });
 
@@ -92,7 +96,6 @@ describe("Feature 1: Extension Registration", () => {
 
     const config = registerProvider.mock.calls[0][1];
     const profileArn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/social";
-    const models = kiroModels.map((model) => ({ ...model, baseUrl: "old" }));
     const creds = {
       access: "social-access",
       refresh: "social-refresh|desktop",
@@ -104,9 +107,9 @@ describe("Feature 1: Extension Registration", () => {
       profileArn,
     };
 
-    const modified = config.oauth.modifyModels(models, creds);
+    const modified = config.oauth.modifyModels(sampleKiroModels, creds);
 
-    expect(modified).toHaveLength(models.length);
+    expect(modified).toHaveLength(sampleKiroModels.length);
     expect(modified.every((model: { kiroProfileArn?: string }) => model.kiroProfileArn === profileArn)).toBe(true);
   });
 
@@ -116,11 +119,10 @@ describe("Feature 1: Extension Registration", () => {
     mod.default(pi);
 
     const config = registerProvider.mock.calls[0][1];
-    const models = kiroModels.map((m) => ({ ...m, provider: "kiro", api: "kiro-api", baseUrl: "old" }));
     const creds = { access: "x", refresh: "x", expires: 0, clientId: "", clientSecret: "", region: "eu-west-1" };
-    const modified = config.oauth.modifyModels(models, creds);
+    const modified = config.oauth.modifyModels(sampleKiroModels, creds);
     const ids = modified.map((m: { id: string }) => m.id);
-    expect(modified).toHaveLength(models.length);
+    expect(modified).toHaveLength(sampleKiroModels.length);
     expect(ids).toContain("deepseek-3-2");
     expect(ids).toContain("claude-sonnet-4-6");
   });

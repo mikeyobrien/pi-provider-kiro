@@ -48,216 +48,12 @@ interface ManagementModelsCache {
   regions: Record<string, ManagementCacheRegion>;
 }
 
-export const kiroModels: KiroModel[] = [
-  {
-    id: "claude-opus-4-8",
-    kiroModelId: "claude-opus-4.8",
-    name: "Claude Opus 4.8",
-    api: "kiro-api",
-    provider: "kiro",
-    baseUrl: BASE_URL,
-    reasoning: true,
-    thinkingLevelMap: { xhigh: "xhigh" },
-    input: ["text", "image"],
-    cost: ZERO_COST,
-    contextWindow: 1000000,
-    maxTokens: 128000,
-    firstTokenTimeout: 180_000,
-  },
-  {
-    id: "claude-opus-4-7",
-    kiroModelId: "claude-opus-4.7",
-    name: "Claude Opus 4.7",
-    api: "kiro-api",
-    provider: "kiro",
-    baseUrl: BASE_URL,
-    reasoning: true,
-    thinkingLevelMap: { xhigh: "xhigh" },
-    input: ["text", "image"],
-    cost: ZERO_COST,
-    contextWindow: 1000000,
-    maxTokens: 128000,
-    firstTokenTimeout: 180_000,
-  },
-  {
-    id: "claude-opus-4-6",
-    kiroModelId: "claude-opus-4.6",
-    name: "Claude Opus 4.6",
-    api: "kiro-api",
-    provider: "kiro",
-    baseUrl: BASE_URL,
-    reasoning: true,
-    thinkingLevelMap: { xhigh: "max" },
-    input: ["text", "image"],
-    cost: ZERO_COST,
-    contextWindow: 1000000,
-    maxTokens: 32768,
-  },
-  {
-    id: "claude-sonnet-5",
-    kiroModelId: "claude-sonnet-5",
-    name: "Claude Sonnet 5",
-    api: "kiro-api",
-    provider: "kiro",
-    baseUrl: BASE_URL,
-    reasoning: true,
-    thinkingLevelMap: { xhigh: "xhigh" },
-    input: ["text", "image"],
-    cost: ZERO_COST,
-    contextWindow: 1000000,
-    maxTokens: 65536,
-  },
-  {
-    id: "claude-sonnet-4-6",
-    kiroModelId: "claude-sonnet-4.6",
-    name: "Claude Sonnet 4.6",
-    api: "kiro-api",
-    provider: "kiro",
-    baseUrl: BASE_URL,
-    reasoning: true,
-    thinkingLevelMap: { xhigh: "max" },
-    input: ["text", "image"],
-    cost: ZERO_COST,
-    contextWindow: 1000000,
-    maxTokens: 65536,
-  },
-  {
-    id: "claude-sonnet-4-5",
-    kiroModelId: "claude-sonnet-4.5",
-    name: "Claude Sonnet 4.5",
-    api: "kiro-api",
-    provider: "kiro",
-    baseUrl: BASE_URL,
-    reasoning: true,
-    input: ["text", "image"],
-    cost: ZERO_COST,
-    contextWindow: 200000,
-    maxTokens: 65536,
-  },
-  {
-    id: "claude-sonnet-4",
-    kiroModelId: "claude-sonnet-4",
-    name: "Claude Sonnet 4",
-    api: "kiro-api",
-    provider: "kiro",
-    baseUrl: BASE_URL,
-    reasoning: true,
-    input: ["text", "image"],
-    cost: ZERO_COST,
-    contextWindow: 200000,
-    maxTokens: 65536,
-  },
-  {
-    id: "claude-haiku-4-5",
-    kiroModelId: "claude-haiku-4.5",
-    name: "Claude Haiku 4.5",
-    api: "kiro-api",
-    provider: "kiro",
-    baseUrl: BASE_URL,
-    reasoning: false,
-    input: ["text", "image"],
-    cost: ZERO_COST,
-    contextWindow: 200000,
-    maxTokens: 65536,
-  },
-  {
-    id: "claude-fable-5",
-    kiroModelId: "claude-fable-5",
-    name: "Claude Fable 5",
-    api: "kiro-api",
-    provider: "kiro",
-    baseUrl: BASE_URL,
-    reasoning: true,
-    thinkingLevelMap: { xhigh: "xhigh" },
-    input: ["text", "image"],
-    cost: ZERO_COST,
-    contextWindow: 1000000,
-    maxTokens: 65536,
-  },
-  {
-    id: "deepseek-3-2",
-    kiroModelId: "deepseek-3.2",
-    name: "DeepSeek 3.2",
-    api: "kiro-api",
-    provider: "kiro",
-    baseUrl: BASE_URL,
-    reasoning: true,
-    input: ["text"],
-    cost: ZERO_COST,
-    contextWindow: 164000,
-    maxTokens: 8192,
-  },
-  {
-    id: "minimax-m2-5",
-    kiroModelId: "minimax-m2.5",
-    name: "MiniMax M2.5",
-    api: "kiro-api",
-    provider: "kiro",
-    baseUrl: BASE_URL,
-    reasoning: false,
-    input: ["text"],
-    cost: ZERO_COST,
-    contextWindow: 196000,
-    maxTokens: 8192,
-  },
-  {
-    id: "minimax-m2-1",
-    kiroModelId: "minimax-m2.1",
-    name: "MiniMax M2.1",
-    api: "kiro-api",
-    provider: "kiro",
-    baseUrl: BASE_URL,
-    reasoning: false,
-    input: ["text"],
-    cost: ZERO_COST,
-    contextWindow: 196000,
-    maxTokens: 8192,
-  },
-  {
-    id: "glm-5",
-    kiroModelId: "glm-5",
-    name: "GLM 5",
-    api: "kiro-api",
-    provider: "kiro",
-    baseUrl: BASE_URL,
-    reasoning: true,
-    input: ["text"],
-    cost: ZERO_COST,
-    contextWindow: 200000,
-    maxTokens: 8192,
-  },
-  {
-    id: "qwen3-coder-next",
-    kiroModelId: "qwen3-coder-next",
-    name: "Qwen3 Coder Next",
-    api: "kiro-api",
-    provider: "kiro",
-    baseUrl: BASE_URL,
-    reasoning: true,
-    input: ["text"],
-    cost: ZERO_COST,
-    contextWindow: 256000,
-    maxTokens: 8192,
-  },
-  {
-    id: "auto",
-    kiroModelId: "auto",
-    name: "Auto",
-    api: "kiro-api",
-    provider: "kiro",
-    baseUrl: BASE_URL,
-    reasoning: true,
-    input: ["text", "image"],
-    cost: ZERO_COST,
-    contextWindow: 1000000,
-    maxTokens: 65536,
-  },
-];
+export const kiroModels: KiroModel[] = [];
 
-const BOOTSTRAP_KIRO_MODEL_IDS = kiroModels.map((model) => model.kiroModelId);
+const BOOTSTRAP_KIRO_MODEL_IDS: string[] = [];
 
 /** Exact service IDs known from either the bootstrap list or a valid management cache. */
-export const KIRO_MODEL_IDS = new Set(BOOTSTRAP_KIRO_MODEL_IDS);
+export const KIRO_MODEL_IDS = new Set<string>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -493,8 +289,16 @@ export function isCacheStale(region: string): boolean {
   return !entry || Date.now() - entry.fetchedAt > CACHE_MAX_AGE_MS;
 }
 
-export async function updateKiroModelsCache(accessToken: string, region: string, profileArn?: string): Promise<void> {
-  const response = await fetchKiroModelCatalog({ accessToken, region }, profileArn);
+export async function updateKiroModelsCache(accessToken: string, region: string, profileArn?: string): Promise<string | undefined> {
+  const { resolveKiroProfileArn } = await import("./management.js");
+  let resolvedArn: string | undefined = profileArn;
+  try {
+    resolvedArn = await resolveKiroProfileArn({ accessToken, region }, profileArn);
+  } catch {
+    // Best-effort profile discovery
+  }
+
+  const response = await fetchKiroModelCatalog({ accessToken, region }, resolvedArn);
   const models = mapKiroCatalogModels(response.models, region);
   const existingCache = readManagementCache();
   const cache: ManagementModelsCache = existingCache ?? {
@@ -506,6 +310,7 @@ export async function updateKiroModelsCache(accessToken: string, region: string,
   cache.regions[region] = { region, fetchedAt: Date.now(), models };
   writeManagementCache(cache);
   refreshKnownModelIds(cache);
+  return resolvedArn;
 }
 
 export function resolveKiroModel(modelId: string, exactKiroModelId?: string): string {
@@ -519,12 +324,9 @@ export function resolveKiroModel(modelId: string, exactKiroModelId?: string): st
     return cachedModel.kiroModelId;
   }
 
-  const bootstrapModel = kiroModels.find((model) => model.id === modelId);
-  if (bootstrapModel) return bootstrapModel.kiroModelId;
-
   const normalizedId = modelId.replace(/(\d)-(\d)/g, "$1.$2");
   loadCachedModelIds();
-  if (!KIRO_MODEL_IDS.has(normalizedId)) {
+  if (KIRO_MODEL_IDS.size > 0 && !KIRO_MODEL_IDS.has(normalizedId)) {
     throw new Error(`Unknown Kiro model ID: ${modelId}`);
   }
   return normalizedId;
