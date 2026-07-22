@@ -251,7 +251,11 @@ export function streamKiro(
         sessionId: options?.sessionId,
       });
       let systemPrompt = context.systemPrompt ?? "";
-      if (thinkingEnabled && !effortConfig) {
+      // Kiro's runtime endpoint honors structured effort but only exposes Claude's
+      // user-visible thinking stream when the legacy thinking markers are also
+      // present. Keep both controls: structured fields select effort, while these
+      // markers preserve the <thinking> content consumed by ThinkingTagParser.
+      if (thinkingEnabled && effortConfig?.field !== "reasoning") {
         const budget =
           options?.reasoning === "xhigh"
             ? 50000
