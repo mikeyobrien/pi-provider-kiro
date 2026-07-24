@@ -57,7 +57,7 @@ export const kiroModels: KiroModel[] = [
     provider: "kiro",
     baseUrl: BASE_URL,
     reasoning: true,
-    thinkingLevelMap: { xhigh: "xhigh" },
+    thinkingLevelMap: { xhigh: "xhigh", max: "max" },
     input: ["text", "image"],
     cost: ZERO_COST,
     contextWindow: 1000000,
@@ -72,7 +72,7 @@ export const kiroModels: KiroModel[] = [
     provider: "kiro",
     baseUrl: BASE_URL,
     reasoning: true,
-    thinkingLevelMap: { xhigh: "xhigh" },
+    thinkingLevelMap: { xhigh: "xhigh", max: "max" },
     input: ["text", "image"],
     cost: ZERO_COST,
     contextWindow: 1000000,
@@ -87,7 +87,7 @@ export const kiroModels: KiroModel[] = [
     provider: "kiro",
     baseUrl: BASE_URL,
     reasoning: true,
-    thinkingLevelMap: { xhigh: "max" },
+    thinkingLevelMap: { max: "max" },
     input: ["text", "image"],
     cost: ZERO_COST,
     contextWindow: 1000000,
@@ -101,7 +101,7 @@ export const kiroModels: KiroModel[] = [
     provider: "kiro",
     baseUrl: BASE_URL,
     reasoning: true,
-    thinkingLevelMap: { xhigh: "xhigh" },
+    thinkingLevelMap: { xhigh: "xhigh", max: "max" },
     input: ["text", "image"],
     cost: ZERO_COST,
     contextWindow: 1000000,
@@ -115,7 +115,7 @@ export const kiroModels: KiroModel[] = [
     provider: "kiro",
     baseUrl: BASE_URL,
     reasoning: true,
-    thinkingLevelMap: { xhigh: "max" },
+    thinkingLevelMap: { max: "max" },
     input: ["text", "image"],
     cost: ZERO_COST,
     contextWindow: 1000000,
@@ -168,7 +168,7 @@ export const kiroModels: KiroModel[] = [
     provider: "kiro",
     baseUrl: BASE_URL,
     reasoning: true,
-    thinkingLevelMap: { xhigh: "xhigh" },
+    thinkingLevelMap: { xhigh: "xhigh", max: "max" },
     input: ["text", "image"],
     cost: ZERO_COST,
     contextWindow: 1000000,
@@ -386,7 +386,7 @@ function deriveThinkingLevelMap(effortValues: readonly string[] | undefined): Th
   if (!effortValues) return undefined;
   const thinkingLevelMap: ThinkingLevelMap = {};
   if (effortValues.includes("xhigh")) thinkingLevelMap.xhigh = "xhigh";
-  else if (effortValues.includes("max")) thinkingLevelMap.xhigh = "max";
+  if (effortValues.includes("max")) thinkingLevelMap.max = "max";
   return Object.keys(thinkingLevelMap).length > 0 ? thinkingLevelMap : undefined;
 }
 
