@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-07-24
+
+### Fixed
+
+- Restore `max` as a distinct thinking level instead of aliasing it to the highest catalog-listed effort ([#99](https://github.com/mikeyobrien/pi-provider-kiro/pull/99)).
+
 ## [0.9.2] - 2026-07-22
 
 ### Fixed
@@ -194,7 +200,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release: 17 models across 7 families, OAuth device code flow, kiro-cli SQLite credential fallback, streaming pipeline with thinking tag parser
 
-[Unreleased]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.8.1...v0.9.0
