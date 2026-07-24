@@ -181,7 +181,7 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
-  it("emits native summarized thinking text and preserves its signature", async () => {
+  it("emits native summarized thinking at max effort and preserves its signature", async () => {
     const mockFetch = mockFetchOk(
       '{"text":"Considering "}{"text":"divisibility"}{"signature":"opaque-signature"}{"content":"No"}{"contextUsagePercentage":10}',
     );
@@ -193,6 +193,7 @@ describe("Feature 9: Streaming Integration", () => {
           makeModel({
             id: "claude-sonnet-5",
             kiroModelId: "claude-sonnet-5",
+            thinkingLevelMap: { xhigh: "xhigh", max: "max" },
             additionalModelRequestFieldsSchema: {
               type: "object",
               properties: {
@@ -202,19 +203,19 @@ describe("Feature 9: Streaming Integration", () => {
                 },
                 output_config: {
                   type: "object",
-                  properties: { effort: { type: "string", enum: ["low", "medium", "high", "xhigh"] } },
+                  properties: { effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max"] } },
                 },
               },
             },
           }),
           makeContext(),
-          { apiKey: "test-token", reasoning: "high" },
+          { apiKey: "test-token", reasoning: "max" },
         ),
       );
 
       const body = JSON.parse(mockFetch.mock.calls[0][1].body);
       expect(body.additionalModelRequestFields).toEqual({
-        output_config: { effort: "high" },
+        output_config: { effort: "max" },
         thinking: { type: "adaptive", display: "summarized" },
       });
       const types = events.map((event) => event.type);
@@ -302,7 +303,7 @@ describe("Feature 9: Streaming Integration", () => {
         id: "claude-opus-4-8",
         kiroModelId: "claude-opus-4.8",
         name: "Claude Opus 4.8",
-        thinkingLevelMap: { xhigh: "xhigh" },
+        thinkingLevelMap: { xhigh: "xhigh", max: "max" },
         additionalModelRequestFieldsSchema: effortSchema("output_config", ["low", "medium", "high", "xhigh", "max"]),
       },
       reasoning: "xhigh" as const,
@@ -315,7 +316,7 @@ describe("Feature 9: Streaming Integration", () => {
         id: "claude-sonnet-4-6",
         kiroModelId: "claude-sonnet-4.6",
         name: "Claude Sonnet 4.6",
-        thinkingLevelMap: { xhigh: "max" },
+        thinkingLevelMap: { max: "max" },
         additionalModelRequestFieldsSchema: effortSchema("output_config", ["low", "medium", "high", "max"]),
       },
       reasoning: "xhigh" as const,
@@ -369,7 +370,7 @@ describe("Feature 9: Streaming Integration", () => {
           id: "claude-opus-4-8",
           kiroModelId: "claude-opus-4.8",
           name: "Claude Opus 4.8",
-          thinkingLevelMap: { xhigh: "xhigh" },
+          thinkingLevelMap: { xhigh: "xhigh", max: "max" },
           additionalModelRequestFieldsSchema: { type: "object", properties: {}, additionalProperties: false },
         }),
         makeContext(),
