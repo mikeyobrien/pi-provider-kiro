@@ -218,6 +218,7 @@ export function getKiroCliSocialTokenAllowExpired(): KiroCredentials | undefined
 const TOKEN_KEY_BY_AUTH_METHOD: Record<KiroAuthMethod, string[]> = {
   idc: ["kirocli:odic:token", "codewhisperer:odic:token"],
   desktop: ["kirocli:social:token"],
+  apikey: [],
 };
 
 export function saveKiroCliCredentials(creds: KiroCredentials): void {

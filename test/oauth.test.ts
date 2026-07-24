@@ -168,4 +168,29 @@ describe("Feature 3: OAuth — Token Refresh", () => {
       vi.unstubAllGlobals();
     });
   });
+
+  describe("loginKiroWithApiKey", () => {
+    it("validates Kiro API key format", async () => {
+      const { loginKiroWithApiKey } = await import("../src/oauth.js");
+      await expect(loginKiroWithApiKey({} as any, "invalid_key")).rejects.toThrow("Invalid API key format");
+    });
+
+    it("fetches profile with GetProfile and returns apikey credentials", async () => {
+      const { loginKiroWithApiKey } = await import("../src/oauth.js");
+      const mockFetch = vi.fn().mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ profile: { arn: "arn:aws:codewhisperer:us-east-1:123:profile/api-key" } }),
+      });
+      vi.stubGlobal("fetch", mockFetch);
+
+      const creds = await loginKiroWithApiKey({ onProgress: vi.fn() } as any, "ksk_test_key_12345");
+      expect(creds.access).toBe("ksk_test_key_12345");
+      expect(creds.refresh).toBe("ksk_test_key_12345|apikey");
+      expect((creds as KiroCredentials).authMethod).toBe("apikey");
+      expect((creds as KiroCredentials).profileArn).toBe("arn:aws:codewhisperer:us-east-1:123:profile/api-key");
+      expect(mockFetch.mock.calls[0][1].headers.tokentype).toBe("API_KEY");
+
+      vi.unstubAllGlobals();
+    });
+  });
 });

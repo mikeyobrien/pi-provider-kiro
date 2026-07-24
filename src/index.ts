@@ -26,6 +26,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerProvider("kiro", {
     baseUrl: getKiroEndpoints("us-east-1").runtime,
     api: "kiro-api",
+    apiKey: "$KIRO_API_KEY",
     models: kiroModels,
     oauth: {
       // Name reflects all supported auth methods: AWS Builder ID, Google, GitHub

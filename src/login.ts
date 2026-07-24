@@ -13,11 +13,26 @@
 // common AWS OIDC endpoints. Inference/API region is derived from SSO
 // region automatically via resolveApiRegion() in models.ts.
 
+import crypto from "node:crypto";
+import http from "node:http";
 import { execFileSync } from "node:child_process";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { formatSafeError } from "./debug.js";
-import { showLoginUI } from "./login-ui.js";
-import { BUILDER_ID_START_URL, type KiroAuthMethod, type KiroCredentials, SSO_SCOPES } from "./oauth.js";
+import { hasExtensionContext, showLoginUI, showWaitingUI } from "./login-ui.js";
+import {
+  BUILDER_ID_PROFILE_ARN,
+  BUILDER_ID_START_URL,
+  type KiroAuthMethod,
+  type KiroCredentials,
+  kiroUserAgent,
+  loginKiroWithApiKey,
+  SSO_SCOPES,
+} from "./oauth.js";
+
+const oidcHeaders = (): Record<string, string> => ({
+  "Content-Type": "application/json",
+  ...kiroUserAgent("ssooidc", "E"),
+});
 
 type PromptFn = (p: { message: string; placeholder?: string; allowEmpty?: boolean }) => Promise<string>;
 
@@ -66,21 +81,52 @@ type DeviceAuth = {
  * This avoids pi's stacked-input bug where sequential onPrompt calls
  * render simultaneously with mirrored cursors.
  */
-export async function interactiveLogin(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-  // Try native TUI component first (requires ctx from session_start)
-  const choice = await showLoginUI();
+export async function interactiveLogin(
+  callbacks: OAuthLoginCallbacks,
+  hasCached?: boolean,
+): Promise<OAuthCredentials | "use-cached-credentials"> {
+  while (true) {
+    const choice = await showLoginUI(hasCached);
 
-  if (choice) {
-    switch (choice.method) {
-      case "builder-id":
-        return runDeviceCodeFlow(callbacks, BUILDER_ID_START_URL, "us-east-1");
-      case "idc":
-        return runDeviceCodeFlowWithRegionDetection(callbacks, choice.startUrl);
-      case "google":
-        return loginViaKiroCli(callbacks, "google");
-      case "github":
-        return loginViaKiroCli(callbacks, "github");
+    if (choice) {
+      if (choice.method === "cached") {
+        return "use-cached-credentials";
+      }
+
+      const runAuth = async (mergedCallbacks: OAuthLoginCallbacks) => {
+        switch (choice.method) {
+          case "builder-id":
+            return runDeviceCodeFlow(mergedCallbacks, BUILDER_ID_START_URL, "us-east-1");
+          case "google":
+            return loginViaKiroCli(mergedCallbacks, "google");
+          case "github":
+            return loginViaKiroCli(mergedCallbacks, "github");
+          case "personal":
+            return runSocialLoginFlow(mergedCallbacks);
+          case "idc":
+            if (choice.region) {
+              return runDeviceCodeFlow(mergedCallbacks, choice.startUrl, choice.region);
+            }
+            return runDeviceCodeFlowWithRegionDetection(mergedCallbacks, choice.startUrl);
+          case "apikey":
+            return loginKiroWithApiKey(mergedCallbacks, choice.apiKey);
+          default:
+            throw new Error("Unknown login method");
+        }
+      };
+
+      const creds = await showWaitingUI(callbacks, choice, runAuth);
+      if (creds) {
+        return creds;
+      }
+      // If cancelled/failed inside the waiting UI, loop back to show main menu again
+      continue;
     }
+
+    if (hasExtensionContext()) {
+      throw new Error("Login cancelled");
+    }
+    break;
   }
 
   // Fallback: single onPrompt (ctx not available, e.g. first run before session_start)
@@ -113,9 +159,9 @@ async function tryRegisterAndAuthorize(
 
   const regResp = await fetch(`${oidcEndpoint}/client/register`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "User-Agent": "pi-cli" },
+    headers: oidcHeaders(),
     body: JSON.stringify({
-      clientName: "pi-cli",
+      clientName: "Kiro CLI",
       clientType: "public",
       scopes: SSO_SCOPES,
       grantTypes: ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"],
@@ -126,7 +172,7 @@ async function tryRegisterAndAuthorize(
 
   const devResp = await fetch(`${oidcEndpoint}/device_authorization`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "User-Agent": "pi-cli" },
+    headers: oidcHeaders(),
     body: JSON.stringify({ clientId, clientSecret, startUrl }),
   });
   if (!devResp.ok) return null;
@@ -144,7 +190,15 @@ async function runDeviceCodeFlow(
 ): Promise<OAuthCredentials> {
   const result = await tryRegisterAndAuthorize(startUrl, region);
   if (!result) throw new Error(`Device authorization failed in ${region}`);
-  return pollDeviceCode(callbacks, result.clientId, result.clientSecret, region, result.oidcEndpoint, result.devAuth);
+  return pollDeviceCode(
+    callbacks,
+    result.clientId,
+    result.clientSecret,
+    region,
+    result.oidcEndpoint,
+    result.devAuth,
+    startUrl,
+  );
 }
 
 /**
@@ -168,6 +222,7 @@ async function runDeviceCodeFlowWithRegionDetection(
         region,
         result.oidcEndpoint,
         result.devAuth,
+        startUrl,
       );
     }
   }
@@ -188,6 +243,7 @@ async function pollDeviceCode(
   region: string,
   oidcEndpoint: string,
   devAuth: DeviceAuth,
+  startUrl?: string,
 ): Promise<OAuthCredentials> {
   (callbacks as unknown as { onAuth: (info: { url: string; instructions: string }) => void }).onAuth({
     url: devAuth.verificationUriComplete,
@@ -204,7 +260,7 @@ async function pollDeviceCode(
 
     const tokResp = await fetch(`${oidcEndpoint}/token`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "User-Agent": "pi-cli" },
+      headers: oidcHeaders(),
       body: JSON.stringify({
         clientId,
         clientSecret,
@@ -230,6 +286,8 @@ async function pollDeviceCode(
             clientSecret,
             region,
             authMethod: "idc" as KiroAuthMethod,
+            startUrl,
+            ...(startUrl === BUILDER_ID_START_URL ? { profileArn: BUILDER_ID_PROFILE_ARN } : {}),
           } satisfies KiroCredentials;
         }
         break;
@@ -243,6 +301,208 @@ async function pollDeviceCode(
     }
   }
   throw new Error("Authorization timed out");
+}
+
+function generatePkce() {
+  const codeVerifier = crypto.randomBytes(32).toString("base64url");
+  const codeChallenge = crypto.createHash("sha256").update(codeVerifier).digest("base64url");
+  return { codeVerifier, codeChallenge };
+}
+
+/**
+ * Social login flow with PKCE using a local localhost server callback.
+ */
+export async function runSocialLoginFlow(
+  callbacks: OAuthLoginCallbacks,
+  provider?: "google" | "github",
+): Promise<OAuthCredentials> {
+  const region = "us-east-1";
+  const state = crypto.randomBytes(16).toString("hex");
+  const { codeVerifier, codeChallenge } = generatePkce();
+  const redirectUri = `http://localhost:3128`;
+
+  const authUrl = `https://app.kiro.dev/signin?state=${state}&code_challenge=${codeChallenge}&code_challenge_method=S256&redirect_uri=${encodeURIComponent(redirectUri)}&redirect_from=kirocli${provider ? `&login_option=${provider}` : ""}`;
+
+  return new Promise<OAuthCredentials>((resolve, reject) => {
+    let server: http.Server | undefined;
+    const signal = getSignal(callbacks);
+
+    const cleanup = () => {
+      if (server) {
+        server.close();
+        server = undefined;
+      }
+    };
+
+    if (signal?.aborted) {
+      return reject(signal.reason);
+    }
+
+    signal?.addEventListener("abort", () => {
+      cleanup();
+      reject(signal.reason);
+    });
+
+    server = http.createServer(async (req, res) => {
+      try {
+        const reqUrl = new URL(req.url || "", `http://${req.headers.host}`);
+        const allowedPaths = ["/", "/oauth/callback", "/signin/callback"];
+        if (!allowedPaths.includes(reqUrl.pathname)) {
+          res.writeHead(404);
+          res.end("Not Found");
+          return;
+        }
+
+        const stateParam = reqUrl.searchParams.get("state");
+
+        if (stateParam !== state) {
+          res.writeHead(400, { "Content-Type": "text/html" });
+          res.end("<h3>Authentication failed: invalid state</h3>");
+          cleanup();
+          reject(new Error("State mismatch"));
+          return;
+        }
+
+        const issuerUrl = reqUrl.searchParams.get("issuer_url");
+        if (issuerUrl) {
+          const idcRegion = reqUrl.searchParams.get("idc_region") || "us-east-1";
+
+          const result = await tryRegisterAndAuthorize(issuerUrl, idcRegion);
+          if (!result) {
+            res.writeHead(500, { "Content-Type": "text/html" });
+            res.end("<h3>Failed to initiate AWS SSO authorization</h3>");
+            cleanup();
+            reject(new Error(`Device authorization failed in ${idcRegion}`));
+            return;
+          }
+
+          res.writeHead(302, {
+            Location: result.devAuth.verificationUriComplete,
+          });
+          res.end();
+
+          cleanup();
+
+          try {
+            const idcCreds = await pollDeviceCode(
+              callbacks,
+              result.clientId,
+              result.clientSecret,
+              idcRegion,
+              result.oidcEndpoint,
+              result.devAuth,
+              issuerUrl,
+            );
+            resolve(idcCreds);
+          } catch (err) {
+            reject(err);
+          }
+          return;
+        }
+
+        const codeParam = reqUrl.searchParams.get("code");
+
+        if (!codeParam) {
+          res.writeHead(400, { "Content-Type": "text/html" });
+          res.end("<h3>Authentication failed: missing authorization code</h3>");
+          cleanup();
+          reject(new Error("Missing authorization code"));
+          return;
+        }
+
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(`
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>Kiro Sign In</title>
+            <style>
+              body { font-family: -apple-system, sans-serif; text-align: center; padding: 50px; background-color: #f9f9f9; }
+              .card { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); display: inline-block; }
+              h2 { color: #2ecc71; }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <h2>Sign In Successful!</h2>
+              <p>You have successfully logged in to Kiro CLI. You can now close this tab.</p>
+            </div>
+          </body>
+          </html>
+        `);
+
+        cleanup();
+
+        getProgress(callbacks)?.(`Exchanging auth code for tokens...`);
+        const tokenUrl = `https://prod.${region}.auth.desktop.kiro.dev/oauth/token`;
+        const loginOption = reqUrl.searchParams.get("login_option");
+        const actualRedirectUri = `http://localhost:3128${reqUrl.pathname === "/" ? "" : reqUrl.pathname}${loginOption ? `?login_option=${loginOption}` : ""}`;
+        const response = await fetch(tokenUrl, {
+          method: "POST",
+          headers: oidcHeaders(),
+          body: JSON.stringify({
+            code: codeParam,
+            code_verifier: codeVerifier,
+            redirect_uri: actualRedirectUri,
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Token exchange failed: ${response.status} ${response.statusText}`);
+        }
+
+        const data = (await response.json()) as {
+          accessToken: string;
+          refreshToken?: string;
+          expiresIn: number;
+          profileArn?: string;
+        };
+
+        if (!data.accessToken) {
+          throw new Error("Missing accessToken in response");
+        }
+
+        const creds = {
+          refresh: `${data.refreshToken || ""}|desktop`,
+          access: data.accessToken,
+          expires: Date.now() + data.expiresIn * 1000 - 5 * 60 * 1000,
+          clientId: "",
+          clientSecret: "",
+          region,
+          authMethod: "desktop" as const,
+          profileArn: data.profileArn,
+        };
+
+        try {
+          const { saveKiroCliCredentials } = await import("./kiro-cli.js");
+          saveKiroCliCredentials(creds);
+        } catch {
+          // Ignore write errors
+        }
+
+        getProgress(callbacks)?.("Google/GitHub login successful");
+        resolve(creds);
+      } catch (err) {
+        cleanup();
+        reject(err);
+      }
+    });
+
+    server.on("error", (err) => {
+      cleanup();
+      reject(new Error(`Failed to start local OAuth server on port 3128: ${err.message}`));
+    });
+
+    server.listen(3128, () => {
+      getProgress(callbacks)?.(`Please complete login in your browser...`);
+      (callbacks as unknown as { onAuth: (info: { url: string; instructions: string }) => void }).onAuth({
+        url: authUrl,
+        instructions: provider
+          ? `Click to sign in via ${provider === "google" ? "Google" : "GitHub"}.`
+          : "Click to sign in with your preferred account.",
+      });
+    });
+  });
 }
 
 /**
