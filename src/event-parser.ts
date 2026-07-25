@@ -3,6 +3,8 @@
 
 export type KiroStreamEvent =
   | { type: "content"; data: string }
+  | { type: "thinkingText"; data: string }
+  | { type: "thinkingSignature"; data: string }
   | { type: "toolUse"; data: { name: string; toolUseId: string; input: string; stop?: boolean } }
   | { type: "toolUseInput"; data: { input: string } }
   | { type: "toolUseStop"; data: { stop: boolean } }
@@ -13,6 +15,8 @@ export type KiroStreamEvent =
 
 export function parseKiroEvent(parsed: Record<string, unknown>): KiroStreamEvent | null {
   if (parsed.content !== undefined) return { type: "content", data: parsed.content as string };
+  if (typeof parsed.text === "string") return { type: "thinkingText", data: parsed.text };
+  if (typeof parsed.signature === "string") return { type: "thinkingSignature", data: parsed.signature };
   if (parsed.name && parsed.toolUseId) {
     const input =
       typeof parsed.input === "string"

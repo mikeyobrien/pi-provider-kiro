@@ -30,6 +30,20 @@ describe("Feature 8: Stream Event Parsing", () => {
       expect(parseKiroEvent({ content: "Hello " })).toEqual({ type: "content", data: "Hello " });
     });
 
+    it("parses summarized thinking text", () => {
+      expect(parseKiroEvent({ text: "Considering options" })).toEqual({
+        type: "thinkingText",
+        data: "Considering options",
+      });
+    });
+
+    it("parses summarized thinking signature", () => {
+      expect(parseKiroEvent({ signature: "opaque-signature" })).toEqual({
+        type: "thinkingSignature",
+        data: "opaque-signature",
+      });
+    });
+
     it("parses toolUse event", () => {
       const e = parseKiroEvent({ name: "bash", toolUseId: "tc1", input: '{"cmd":"ls"}' });
       expect(e?.type).toBe("toolUse");

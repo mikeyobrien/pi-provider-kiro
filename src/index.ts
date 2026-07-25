@@ -2,12 +2,12 @@
 //
 // Entry point that wires all features together via pi.registerProvider().
 
-import type { Api, Model, OAuthCredentials } from "@earendil-works/pi-ai";
+import type { Api, Model, OAuthCredentials, RefreshModelsContext } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getKiroEndpoints, resolveApiRegion } from "./endpoints.js";
 import { getKiroCliCredentials } from "./kiro-cli.js";
 import { setExtensionContext } from "./login-ui.js";
-import { getCachedModels, isCacheStale, kiroModels, updateKiroModelsCache } from "./models.js";
+import { getCachedModels, isCacheStale, type KiroModel, kiroModels, updateKiroModelsCache } from "./models.js";
 import type { KiroCredentials } from "./oauth.js";
 import { loginKiro, refreshKiroToken } from "./oauth.js";
 import { streamKiro } from "./stream.js";
@@ -18,52 +18,28 @@ export type { KiroStreamEvent } from "./event-parser.js";
 export { KIRO_MODEL_IDS, kiroModels, resolveKiroModel } from "./models.js";
 export { streamKiro } from "./stream.js";
 
-interface KiroModelRefreshContext {
-  credential?: OAuthCredentials | { type: "api_key"; key: string };
-  allowNetwork: boolean;
-  force?: boolean;
-  signal?: AbortSignal;
-}
+/**
+ * Host-driven catalog refresh. `oauth.modifyModels` only projects whatever the
+ * cache already holds, so this is the path that actually fetches when the host
+ * asks for a refresh or the cache has gone stale. The composer re-applies
+ * `modifyModels` on top of the returned list, so region/profileArn projection
+ * still happens here.
+ */
+async function refreshKiroModels(context: RefreshModelsContext): Promise<KiroModel[]> {
+  const credential = context.credential;
+  const oauthCredential = credential?.type === "oauth" ? (credential as unknown as KiroCredentials) : undefined;
+  const accessToken = oauthCredential?.access ?? (credential?.type === "api_key" ? credential.key : undefined);
+  const region = resolveApiRegion(oauthCredential?.region);
 
-async function refreshKiroModels(context: KiroModelRefreshContext): Promise<Model<Api>[]> {
-  let credential = context.credential;
-
-  // Auto-resolve credentials if not explicitly passed in context
-  if (!credential) {
-    if (process.env.KIRO_API_KEY) {
-      credential = { type: "api_key", key: process.env.KIRO_API_KEY };
-    } else {
-      const { getKiroCliCredentials, getKiroCliSocialToken } = await import("./kiro-cli.js");
-      const { getKiroIdeCredentials } = await import("./kiro-ide.js");
-      const cliCreds = getKiroCliSocialToken() || getKiroCliCredentials() || getKiroIdeCredentials();
-      if (cliCreds?.access) {
-        credential = cliCreds;
-      }
-    }
-  }
-
-  const apiRegion =
-    credential && "region" in credential && typeof credential.region === "string"
-      ? resolveApiRegion(credential.region)
-      : "us-east-1";
-
-  if (credential && context.allowNetwork && (context.force || isCacheStale(apiRegion))) {
+  if (accessToken && context.allowNetwork && (context.force || isCacheStale(region))) {
     try {
-      if ("type" in credential && credential.type === "api_key" && typeof (credential as { key?: string }).key === "string") {
-        await updateKiroModelsCache((credential as { key: string }).key, apiRegion);
-      } else if ("access" in credential && typeof (credential as { access?: string }).access === "string" && (credential as { access: string }).access) {
-        const credObj = credential as { access: string; profileArn?: string };
-        await updateKiroModelsCache(credObj.access, apiRegion, credObj.profileArn);
-      }
+      await updateKiroModelsCache(accessToken, region, oauthCredential?.profileArn);
     } catch {
-      // Fallback to cached
+      // Serve the cached catalog when discovery fails.
     }
   }
 
-  if (context.signal?.aborted) return [];
-
-  const cachedModels = getCachedModels(apiRegion);
-  return cachedModels.length > 0 ? cachedModels : kiroModels;
+  return getCachedModels(region);
 }
 
 export default function (pi: ExtensionAPI) {
@@ -74,8 +50,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerProvider("kiro", {
     baseUrl: getKiroEndpoints("us-east-1").runtime,
     api: "kiro-api",
-    apiKey: "$KIRO_API_KEY",
-    models: getCachedModels("us-east-1"),
+    models: kiroModels,
     refreshModels: refreshKiroModels,
     oauth: {
       // Name reflects all supported auth methods: AWS Builder ID, Google, GitHub
@@ -87,10 +62,9 @@ export default function (pi: ExtensionAPI) {
       modifyModels: (models: Model<Api>[], cred: OAuthCredentials) => {
         const apiRegion = resolveApiRegion((cred as KiroCredentials).region);
         const cachedKiro = getCachedModels(apiRegion);
-        const kiroToModify = cachedKiro.length > 0 ? cachedKiro : models.filter((m: Model<Api>) => m.provider === "kiro");
         const nonKiro = models.filter((m: Model<Api>) => m.provider !== "kiro");
         const credentialProfileArn = (cred as KiroCredentials).profileArn;
-        const modifiedKiro = kiroToModify.map((m: Model<Api>) => ({
+        const modifiedKiro = cachedKiro.map((m: Model<Api>) => ({
           ...m,
           baseUrl: getKiroEndpoints(apiRegion).runtime,
           kiroRegion: apiRegion,
@@ -103,5 +77,5 @@ export default function (pi: ExtensionAPI) {
       // biome-ignore lint/suspicious/noExplicitAny: ProviderConfig.oauth doesn't include getCliCredentials but OAuthProviderInterface does
     } as any,
     streamSimple: streamKiro,
-  } as any);
+  });
 }
