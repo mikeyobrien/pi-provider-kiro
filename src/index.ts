@@ -4,6 +4,7 @@
 
 import type { Api, Model, OAuthCredentials, RefreshModelsContext } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { formatSafeError } from "./debug.js";
 import { getKiroEndpoints, resolveApiRegion } from "./endpoints.js";
 import { getKiroCliCredentials } from "./kiro-cli.js";
 import { setExtensionContext } from "./login-ui.js";
@@ -24,6 +25,10 @@ export { streamKiro } from "./stream.js";
  * asks for a refresh or the cache has gone stale. The composer re-applies
  * `modifyModels` on top of the returned list, so region/profileArn projection
  * still happens here.
+ *
+ * Persistence uses the existing Kiro management file cache
+ * (`updateKiroModelsCache` / `~/.kiro-management-models-cache.json`) rather than
+ * `context.store`, so oauth/stream and host refresh share one catalog source.
  */
 async function refreshKiroModels(context: RefreshModelsContext): Promise<KiroModel[]> {
   const credential = context.credential;
@@ -34,8 +39,9 @@ async function refreshKiroModels(context: RefreshModelsContext): Promise<KiroMod
   if (accessToken && context.allowNetwork && (context.force || isCacheStale(region))) {
     try {
       await updateKiroModelsCache(accessToken, region, oauthCredential?.profileArn);
-    } catch {
+    } catch (error) {
       // Serve the cached catalog when discovery fails.
+      console.warn(`[pi-provider-kiro] Failed to refresh Kiro model catalog in ${region}: ${formatSafeError(error)}`);
     }
   }
 

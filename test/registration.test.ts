@@ -1,4 +1,5 @@
 import { rmSync } from "node:fs";
+import type { ProviderModelsStore } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getKiroCliCredentials } from "../src/kiro-cli.js";
@@ -8,6 +9,13 @@ const mockPi = () => {
   const registerProvider = vi.fn();
   return { pi: { registerProvider, on: vi.fn() } as unknown as ExtensionAPI, registerProvider };
 };
+
+/** Minimal host store fixture — refreshKiroModels intentionally uses the Kiro file cache instead. */
+const mockProviderModelsStore = (): ProviderModelsStore => ({
+  read: vi.fn(async () => undefined),
+  write: vi.fn(async () => {}),
+  delete: vi.fn(async () => {}),
+});
 
 describe("Feature 1: Extension Registration", () => {
   it("exports a default function", async () => {
@@ -86,7 +94,11 @@ describe("Feature 1: Extension Registration", () => {
       const fetchMock = vi.fn();
       vi.stubGlobal("fetch", fetchMock);
 
-      const models = await (await refreshModels())({ allowNetwork: true, force: true });
+      const models = await (await refreshModels())({
+        allowNetwork: true,
+        force: true,
+        store: mockProviderModelsStore(),
+      });
 
       expect(fetchMock).not.toHaveBeenCalled();
       expect(models).toEqual(kiroModels);
@@ -102,6 +114,7 @@ describe("Feature 1: Extension Registration", () => {
       const models = await (await refreshModels())({
         allowNetwork: true,
         force: true,
+        store: mockProviderModelsStore(),
         credential: {
           type: "oauth",
           access: "refresh-access",
@@ -118,15 +131,19 @@ describe("Feature 1: Extension Registration", () => {
     });
 
     it("falls back to the cached catalog when discovery fails", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
 
       const models = await (await refreshModels())({
         allowNetwork: true,
         force: true,
+        store: mockProviderModelsStore(),
         credential: { type: "oauth", access: "a", refresh: "r", expires: 0, region: "us-east-1", profileArn: "arn:p" },
       });
 
       expect(models).toEqual(kiroModels);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("Failed to refresh Kiro model catalog"));
+      warn.mockRestore();
     });
   });
 
