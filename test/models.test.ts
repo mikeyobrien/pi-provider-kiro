@@ -75,6 +75,7 @@ afterEach(() => {
 describe("Feature 2: Model Definitions", () => {
   describe("resolveKiroModel", () => {
     it.each([
+      ["claude-opus-5", "claude-opus-5"],
       ["claude-opus-4-8", "claude-opus-4.8"],
       ["claude-sonnet-5", "claude-sonnet-5"],
       ["claude-haiku-4-5", "claude-haiku-4.5"],
@@ -263,7 +264,7 @@ describe("Feature 2: Model Definitions", () => {
 
   describe("bootstrap model catalog", () => {
     it("keeps conservative, zero-cost bootstrap metadata", () => {
-      expect(kiroModels).toHaveLength(15);
+      expect(kiroModels).toHaveLength(16);
       expect(kiroModels.every((model) => model.baseUrl === "https://runtime.us-east-1.kiro.dev/")).toBe(true);
       expect(kiroModels.every((model) => model.cost.input === 0 && model.cost.output === 0)).toBe(true);
       expect(kiroModels.find((model) => model.id === "claude-haiku-4-5")?.reasoning).toBe(false);
@@ -282,7 +283,13 @@ describe("Feature 2: Model Definitions", () => {
     const THROUGH_HIGH = ["off", "minimal", "low", "medium", "high"] satisfies ModelThinkingLevel[];
     const THROUGH_XHIGH_AND_MAX = [...THROUGH_HIGH, "xhigh", "max"] satisfies ModelThinkingLevel[];
     const THROUGH_HIGH_AND_MAX = [...THROUGH_HIGH, "max"] satisfies ModelThinkingLevel[];
-    const XHIGH_AND_MAX_MODELS = ["claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-5", "claude-fable-5"];
+    const XHIGH_AND_MAX_MODELS = [
+      "claude-opus-5",
+      "claude-opus-4-8",
+      "claude-opus-4-7",
+      "claude-sonnet-5",
+      "claude-fable-5",
+    ];
     const MAX_WITHOUT_XHIGH_MODELS = ["claude-opus-4-6", "claude-sonnet-4-6"];
 
     it("advertises xhigh and max independently when both are supported", () => {

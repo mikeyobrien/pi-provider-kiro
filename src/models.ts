@@ -50,6 +50,21 @@ interface ManagementModelsCache {
 
 export const kiroModels: KiroModel[] = [
   {
+    id: "claude-opus-5",
+    kiroModelId: "claude-opus-5",
+    name: "Claude Opus 5",
+    api: "kiro-api",
+    provider: "kiro",
+    baseUrl: BASE_URL,
+    reasoning: true,
+    thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+    input: ["text", "image"],
+    cost: ZERO_COST,
+    contextWindow: 1000000,
+    maxTokens: 128000,
+    firstTokenTimeout: 180_000,
+  },
+  {
     id: "claude-opus-4-8",
     kiroModelId: "claude-opus-4.8",
     name: "Claude Opus 4.8",
