@@ -29,7 +29,13 @@ import {
 } from "./effort.js";
 import { getKiroEndpoints, getKiroRegionFromEndpoint } from "./endpoints.js";
 import { parseKiroEvent } from "./event-parser.js";
-import { addPlaceholderTools, HISTORY_LIMIT, HISTORY_LIMIT_CONTEXT_WINDOW, truncateHistory } from "./history.js";
+import {
+  addPlaceholderTools,
+  assertHistoryWithinLimit,
+  HISTORY_LIMIT,
+  HISTORY_LIMIT_CONTEXT_WINDOW,
+  prepareHistory,
+} from "./history.js";
 import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, refreshViaKiroCli } from "./kiro-cli.js";
 import {
   invalidateKiroProfileArn,
@@ -279,10 +285,9 @@ export function streamKiro(
           systemPrepended,
           currentMsgStartIdx,
         } = buildHistory(normalized, kiroModelId, effectiveSystemPrompt);
-        // Scale history limit to model context window
-        // HISTORY_LIMIT (850K chars) is sized for 200K token models
+        // Preserve semantic context locally; Pi owns lossy compaction.
+        const history = prepareHistory(rawHistory);
         const dynamicHistoryLimit = Math.floor((model.contextWindow / HISTORY_LIMIT_CONTEXT_WINDOW) * HISTORY_LIMIT);
-        const history = truncateHistory(rawHistory, dynamicHistoryLimit);
         const toolResultLimit = TOOL_RESULT_LIMIT;
         const currentMessages = normalized.slice(currentMsgStartIdx);
         const firstMsg = currentMessages[0];
@@ -368,6 +373,9 @@ export function streamKiro(
           if (effectiveSystemPrompt && !systemPrepended)
             currentContent = `${effectiveSystemPrompt}\n\n${currentContent}`;
         }
+        // Current assistant tool calls are outbound history too, so enforce the
+        // budget only after they have been appended.
+        assertHistoryWithinLimit(history, dynamicHistoryLimit);
         // Prepend truncation notice if the previous assistant response was cut off
         if (wasPreviousResponseTruncated(context.messages)) {
           currentContent = `${TRUNCATION_NOTICE}\n\n${currentContent}`;

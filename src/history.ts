@@ -71,16 +71,18 @@ export function injectSyntheticToolCalls(history: KiroHistoryEntry[]): KiroHisto
   return result;
 }
 
-export function truncateHistory(history: KiroHistoryEntry[], limit: number): KiroHistoryEntry[] {
-  let sanitized = sanitizeHistory(stripHistoryImages(history));
-  let historySize = JSON.stringify(sanitized).length;
-  while (historySize > limit && sanitized.length > 2) {
-    sanitized.shift();
-    while (sanitized.length > 0 && !sanitized[0]?.userInputMessage) sanitized.shift();
-    sanitized = sanitizeHistory(sanitized);
-    historySize = JSON.stringify(sanitized).length;
+export function prepareHistory(history: KiroHistoryEntry[]): KiroHistoryEntry[] {
+  return injectSyntheticToolCalls(sanitizeHistory(stripHistoryImages(history)));
+}
+
+/** Fail before sending rather than silently discarding conversation context. */
+export function assertHistoryWithinLimit(history: KiroHistoryEntry[], limit: number): void {
+  const size = JSON.stringify(history).length;
+  if (size > limit) {
+    throw new Error(
+      `Kiro API error: context_length_exceeded (local history ${size} chars / ${history.length} entries exceeds ${limit}-char limit)`,
+    );
   }
-  return injectSyntheticToolCalls(sanitized);
 }
 
 export function extractToolNamesFromHistory(history: KiroHistoryEntry[]): Set<string> {

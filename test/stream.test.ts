@@ -8,6 +8,7 @@ import type {
   TextContent,
   ToolResultMessage,
 } from "@earendil-works/pi-ai";
+import { isContextOverflow } from "@earendil-works/pi-ai/compat";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { findJsonEnd } from "../src/bracket-tool-parser.js";
 import { capacityRetryConfig, retryConfig } from "../src/retry.js";
@@ -53,6 +54,50 @@ function makeContext(userMsg = "Hello"): Context {
     systemPrompt: "You are helpful",
     messages: [{ role: "user", content: userMsg, timestamp: Date.now() }],
     tools: [],
+  };
+}
+
+function makeToolCall(id: string): AssistantMessage {
+  return {
+    role: "assistant",
+    content: [{ type: "toolCall", id, name: "read", arguments: { path: `/tmp/${id}` } }],
+    api: "kiro-api",
+    provider: "kiro",
+    model: "claude-sonnet-4-5",
+    usage: zeroUsage,
+    stopReason: "toolUse",
+    timestamp: ts,
+  };
+}
+
+function makeToolResult(id: string): ToolResultMessage {
+  return {
+    role: "toolResult",
+    toolCallId: id,
+    toolName: "read",
+    content: [{ type: "text", text: "x".repeat(300) }],
+    isError: false,
+    timestamp: ts,
+  };
+}
+
+function makeCompactedToolContext(): Context {
+  return {
+    systemPrompt: "SYSTEM_MARKER",
+    messages: [
+      {
+        role: "user",
+        content: "The conversation was compacted:\n\n<summary>COMPACTION_SUMMARY_MARKER</summary>",
+        timestamp: ts,
+      },
+      makeToolCall("tc1"),
+      makeToolResult("tc1"),
+      makeToolCall("tc2"),
+      makeToolResult("tc2"),
+      makeToolCall("tc3"),
+      makeToolResult("tc3"),
+    ],
+    tools: [{ name: "read", description: "Read a file", parameters: { type: "object", properties: {} } }],
   };
 }
 
@@ -1435,6 +1480,55 @@ describe("Feature 9: Streaming Integration", () => {
     const error = events.find((e) => e.type === "error");
     expect(error).toBeDefined();
     expect(error?.type === "error" && error.error.stopReason).toBe("error");
+
+    vi.unstubAllGlobals();
+  });
+
+  // =========================================================================
+  // Local overflow recovery and post-compaction context preservation
+  // =========================================================================
+
+  it("sends the system/compaction anchor and complete tool groups when within budget", async () => {
+    const mockFetch = mockFetchOk('{"content":"Done"}{"contextUsagePercentage":5}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    const events = await collect(streamKiro(makeModel(), makeCompactedToolContext(), { apiKey: "tok" }));
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    const history = body.conversationState.history as KiroHistoryEntry[];
+    const historyText = JSON.stringify(history);
+    const toolUseIds = history
+      .flatMap((entry) => entry.assistantResponseMessage?.toolUses ?? [])
+      .map((t) => t.toolUseId);
+    const historyResultIds = history
+      .flatMap((entry) => entry.userInputMessage?.userInputMessageContext?.toolResults ?? [])
+      .map((result) => result.toolUseId);
+    const currentResultIds = (
+      body.conversationState.currentMessage.userInputMessage.userInputMessageContext?.toolResults ?? []
+    ).map((result: { toolUseId: string }) => result.toolUseId);
+
+    expect(events.some((event) => event.type === "done")).toBe(true);
+    expect(historyText.match(/SYSTEM_MARKER/g) ?? []).toHaveLength(1);
+    expect(historyText.match(/COMPACTION_SUMMARY_MARKER/g) ?? []).toHaveLength(1);
+    expect(toolUseIds).toEqual(["tc1", "tc2", "tc3"]);
+    expect(historyResultIds).toEqual(["tc1", "tc2"]);
+    expect(currentResultIds).toEqual(["tc3"]);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("returns a Pi-recognized overflow without sending or dropping compacted context", async () => {
+    const mockFetch = vi.fn();
+    vi.stubGlobal("fetch", mockFetch);
+    const model = makeModel({ contextWindow: 100 });
+
+    const events = await collect(streamKiro(model, makeCompactedToolContext(), { apiKey: "tok" }));
+    const error = events.find((event) => event.type === "error");
+    const message = error?.type === "error" ? error.error : undefined;
+
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(message?.errorMessage).toMatch(/context_length_exceeded.*local history/);
+    expect(message?.errorMessage).not.toContain("COMPACTION_SUMMARY_MARKER");
+    expect(message && isContextOverflow(message, model.contextWindow)).toBe(true);
 
     vi.unstubAllGlobals();
   });
