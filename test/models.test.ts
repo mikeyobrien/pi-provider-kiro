@@ -163,6 +163,15 @@ describe("Feature 2: Model Definitions", () => {
       expect(opus?.contextWindow).not.toBe(kiroModels.find((model) => model.id === opus?.id)?.contextWindow);
     });
 
+    it("disables text tool-call recovery only for Claude catalog models", () => {
+      const claudeModels = mapped.filter((model) => model.id.startsWith("claude-"));
+      const nonClaudeModels = mapped.filter((model) => !model.id.startsWith("claude-"));
+
+      expect(claudeModels.length).toBeGreaterThan(0);
+      expect(claudeModels.every((model) => model.recoverTextToolCalls === false)).toBe(true);
+      expect(nonClaudeModels.every((model) => model.recoverTextToolCalls === undefined)).toBe(true);
+    });
+
     it("treats a null schema as absent for auto", () => {
       const [auto] = mapKiroCatalogModels([{ modelId: "auto", additionalModelRequestFieldsSchema: null }], TEST_REGION);
 
@@ -275,6 +284,15 @@ describe("Feature 2: Model Definitions", () => {
       const nonClaudeModels = kiroModels.filter((model) => !model.id.startsWith("claude-") && model.id !== "auto");
       expect(claudeModels.every((model) => model.input.includes("text") && model.input.includes("image"))).toBe(true);
       expect(nonClaudeModels.every((model) => model.input.length === 1 && model.input[0] === "text")).toBe(true);
+    });
+
+    it("disables text tool-call recovery only for Claude bootstrap models", () => {
+      const claudeModels = kiroModels.filter((model) => model.id.startsWith("claude-"));
+      const nonClaudeModels = kiroModels.filter((model) => !model.id.startsWith("claude-"));
+
+      expect(claudeModels.length).toBeGreaterThan(0);
+      expect(claudeModels.every((model) => model.recoverTextToolCalls === false)).toBe(true);
+      expect(nonClaudeModels.every((model) => model.recoverTextToolCalls === undefined)).toBe(true);
     });
   });
 

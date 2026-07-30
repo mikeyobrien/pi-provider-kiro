@@ -31,6 +31,8 @@ export interface KiroModel extends Model<"kiro-api"> {
   additionalModelRequestFieldsSchema?: Record<string, unknown>;
   tokenLimits?: KiroTokenLimits;
   firstTokenTimeout?: number;
+  /** Senpi should trust Kiro's native tool-use events instead of parsing XML-like text. */
+  recoverTextToolCalls?: boolean;
   kiroRegion?: string;
   /** Credential-scoped profile ARN attached only to the in-memory model projection. */
   kiroProfileArn?: string;
@@ -48,7 +50,7 @@ interface ManagementModelsCache {
   regions: Record<string, ManagementCacheRegion>;
 }
 
-export const kiroModels: KiroModel[] = [
+const bootstrapKiroModels: KiroModel[] = [
   {
     id: "claude-opus-4-8",
     kiroModelId: "claude-opus-4.8",
@@ -254,6 +256,10 @@ export const kiroModels: KiroModel[] = [
   },
 ];
 
+export const kiroModels: KiroModel[] = bootstrapKiroModels.map((model) =>
+  model.id.startsWith("claude-") ? { ...model, recoverTextToolCalls: false } : model,
+);
+
 const BOOTSTRAP_KIRO_MODEL_IDS = kiroModels.map((model) => model.kiroModelId);
 
 /** Exact service IDs known from either the bootstrap list or a valid management cache. */
@@ -458,6 +464,7 @@ export function mapKiroCatalogModels(catalogModels: KiroCatalogModel[], region: 
       reasoning: effortValues !== undefined || (schema === undefined && hasReasoningFamilyFallback(id)),
       ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
       input: existing ? [...existing.input] : isClaude ? ["text", "image"] : ["text"],
+      recoverTextToolCalls: isClaude ? false : undefined,
       cost: ZERO_COST,
       contextWindow: tokenLimits?.maxInputTokens ?? DEFAULT_CONTEXT_WINDOW,
       maxTokens: tokenLimits?.maxOutputTokens ?? DEFAULT_MAX_TOKENS,
