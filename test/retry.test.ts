@@ -80,8 +80,12 @@ describe("isTooBigError", () => {
     expect(isTooBigError(400, "Input is too long for model")).toBe(true);
   });
 
-  it("returns true for 400 with 'Improperly formed'", () => {
-    expect(isTooBigError(400, "Improperly formed request")).toBe(true);
+  // "Improperly formed request." is Kiro's generic request-validation
+  // rejection, not a size signal. Reporting it as a too-big error makes the
+  // caller compact a history that was never the problem.
+  it("returns false for 400 'Improperly formed request'", () => {
+    expect(isTooBigError(400, '{"message":"Improperly formed request.","reason":"REQUEST_BODY_INVALID"}')).toBe(false);
+    expect(isTooBigError(400, "Improperly formed request")).toBe(false);
   });
 
   it("returns false for 400 without matching pattern", () => {

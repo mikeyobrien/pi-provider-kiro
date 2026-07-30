@@ -28,7 +28,14 @@ export function exponentialBackoff(attempt: number, baseMs: number, maxMs: numbe
 
 export const MAX_RETRY_DELAY = 10_000;
 
-export const TOO_BIG_PATTERNS = ["CONTENT_LENGTH_EXCEEDS_THRESHOLD", "Input is too long", "Improperly formed"];
+// Size markers only. "Improperly formed request." is Kiro's generic
+// request-validation rejection (reason `REQUEST_BODY_INVALID`) — it is returned
+// for a malformed body of any size, including an empty `content` field or a
+// history referencing tools absent from the catalog. Classifying it as
+// "too big" made every such 400 surface as `context_length_exceeded`, which
+// sends the caller into a compaction loop it can never satisfy: the request is
+// invalid, not oversized, so no amount of history reduction fixes it.
+export const TOO_BIG_PATTERNS = ["CONTENT_LENGTH_EXCEEDS_THRESHOLD", "Input is too long"];
 const NON_RETRYABLE_BODY_PATTERNS = ["MONTHLY_REQUEST_COUNT"];
 const CAPACITY_PATTERN = "INSUFFICIENT_MODEL_CAPACITY";
 export const CAPACITY_MAX_RETRIES = 3;

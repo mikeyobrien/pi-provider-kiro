@@ -13,7 +13,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { findJsonEnd } from "../src/bracket-tool-parser.js";
 import { capacityRetryConfig, retryConfig } from "../src/retry.js";
 import { resetProfileArnCache, streamKiro } from "../src/stream.js";
-import type { KiroHistoryEntry } from "../src/transform.js";
+import { EMPTY_CONTENT_PLACEHOLDER, type KiroHistoryEntry } from "../src/transform.js";
 import { concatMessages, encodeEventMessage } from "./helpers/event-stream.js";
 
 const ts = Date.now();
@@ -1198,6 +1198,127 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
+  // =========================================================================
+  // Required `content` field
+  // —————————————————————————————————————————————————————————————————————————
+  // Kiro rejects a current message with an empty `content` as
+  // "Improperly formed request." (reason REQUEST_BODY_INVALID). A turn can
+  // reach the request builder with no text — an image-only user message, or a
+  // user message whose text is empty — so a placeholder must be substituted.
+  // =========================================================================
+
+  // These use a prior turn so the system prompt is already consumed by the
+  // first history entry: on the very first message the prompt is prepended to
+  // the current content, which masks an empty text payload.
+  const settledTurn = (): Context["messages"] => [
+    { role: "user", content: "earlier question", timestamp: ts },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "earlier answer" }],
+      api: "kiro-api",
+      provider: "kiro",
+      model: "claude-sonnet-4-5",
+      usage: zeroUsage,
+      stopReason: "stop",
+      timestamp: ts,
+    } satisfies AssistantMessage,
+  ];
+
+  it("sends placeholder content for an image-only user message", async () => {
+    const image: ImageContent = { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" };
+    const context: Context = {
+      systemPrompt: "You are helpful",
+      messages: [...settledTurn(), { role: "user", content: [image], timestamp: ts }],
+      tools: [],
+    };
+    const mockFetch = mockFetchOk('{"content":"Nice picture."}{"contextUsagePercentage":2}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    const events = await collect(streamKiro(makeModel(), context, { apiKey: "tok" }));
+
+    const currentMsg = JSON.parse(mockFetch.mock.calls[0][1].body).conversationState.currentMessage.userInputMessage;
+    expect(currentMsg.content).toBe(EMPTY_CONTENT_PLACEHOLDER);
+    // The image itself must still reach the model.
+    expect(currentMsg.images).toHaveLength(1);
+    expect(events.some((event) => event.type === "done")).toBe(true);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("sends placeholder content for an empty-text user message", async () => {
+    const context: Context = {
+      systemPrompt: "You are helpful",
+      messages: [...settledTurn(), { role: "user", content: "", timestamp: ts }],
+      tools: [],
+    };
+    const mockFetch = mockFetchOk('{"content":"Go on."}{"contextUsagePercentage":1}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    await collect(streamKiro(makeModel(), context, { apiKey: "tok" }));
+
+    const currentMsg = JSON.parse(mockFetch.mock.calls[0][1].body).conversationState.currentMessage.userInputMessage;
+    expect(currentMsg.content).toBe(EMPTY_CONTENT_PLACEHOLDER);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps real user text untouched", async () => {
+    const mockFetch = mockFetchOk('{"content":"Hi."}{"contextUsagePercentage":1}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    await collect(streamKiro(makeModel(), makeContext("Explain this repo"), { apiKey: "tok" }));
+
+    const currentMsg = JSON.parse(mockFetch.mock.calls[0][1].body).conversationState.currentMessage.userInputMessage;
+    expect(currentMsg.content).toContain("Explain this repo");
+
+    vi.unstubAllGlobals();
+  });
+
+  // The observed failure: a host appended a reminder message carrying a role
+  // outside pi-ai's `Message` union ("developer") after a settled assistant
+  // turn. None of the current-message branches matched it, so `content` went
+  // out empty and Kiro answered 400 REQUEST_BODY_INVALID — which the provider
+  // then relabeled `context_length_exceeded`, sending the caller into a
+  // compaction loop against a request that was structurally invalid, not large.
+  it("sends placeholder content when the turn ends on an unrecognized role", async () => {
+    const settledAssistant: AssistantMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "Done." }],
+      api: "kiro-api",
+      provider: "kiro",
+      model: "claude-sonnet-4-5",
+      usage: zeroUsage,
+      stopReason: "stop",
+      timestamp: ts,
+    };
+    const reminder = {
+      role: "developer",
+      content: [{ type: "text", text: "<system-reminder>2 incomplete todos</system-reminder>" }],
+      attribution: "agent",
+      timestamp: ts,
+    };
+    const context: Context = {
+      systemPrompt: "You are helpful",
+      messages: [
+        { role: "user", content: "Do the work", timestamp: ts },
+        settledAssistant,
+        reminder as unknown as Context["messages"][number],
+      ],
+      tools: [],
+    };
+    const mockFetch = mockFetchOk('{"content":"Continuing."}{"contextUsagePercentage":4}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    const events = await collect(streamKiro(makeModel(), context, { apiKey: "tok" }));
+
+    const currentMsg = JSON.parse(mockFetch.mock.calls[0][1].body).conversationState.currentMessage.userInputMessage;
+    expect(currentMsg.content).not.toBe("");
+    expect(events.some((event) => event.type === "done")).toBe(true);
+    expect(events.some((event) => event.type === "error")).toBe(false);
+
+    vi.unstubAllGlobals();
+  });
+
   it("synthesizes placeholder tool specs when context.tools is undefined but history references tools", async () => {
     const assistantWithTool: AssistantMessage = {
       role: "assistant",
@@ -1592,6 +1713,31 @@ describe("Feature 9: Streaming Integration", () => {
     const error = events.find((e) => e.type === "error");
     expect(error).toBeDefined();
     expect(error?.type === "error" && error.error.errorMessage).toContain("context_length_exceeded");
+
+    vi.unstubAllGlobals();
+  });
+
+  // A malformed-body 400 is not an overflow. Reporting it as one sends the
+  // caller into a compaction loop that can never clear the error, because the
+  // request is invalid rather than oversized.
+  it("does NOT report 400 'Improperly formed request' as a context overflow", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      statusText: "Bad Request",
+      text: () => Promise.resolve('{"message":"Improperly formed request.","reason":"REQUEST_BODY_INVALID"}'),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const model = makeModel();
+    const events = await collect(streamKiro(model, makeContext(), { apiKey: "tok" }));
+    const error = events.find((e) => e.type === "error");
+    const message = error?.type === "error" ? error.error : undefined;
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(message?.errorMessage).not.toContain("context_length_exceeded");
+    expect(message?.errorMessage).toContain("Improperly formed request.");
+    expect(message && isContextOverflow(message, model.contextWindow)).toBe(false);
 
     vi.unstubAllGlobals();
   });

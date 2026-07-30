@@ -46,6 +46,14 @@ export interface KiroHistoryEntry {
 
 export const TOOL_RESULT_LIMIT = 250000;
 
+/** Kiro rejects a current message whose `content` is empty with a 400
+ *  "Improperly formed request." (reason `REQUEST_BODY_INVALID`) — the field is
+ *  required even when the turn carries its payload elsewhere (images, tool
+ *  results). A turn can legitimately reach the request builder with no text:
+ *  an image-only user message, or a user message whose text is empty. Send a
+ *  neutral prompt in that case so the attachments still reach the model. */
+export const EMPTY_CONTENT_PLACEHOLDER = "Please proceed with the task.";
+
 export function sanitizeSurrogates(text: string): string {
   // Replace unpaired high surrogates (0xD800-0xDBFF not followed by low surrogate)
   // Replace unpaired low surrogates (0xDC00-0xDFFF not preceded by high surrogate)

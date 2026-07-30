@@ -59,6 +59,7 @@ import {
   buildHistory,
   convertImagesToKiro,
   convertToolsToKiro,
+  EMPTY_CONTENT_PLACEHOLDER,
   extractImages,
   getContentText,
   type KiroHistoryEntry,
@@ -397,6 +398,10 @@ export function streamKiro(
           const imgs = extractImages(firstMsg);
           if (imgs.length > 0) currentImages = convertImagesToKiro(imgs as ImageContent[]);
         }
+        // `content` is required: Kiro answers an empty one with a 400
+        // "Improperly formed request." Fall back to a neutral prompt so a turn
+        // that carries only images (or an empty-text user message) still sends.
+        if (currentContent === "") currentContent = EMPTY_CONTENT_PLACEHOLDER;
         // kiro-cli does not enforce alternation — the API accepts
         // non-alternating history. No synthetic padding needed.
         const request: KiroRequest = {
