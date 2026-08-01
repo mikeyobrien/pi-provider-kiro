@@ -48,11 +48,11 @@ function usageResponse() {
   };
 }
 
-function expectUsageRequest(rawUrl: string, expectedProfileArn?: string): void {
+function expectUsageRequest(rawUrl: string, expectedProfileArn: string): void {
   const url = new URL(rawUrl);
   expect(`${url.origin}${url.pathname}`).toBe("https://management.us-east-1.kiro.dev/Get-Usage-Limits");
   expect(Object.fromEntries(url.searchParams)).toEqual({
-    ...(expectedProfileArn ? { profileArn: expectedProfileArn } : {}),
+    profileArn: expectedProfileArn,
     origin: "KIRO_CLI",
     resourceType: "CREDIT",
     isEmailRequired: "false",
@@ -112,23 +112,9 @@ describe("fetchKiroUsage", () => {
     });
   });
 
-  it("supports profile-less usage when the credential has no profile ARN", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve(usageResponse()),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await fetchKiroUsage(creds);
-
-    expect(fetchMock).toHaveBeenCalledOnce();
-    expectUsageRequest(fetchMock.mock.calls[0][0]);
-  });
-
-  it("resolves a profile and retries once when profile-less usage is forbidden", async () => {
+  it("resolves a profile before fetching usage when the credential has no profile ARN", async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce({ ok: false, status: 403, statusText: "Forbidden" })
       .mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ profiles: [{ arn: profileArn }] }),
@@ -141,14 +127,14 @@ describe("fetchKiroUsage", () => {
 
     await fetchKiroUsage(creds);
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    expectUsageRequest(fetchMock.mock.calls[0][0]);
-    expect(fetchMock.mock.calls[1][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
-    expect(fetchMock.mock.calls[1][1].headers["X-Amz-Target"]).toBeUndefined();
-    expectUsageRequest(fetchMock.mock.calls[2][0], profileArn);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
+    expect(fetchMock.mock.calls[0][1].method).toBe("POST");
+    expect(fetchMock.mock.calls[0][1].headers["X-Amz-Target"]).toBeUndefined();
+    expectUsageRequest(fetchMock.mock.calls[1][0], profileArn);
   });
 
-  it("surfaces non-authorization failures without profile lookup or retry", async () => {
+  it("surfaces profile resolution failures before requesting usage", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,
       status: 503,
@@ -157,8 +143,23 @@ describe("fetchKiroUsage", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(fetchKiroUsage(creds)).rejects.toThrow(
+      "Kiro management ListAvailableProfiles failed in us-east-1: 503 Service Unavailable",
+    );
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("surfaces usage failures without another profile lookup", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      statusText: "Service Unavailable",
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchKiroUsage({ ...creds, profileArn })).rejects.toThrow(
       "Kiro management GetUsageLimits failed in us-east-1: 503 Service Unavailable",
     );
     expect(fetchMock).toHaveBeenCalledOnce();
+    expectUsageRequest(fetchMock.mock.calls[0][0], profileArn);
   });
 });
