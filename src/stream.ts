@@ -259,7 +259,7 @@ export function streamKiro(
       }
 
       const kiroModelId = resolveKiroModel(model.id, modelMetadata.kiroModelId);
-      const effortConfig = getKiroEffortConfig(modelMetadata, kiroModelId);
+      const effortConfig = getKiroEffortConfig(modelMetadata.additionalModelRequestFieldsSchema, kiroModelId);
       const additionalModelRequestFields = buildKiroAdditionalModelRequestFields(
         modelMetadata,
         kiroModelId,

@@ -82,14 +82,9 @@ export function fallbackKiroEffort(kiroModelId: string): KiroEffortConfig | unde
   return undefined;
 }
 
-/** Prefer authoritative schema metadata; never replace a present schema with a known-model guess. */
-export function getKiroEffortConfig(
-  model: ModelWithKiroEffortMetadata,
-  kiroModelId: string,
-): KiroEffortConfig | undefined {
-  if (model.additionalModelRequestFieldsSchema !== undefined) {
-    return deriveKiroEffort(model.additionalModelRequestFieldsSchema);
-  }
+/** Prefer catalog schema; fall back only when it is absent. */
+export function getKiroEffortConfig(schema: unknown, kiroModelId: string): KiroEffortConfig | undefined {
+  if (schema !== undefined) return deriveKiroEffort(schema);
   return fallbackKiroEffort(kiroModelId);
 }
 
@@ -135,7 +130,7 @@ export function buildKiroAdditionalModelRequestFields(
 ): KiroAdditionalModelRequestFields | undefined {
   if (!level || !model.reasoning) return undefined;
 
-  const config = getKiroEffortConfig(model, kiroModelId);
+  const config = getKiroEffortConfig(model.additionalModelRequestFieldsSchema, kiroModelId);
   if (!config) return undefined;
   const effort = mapPiLevelToKiroEffort(model, level, config);
   if (!effort) return undefined;

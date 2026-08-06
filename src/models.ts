@@ -5,13 +5,13 @@ import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "nod
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Model, ThinkingLevelMap } from "@earendil-works/pi-ai";
-import { deriveKiroEffort } from "./effort.js";
+import { getKiroEffortConfig, type KiroEffortConfig } from "./effort.js";
 import { getKiroEndpoints } from "./endpoints.js";
 import { fetchKiroModelCatalog, type KiroCatalogModel } from "./management.js";
 
 export { resolveApiRegion } from "./endpoints.js";
 
-export const KIRO_MANAGEMENT_CACHE_VERSION = 1;
+export const KIRO_MANAGEMENT_CACHE_VERSION = 2;
 export const KIRO_MANAGEMENT_CACHE_SOURCE = "kiro-management";
 export const KIRO_MANAGEMENT_CACHE_PATH = join(homedir(), ".kiro-management-models-cache.json");
 
@@ -23,6 +23,18 @@ const ZERO_COST = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite:
 const REASONING_FAMILY_MARKERS = ["opus", "sonnet", "fable", "coder", "deepseek", "gpt", "glm", "qwen"];
 
 type KiroTokenLimits = NonNullable<KiroCatalogModel["tokenLimits"]>;
+
+/** Effort rungs omp's ThinkingConfig schema accepts. */
+const OMP_THINKING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+export type KiroThinkingEffort = (typeof OMP_THINKING_EFFORTS)[number];
+
+export type KiroThinkingConfig = {
+  mode: "effort";
+  efforts: readonly KiroThinkingEffort[];
+  /** Kiro can return a summarized thinking block for this model. */
+  supportsDisplay?: boolean;
+};
 
 export interface KiroModel extends Model<"kiro-api"> {
   /** Exact model ID returned by the Kiro management catalog. */
@@ -36,6 +48,8 @@ export interface KiroModel extends Model<"kiro-api"> {
   kiroRegion?: string;
   /** Credential-scoped profile ARN attached only to the in-memory model projection. */
   kiroProfileArn?: string;
+  /** omp >=13.9.3 reads this; pi reads thinkingLevelMap. Emit both. */
+  thinking?: KiroThinkingConfig;
 }
 
 interface ManagementCacheRegion {
@@ -256,9 +270,23 @@ const bootstrapKiroModels: KiroModel[] = [
   },
 ];
 
-export const kiroModels: KiroModel[] = bootstrapKiroModels.map((model) =>
-  model.id.startsWith("claude-") ? { ...model, recoverTextToolCalls: false } : model,
-);
+/**
+ * Bootstrap models carry no catalog schema, so their ladder comes from the same
+ * `getKiroEffortConfig` fallback the request path uses. Deriving here instead of
+ * hardcoding per-model literals keeps one source of truth: `effort.ts` decides
+ * which model gets which rungs, and discovery overwrites this once it runs.
+ */
+export const kiroModels: KiroModel[] = bootstrapKiroModels.map((model) => {
+  const effortConfig = model.reasoning
+    ? getKiroEffortConfig(model.additionalModelRequestFieldsSchema, model.kiroModelId)
+    : undefined;
+  const thinking = deriveThinkingConfig(effortConfig);
+  return {
+    ...model,
+    ...(thinking ? { thinking } : {}),
+    ...(model.id.startsWith("claude-") ? { recoverTextToolCalls: false } : {}),
+  };
+});
 
 const BOOTSTRAP_KIRO_MODEL_IDS = kiroModels.map((model) => model.kiroModelId);
 
@@ -277,6 +305,17 @@ function isThinkingLevelMap(value: unknown): value is ThinkingLevelMap {
   return (
     isRecord(value) &&
     Object.values(value).every((mappedValue) => typeof mappedValue === "string" || mappedValue === null)
+  );
+}
+
+function isThinkingConfig(value: unknown): value is KiroThinkingConfig {
+  return (
+    isRecord(value) &&
+    value.mode === "effort" &&
+    Array.isArray(value.efforts) &&
+    value.efforts.length > 0 &&
+    value.efforts.every((effort) => (OMP_THINKING_EFFORTS as readonly unknown[]).includes(effort)) &&
+    (value.supportsDisplay === undefined || typeof value.supportsDisplay === "boolean")
   );
 }
 
@@ -309,6 +348,7 @@ function isCachedKiroModel(value: unknown): value is KiroModel {
     isPositiveNumber(value.contextWindow) &&
     isPositiveNumber(value.maxTokens) &&
     (value.thinkingLevelMap === undefined || isThinkingLevelMap(value.thinkingLevelMap)) &&
+    (value.thinking === undefined || isThinkingConfig(value.thinking)) &&
     (schema === undefined || isRecord(schema)) &&
     (tokenLimits === undefined || isRecord(tokenLimits)) &&
     (value.firstTokenTimeout === undefined || isPositiveNumber(value.firstTokenTimeout))
@@ -396,6 +436,19 @@ function deriveThinkingLevelMap(effortValues: readonly string[] | undefined): Th
   return Object.keys(thinkingLevelMap).length > 0 ? thinkingLevelMap : undefined;
 }
 
+/**
+ * omp >=13.9.3 reads `thinking`; pi reads `thinkingLevelMap`. Rungs are filtered
+ * through omp's own enum because Kiro may report a value outside it (`none`).
+ * `supportsDisplay` comes from the schema's `thinking.display` enum, which omp
+ * never infers for `kiro-api` — only for native anthropic/bedrock APIs.
+ */
+export function deriveThinkingConfig(config: KiroEffortConfig | undefined): KiroThinkingConfig | undefined {
+  if (!config || config.values.length === 0) return undefined;
+  const efforts = OMP_THINKING_EFFORTS.filter((effort) => config.values.includes(effort));
+  if (efforts.length === 0) return undefined;
+  return { mode: "effort", efforts, ...(config.summarizedThinking ? { supportsDisplay: true } : {}) };
+}
+
 function hasReasoningFamilyFallback(modelId: string): boolean {
   const normalizedId = modelId.toLowerCase();
   return normalizedId === "auto" || REASONING_FAMILY_MARKERS.some((marker) => normalizedId.includes(marker));
@@ -446,8 +499,12 @@ export function mapKiroCatalogModels(catalogModels: KiroCatalogModel[], region: 
 
     const existing = kiroModels.find((model) => model.id === id);
     const { schema, tokenLimits } = validateCatalogMetadata(catalogModel);
-    const effortValues = deriveKiroEffort(schema)?.values;
-    const thinkingLevelMap = deriveThinkingLevelMap(effortValues);
+    // Two-tier resolution, same as the request path: an authoritative schema wins,
+    // and a known-model guess fills in only when the catalog carried no schema. So a
+    // model that arrives schema-less still advertises the rungs its requests send.
+    const effortConfig = getKiroEffortConfig(schema, kiroModelId);
+    const thinkingLevelMap = deriveThinkingLevelMap(effortConfig?.values);
+    const thinking = deriveThinkingConfig(effortConfig);
     const catalogName =
       typeof catalogModel.displayName === "string" && catalogModel.displayName.length > 0
         ? catalogModel.displayName
@@ -461,8 +518,14 @@ export function mapKiroCatalogModels(catalogModels: KiroCatalogModel[], region: 
       api: "kiro-api",
       provider: "kiro",
       baseUrl: getKiroEndpoints(region).runtime,
-      reasoning: effortValues !== undefined || (schema === undefined && hasReasoningFamilyFallback(id)),
+      // Deliberately schema-only, matching pre-change behavior exactly: when a schema
+      // exists the resolver returns deriveKiroEffort(schema), and when it does not the
+      // family-marker guess decides. The fallback tier feeds the ladders, not this flag.
+      reasoning:
+        (schema !== undefined && effortConfig !== undefined) ||
+        (schema === undefined && hasReasoningFamilyFallback(id)),
       ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
+      ...(thinking ? { thinking } : {}),
       input: existing ? [...existing.input] : isClaude ? ["text", "image"] : ["text"],
       recoverTextToolCalls: isClaude ? false : undefined,
       cost: ZERO_COST,
