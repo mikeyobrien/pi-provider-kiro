@@ -408,6 +408,25 @@ function describeReturnedContent(content: AssistantMessage["content"]): string {
   return clauses.join(" ");
 }
 
+/**
+ * Resolve the profile ARN on a management call made *after* a credential
+ * refresh, flagging any management failure as refresh-already-attempted.
+ *
+ * A 401/403 here means the freshly-refreshed credential was itself rejected, so
+ * a consumer must not read it as a first-contact auth error it can recover from
+ * by refreshing again.
+ */
+async function resolveProfileArnAfterRefresh(auth: KiroManagementAuth): Promise<string> {
+  try {
+    return await resolveKiroProfileArn(auth);
+  } catch (error) {
+    // instanceof, not the structural guard: this error can only come from the
+    // module-local management.ts, so it is always the local class.
+    if (error instanceof KiroManagementHttpError) throw error.markRefreshAttempted();
+    throw error;
+  }
+}
+
 function emitToolCall(
   state: KiroToolCallState,
   output: AssistantMessage,
@@ -638,7 +657,9 @@ function streamKiroWithUsageTracking(
           refreshTrace.push(
             forcedRefresh ? "profile-403: refresh returned no token" : "profile-403: store had no fresh token",
           );
-          throw error;
+          // Rethrow the ORIGINAL error, flagged so the consumer knows in-process
+          // re-auth was already tried and lost.
+          throw error.markRefreshAttempted();
         }
         refreshTrace.push(
           freshCreds.access === rejectedToken
@@ -654,7 +675,7 @@ function streamKiroWithUsageTracking(
         managementAuth = { accessToken, region };
         profileArn =
           freshCreds.profileArn ||
-          (skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth));
+          (skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveProfileArnAfterRefresh(managementAuth));
       }
 
       // ListAvailableProfiles probes across regions (#104, #131), so an SSO login
@@ -1162,7 +1183,9 @@ function streamKiroWithUsageTracking(
               profileArn =
                 freshCreds?.profileArn ||
                 inheritedDesktopProfileArn ||
-                (skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth));
+                (skipProfileResolutionForTests
+                  ? TEST_PROFILE_ARN
+                  : await resolveProfileArnAfterRefresh(managementAuth));
               // A replacement credential can carry a profile in another region,
               // so re-pin the runtime host before retrying.
               runtimeRegion = getKiroRegionFromProfileArn(profileArn) ?? region;

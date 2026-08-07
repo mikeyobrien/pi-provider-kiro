@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   fetchKiroModelCatalog,
+  isKiroManagementHttpError,
+  KiroManagementHttpError,
   listAvailableModels,
   resetKiroProfileArnCache,
   resolveKiroProfileArn,
@@ -441,5 +443,101 @@ describe("Kiro management control plane", () => {
 
     await expect(resolveKiroProfileArn(auth)).resolves.toBe(profileArn);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("management-plane error typing", () => {
+  const managementFailure = (status: number, statusText?: string) => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status, statusText });
+    vi.stubGlobal("fetch", fetchMock);
+    return resolveKiroProfileArn(auth);
+  };
+
+  it("is reachable through the package entry point", async () => {
+    const entry = await import("../src/index.js");
+
+    expect(entry.KiroManagementHttpError).toBe(KiroManagementHttpError);
+    expect(typeof entry.isKiroManagementHttpError).toBe("function");
+
+    const error = await managementFailure(403, "Forbidden").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(entry.KiroManagementHttpError);
+    expect(entry.isKiroManagementHttpError(error)).toBe(true);
+  });
+
+  it("carries status and the plane discriminator on 401 and 403", async () => {
+    for (const status of [401, 403]) {
+      const error = await managementFailure(status, "Forbidden").catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(KiroManagementHttpError);
+      const typed = error as KiroManagementHttpError;
+      expect(typed.status).toBe(status);
+      expect(typed.plane).toBe("management");
+      expect(typed.name).toBe("KiroManagementHttpError");
+      expect(typed).toBeInstanceOf(Error);
+      resetKiroProfileArnCache();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("distinguishes a runtime 403 from a management 403 without reading .message", async () => {
+    const managementError = (await managementFailure(403, "Forbidden").catch((e: unknown) => e)) as Error;
+    // Exactly what src/stream.ts throws on the runtime plane today.
+    const runtimeError = new Error(
+      'Kiro API error: 403 Forbidden {"message":"The bearer token included in the request is invalid.","reason":null}',
+    );
+
+    expect(isKiroManagementHttpError(managementError)).toBe(true);
+    expect(isKiroManagementHttpError(runtimeError)).toBe(false);
+    expect((managementError as KiroManagementHttpError).plane).toBe("management");
+    expect((runtimeError as Partial<KiroManagementHttpError>).plane).toBeUndefined();
+  });
+
+  it("recognises a management error from a duplicate copy of this package", () => {
+    // A bundled consumer plus a node_modules copy yield two distinct classes;
+    // instanceof alone would reject a genuine management error from the other.
+    class ForeignKiroManagementHttpError extends Error {
+      readonly plane = "management" as const;
+      constructor(
+        message: string,
+        readonly status: number,
+      ) {
+        super(message);
+      }
+    }
+    const foreign = new ForeignKiroManagementHttpError(
+      "Kiro management ListAvailableProfiles failed in us-east-1: 403",
+      403,
+    );
+
+    expect(foreign).not.toBeInstanceOf(KiroManagementHttpError);
+    expect(isKiroManagementHttpError(foreign)).toBe(true);
+  });
+
+  it("rejects non-errors and unrelated errors", () => {
+    expect(isKiroManagementHttpError(undefined)).toBe(false);
+    expect(isKiroManagementHttpError({ plane: "management", status: 403 })).toBe(false);
+    expect(isKiroManagementHttpError(new Error("boom"))).toBe(false);
+  });
+
+  it("keeps the existing message text byte-identical", async () => {
+    const withStatusText = (await managementFailure(403, "Forbidden").catch((e: unknown) => e)) as Error;
+    expect(withStatusText.message).toBe("Kiro management ListAvailableProfiles failed in us-east-1: 403 Forbidden");
+    resetKiroProfileArnCache();
+    vi.unstubAllGlobals();
+
+    // Empty statusText contributes no trailing space — preserve that quirk.
+    const withoutStatusText = (await managementFailure(401, "").catch((e: unknown) => e)) as Error;
+    expect(withoutStatusText.message).toBe("Kiro management ListAvailableProfiles failed in us-east-1: 401");
+  });
+
+  it("reports refreshAttempted only after a refresh was tried", async () => {
+    const error = (await managementFailure(403, "Forbidden").catch((e: unknown) => e)) as KiroManagementHttpError;
+
+    expect(error.refreshAttempted).toBe(false);
+    expect(error.markRefreshAttempted()).toBe(error);
+    expect(error.refreshAttempted).toBe(true);
+    // Flagging must not disturb the message contract or the discriminator.
+    expect(error.message).toBe("Kiro management ListAvailableProfiles failed in us-east-1: 403 Forbidden");
+    expect(error.plane).toBe("management");
   });
 });
