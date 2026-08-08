@@ -113,6 +113,38 @@ const ENV_PROFILE_ARN = "KIRO_PROFILE_ARN";
 export type KiroErrorPlane = "management" | "runtime";
 
 /**
+ * `AssistantMessageDiagnostic.type` under which `streamKiro` reports the plane of
+ * a failure.
+ *
+ * `streamKiro` flattens every thrown error into `AssistantMessage.errorMessage`,
+ * a string, so a consumer of the stream never receives the error object itself.
+ * This diagnostic is the machine-readable channel that survives that
+ * flattening: its `details` carry `plane`, `status`, and `refreshAttempted`.
+ *
+ * Only management-plane failures are tagged. A runtime failure — and any local
+ * precondition failure, such as absent credentials — emits no diagnostic of
+ * this type, so a management error is identified by its presence and everything
+ * else by its absence, without parsing `errorMessage`.
+ */
+export const KIRO_AUTH_PLANE_DIAGNOSTIC = "kiro_auth_plane";
+
+/**
+ * The data an `isKiroManagementHttpError()` caller may rely on.
+ *
+ * Deliberately narrower than `KiroManagementHttpError`: the guard also accepts a
+ * structurally-identical error from a duplicate copy of this package, which is
+ * not this class and therefore carries no methods. Narrowing to the class would
+ * let `markRefreshAttempted()` typecheck on such a value and throw at runtime.
+ *
+ * `refreshAttempted` is optional because a foreign copy may predate that field.
+ */
+export interface KiroManagementErrorInfo extends Error {
+  readonly plane: "management";
+  readonly status: number;
+  readonly refreshAttempted?: boolean;
+}
+
+/**
  * A Kiro management control-plane HTTP failure.
  *
  * `message` is deliberately byte-identical to the string this class has always
@@ -121,8 +153,12 @@ export type KiroErrorPlane = "management" | "runtime";
  * typed fields are strictly additive: read them instead of parsing `message`.
  */
 export class KiroManagementHttpError extends Error {
-  /** Discriminator so consumers need not parse `message` to tell the planes apart. */
-  readonly plane: KiroErrorPlane = "management";
+  /**
+   * Discriminator so consumers need not parse `message` to tell the planes
+   * apart. Typed as the literal rather than `KiroErrorPlane` so a consumer
+   * comparing it against `"runtime"` is told that branch is unreachable.
+   */
+  readonly plane = "management" as const;
 
   #refreshAttempted = false;
 
@@ -139,6 +175,13 @@ export class KiroManagementHttpError extends Error {
    * the error escaped. A consumer seeing `true` knows in-process re-auth was
    * tried and lost, so prompting for another automatic retry is wasted work —
    * the state needs a human to re-authenticate.
+   *
+   * Only `streamKiro` sets this, and it never rethrows to its caller — it
+   * flattens the error into `AssistantMessage.errorMessage`. Read this field
+   * from the `KIRO_AUTH_PLANE_DIAGNOSTIC` diagnostic on that message rather
+   * than expecting to catch the error object. It is readable directly only when
+   * calling the management helpers in this module yourself, and is always
+   * `false` there, because nothing but `streamKiro` attempts a refresh.
    */
   get refreshAttempted(): boolean {
     return this.#refreshAttempted;
@@ -166,13 +209,13 @@ export class KiroManagementHttpError extends Error {
  * `node_modules` copy produce two distinct classes, and `instanceof` alone
  * would report `false` for a genuine management error from the other copy.
  *
- * Because a foreign copy's error is not this class, only the data fields
- * (`status`, `plane`, `refreshAttempted`) are guaranteed present; do not call
- * `markRefreshAttempted()` on a value narrowed by this guard.
+ * Narrows to `KiroManagementErrorInfo`, not to this class: a foreign copy's
+ * error carries the data fields but no methods, so the narrowed type omits
+ * `markRefreshAttempted()` rather than letting a call on it typecheck and throw.
  */
-export function isKiroManagementHttpError(error: unknown): error is KiroManagementHttpError {
+export function isKiroManagementHttpError(error: unknown): error is KiroManagementErrorInfo {
   if (!(error instanceof Error)) return false;
-  const candidate = error as Partial<KiroManagementHttpError>;
+  const candidate = error as Partial<KiroManagementErrorInfo>;
   return (
     (candidate.plane === "management" && typeof candidate.status === "number") ||
     error instanceof KiroManagementHttpError

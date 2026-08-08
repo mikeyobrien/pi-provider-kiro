@@ -513,6 +513,19 @@ describe("management-plane error typing", () => {
     expect(isKiroManagementHttpError(foreign)).toBe(true);
   });
 
+  it("narrows to the data fields only, not to the class methods", async () => {
+    const error: unknown = await managementFailure(403, "Forbidden").catch((e: unknown) => e);
+
+    if (!isKiroManagementHttpError(error)) throw new Error("expected a management error");
+    expect(error.status).toBe(403);
+    expect(error.plane).toBe("management");
+    expect(error.refreshAttempted).toBe(false);
+    // A foreign copy's error passes the guard but carries no methods, so the
+    // narrowed type must not offer one — this would throw at runtime.
+    // @ts-expect-error markRefreshAttempted is absent from KiroManagementErrorInfo
+    expect(error.markRefreshAttempted).toBeTypeOf("function");
+  });
+
   it("rejects non-errors and unrelated errors", () => {
     expect(isKiroManagementHttpError(undefined)).toBe(false);
     expect(isKiroManagementHttpError({ plane: "management", status: 403 })).toBe(false);

@@ -47,6 +47,7 @@ import { parseInvokeToolCalls } from "./invoke-tool-parser.js";
 import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, refreshViaKiroCli } from "./kiro-cli.js";
 import {
   invalidateKiroProfileArn,
+  KIRO_AUTH_PLANE_DIAGNOSTIC,
   type KiroManagementAuth,
   KiroManagementHttpError,
   resetKiroProfileArnCache,
@@ -1913,6 +1914,19 @@ function streamKiroWithUsageTracking(
             ...(error.reasonCode !== undefined ? { reasonCode: error.reasonCode } : {}),
             ...(error.retryAfterMs !== undefined ? { retryAfterMs: error.retryAfterMs } : {}),
             ...(error.providerAttempts !== undefined ? { providerAttempts: error.providerAttempts } : {}),
+          }),
+        );
+      }
+      // Management-plane failures get their own diagnostic so a consumer can
+      // tell a credential problem (re-authenticable) from a runtime 403 that
+      // may be an entitlement denial, without matching error prose.
+      if (error instanceof KiroManagementHttpError) {
+        PiAi.appendAssistantMessageDiagnostic(
+          output,
+          PiAi.createAssistantMessageDiagnostic(KIRO_AUTH_PLANE_DIAGNOSTIC, error, {
+            plane: error.plane,
+            status: error.status,
+            refreshAttempted: error.refreshAttempted,
           }),
         );
       }
