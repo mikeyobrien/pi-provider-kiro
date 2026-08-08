@@ -491,7 +491,6 @@ export function streamKiro(
               capacityRetryCount++;
               const delayMs = exponentialBackoff(capacityRetryCount - 1, capacityRetryConfig.baseDelayMs, 30_000);
               const msg = `INSUFFICIENT_MODEL_CAPACITY — retrying in ${delayMs}ms (${capacityRetryCount}/${capacityRetryConfig.maxRetries})`;
-              console.error(`[pi-provider-kiro] ${msg}`);
               logCapacityEvent(msg);
               await abortableDelay(delayMs, options?.signal);
               continue;
