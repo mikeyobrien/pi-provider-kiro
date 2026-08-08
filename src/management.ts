@@ -171,10 +171,12 @@ export class KiroManagementHttpError extends Error {
   }
 
   /**
-   * True when this provider already refreshed credentials and retried before
-   * the error escaped. A consumer seeing `true` knows in-process re-auth was
-   * tried and lost, so prompting for another automatic retry is wasted work —
-   * the state needs a human to re-authenticate.
+   * True when this provider already tried to obtain a working credential before
+   * the error escaped — either the refresh itself failed, or it produced a
+   * credential the management plane then rejected too. A consumer seeing `true`
+   * knows in-process re-auth was tried and lost, so prompting for another
+   * automatic retry is wasted work — the state needs a human to
+   * re-authenticate.
    *
    * Only `streamKiro` sets this, and it never rethrows to its caller — it
    * flattens the error into `AssistantMessage.errorMessage`. Read this field

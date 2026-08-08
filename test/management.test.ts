@@ -453,7 +453,15 @@ describe("management-plane error typing", () => {
     return resolveKiroProfileArn(auth);
   };
 
-  it("is reachable through the package entry point", async () => {
+  // Scope note: this asserts the symbols leave `src/index.ts`, the module
+  // esbuild bundles into `dist/index.js` — the file `package.json`'s
+  // `pi.extensions` tells the pi host to load. It is NOT proof that
+  // `import { KiroManagementHttpError } from "pi-provider-kiro"` resolves for an
+  // npm consumer: `package.json` declares no `main`, `types`, or `exports`, so a
+  // bare specifier cannot resolve and no `.d.ts` ships. Establishing that
+  // contract needs packed-tarball coverage and belongs to the packaging change,
+  // not here.
+  it("is re-exported from the extension entry module", async () => {
     const entry = await import("../src/index.js");
 
     expect(entry.KiroManagementHttpError).toBe(KiroManagementHttpError);
