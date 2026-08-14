@@ -23,12 +23,17 @@ import type { Message } from "@smithy/types";
 import { parseBracketToolCalls } from "./bracket-tool-parser.js";
 import { debugEnabled, debugLog, formatSafeError, redactSensitiveText } from "./debug.js";
 import {
+  createKiroTurnProvenanceDiagnostic,
+  type KiroStopReasonSource,
+  mapModeledStopReason,
+} from "./diagnostics.js";
+import {
   buildKiroAdditionalModelRequestFields,
   getKiroEffortConfig,
   type KiroAdditionalModelRequestFields,
 } from "./effort.js";
 import { getKiroEndpoints, getKiroRegionFromEndpoint } from "./endpoints.js";
-import { parseKiroEvent } from "./event-parser.js";
+import { type KiroUsageData, parseKiroEvent } from "./event-parser.js";
 import {
   addPlaceholderTools,
   assertHistoryWithinLimit,
@@ -55,6 +60,13 @@ import {
   MAX_RETRY_DELAY,
 } from "./retry.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
+import {
+  applyContextUsage,
+  applyMeteringCredits,
+  finalizeKiroUsage,
+  type KiroUsage,
+  resetKiroUsage,
+} from "./token-usage.js";
 import { countTokens } from "./tokenizer.js";
 import {
   buildHistory,
@@ -187,20 +199,29 @@ export function streamKiro(
     .AssistantMessageEventStream;
   const stream = new StreamCtor();
   (async () => {
+    // Held as `KiroUsage` (pi's `Usage` plus Kiro-only figures) so the
+    // Kiro-specific fields are compiler-checked instead of being written
+    // through a cast. `output.usage` is the same object.
+    //
+    // cacheRead/cacheWrite start at 0 because pi's `Usage` requires numbers,
+    // but that 0 is a placeholder, not a measurement: until a turn reports
+    // cache counts, `usage.provenance.cache` stays absent so consumers can
+    // tell "no cache hits" apart from "the service never said".
+    const usage: KiroUsage = {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    };
     const output: AssistantMessage = {
       role: "assistant",
       content: [],
       api: model.api,
       provider: model.provider,
       model: model.id,
-      usage: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 0,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-      },
+      usage,
       stopReason: "stop",
       timestamp: Date.now(),
     };
@@ -561,8 +582,18 @@ export function streamKiro(
         const bodyReader = (response.body as unknown as ReadableStream<Uint8Array>).getReader();
         let totalContent = "";
         let lastContentData = "";
-        let usageEvent: { inputTokens?: number; outputTokens?: number } | null = null;
-        let receivedContextUsage = false;
+        let usageEvent: KiroUsageData | null = null;
+        // `usage` outlives this loop; clear whatever a previous attempt reported
+        // so a failed attempt's counts cannot survive into this one.
+        resetKiroUsage(usage);
+        // True once a frame arrived that says the turn reached a settled state
+        // rather than being cut off mid-flight: a contextUsageEvent or a
+        // metadataEvent. Distinct from the numbers those frames carry — this is
+        // purely the "the service got to the end of this turn" signal that the
+        // no-modeled-stop-reason fallback needs. It used to be spelled
+        // `receivedContextUsage`, which conflated the two and left every
+        // metadataEvent-only stream looking truncated.
+        let sawSettlingFrame = false;
         const thinkingParser = thinkingEnabled ? new ThinkingTagParser(output, stream) : null;
         let nativeThinkingBlockIndex: number | null = null;
         let nativeThinkingEnded = false;
@@ -671,16 +702,26 @@ export function streamKiro(
           const { done, value } = iterResult;
           if (done) break;
           resetIdle();
-          const eventPayload = Object.values(value as Record<string, unknown>)[0] as Record<string, unknown>;
-          const event = parseKiroEvent(eventPayload);
+          // The marshaller keys each frame by its modeled `ChatResponseStream`
+          // union member (from the `:event-type` header). Route on that key
+          // instead of guessing the member from which fields are populated.
+          const frameEntry = Object.entries(value as Record<string, unknown>)[0];
+          if (!frameEntry) continue;
+          const [frameKey, framePayload] = frameEntry;
+          const event = parseKiroEvent(frameKey, (framePayload ?? {}) as Record<string, unknown>);
           if (!event) continue;
+          if (event.type === "ignored") {
+            if (debugEnabled()) debugLog("stream.events.ignored", [event.data.key]);
+            continue;
+          }
           if (debugEnabled()) debugLog("stream.events", [event]);
           switch (event.type) {
             case "contextUsage": {
-              const pct = event.data.contextUsagePercentage;
-              output.usage.input = Math.round((pct / 100) * model.contextWindow);
-              (output.usage as unknown as Record<string, unknown>).contextPercent = pct;
-              receivedContextUsage = true;
+              // Provisional only: this arrives long before metadataEvent, so it
+              // keeps live context% moving mid-turn. The input count it derives
+              // is superseded by the measured one in finalizeKiroUsage().
+              applyContextUsage(usage, event.data.contextUsagePercentage, model.contextWindow);
+              sawSettlingFrame = true;
               break;
             }
             case "thinkingText": {
@@ -743,7 +784,21 @@ export function streamKiro(
               break;
             }
             case "usage": {
-              usageEvent = event.data;
+              // Every MetadataEvent field is optional, so the service may split
+              // tokenUsage and stopReason/stopDetails across frames. Merge so a
+              // later partial frame cannot erase counts already received.
+              const prev: KiroUsageData = usageEvent ?? {};
+              usageEvent = { ...prev, ...event.data };
+              sawSettlingFrame = true;
+              break;
+            }
+            case "metering": {
+              // MeteringEvent.usage counts credits, not tokens. Recorded as its
+              // own field so the actual billing unit is observable; never folded
+              // into token accounting or into Usage.cost. Both grammatical forms
+              // are passed through so the count picks the right one.
+              applyMeteringCredits(usage, event.data.credits, event.data.unit, event.data.unitPlural);
+              if (debugEnabled()) debugLog("stream.metering", [event.data]);
               break;
             }
             case "error": {
@@ -762,6 +817,14 @@ export function streamKiro(
           if (retryCount < maxRetries) {
             retryCount++;
             const delayMs = exponentialBackoff(retryCount - 1, 1000, MAX_RETRY_DELAY);
+            // `output` is created once outside the retry loop, so anything the
+            // aborted attempt already appended survives into the next one. A
+            // typed error frame (throttling/validation/serviceUnavailable) can
+            // arrive after partial text, which would otherwise concatenate the
+            // abandoned prefix onto the retried response. The empty-response
+            // retry below resets for the same reason. `textBlockIndex` and the
+            // tool-call state are per-iteration and need no reset here.
+            output.content = [];
             await abortableDelay(delayMs, options?.signal);
             continue;
           }
@@ -819,17 +882,28 @@ export function streamKiro(
             content: (output.content[textBlockIndex] as TextContent).text,
             partial: output,
           });
-        // The Kiro streaming API does not reliably emit per-response output
-        // token counts (unlike Anthropic's `output_tokens` or Bedrock's
-        // `usage.outputTokens`). When the `usage` event is missing or only
-        // reports `inputTokens`, fall back to a tiktoken estimate over
-        // everything the assistant emitted — text plus tool-call input JSON
-        // (accumulated into `totalContent` above). Otherwise tool-call-only
-        // turns report 0 output tokens and break consumers like the TPS
-        // extension that watch `usage.output`.
-        if (usageEvent?.inputTokens !== undefined) output.usage.input = usageEvent.inputTokens;
-        output.usage.output = usageEvent?.outputTokens ?? countTokens(totalContent);
-        output.usage.totalTokens = output.usage.input + output.usage.output;
+        // Fold in whatever `metadataEvent.tokenUsage` reported.
+        //
+        // `KiroUsageData.inputTokens` is `TokenUsage.uncachedInputTokens` — the
+        // input billed at full rate, NOT total input. pi's `usage.input` is the
+        // same uncached slot, with `cacheRead`/`cacheWrite` as siblings, and
+        // `calculateCost` prices all three separately, so the cache counts must
+        // land whenever `input` comes from the wire; otherwise a cached turn
+        // reports a fraction of its real input and is priced far too low.
+        //
+        // `TokenUsage.totalTokens` is required on the wire while the cache counts
+        // are optional, so the service's own total is authoritative — recomputing
+        // from components under-reports whenever one is omitted.
+        //
+        // finalizeKiroUsage() owns all of that, plus the measured > derived >
+        // estimated precedence and the slot normalization that keeps
+        // input/cacheRead/cacheWrite disjoint. The tiktoken estimate over
+        // everything the assistant emitted (text plus tool-call input JSON,
+        // accumulated into `totalContent`) fills only the figures the wire
+        // omitted: Kiro does not reliably send `outputTokens`, and a
+        // tool-call-only turn reporting 0 output breaks consumers that watch
+        // `usage.output`, such as the TPS extension.
+        finalizeKiroUsage(usage, usageEvent, () => countTokens(totalContent));
         try {
           PiAi.calculateCost(model, output.usage);
         } catch {
@@ -884,10 +958,59 @@ export function streamKiro(
         // when all tool calls were skipped due to empty/unparseable input — that
         // combination (empty content + toolUse stop) causes pi's agent loop to
         // stall waiting for tool results that will never arrive.
-        if (!receivedContextUsage && emittedToolCalls === 0) {
+        //
+        // Precedence: an emitted tool call outranks everything, because the
+        // deltas are already on the stream and cannot be retracted — the caller
+        // has to be told to run them. Then the service's own `stopReason`, when
+        // this peer has a member that means the same thing. Only then the local
+        // reconstruction.
+        const modeledStopReason = mapModeledStopReason(usageEvent?.rawStopReason);
+        let stopReasonSource: KiroStopReasonSource = "inferred";
+        if (emittedToolCalls > 0) {
+          output.stopReason = "toolUse";
+          // Agrees with the wire only if the service also said TOOL_USE; when it
+          // said something else, the emitted value is this provider's decision.
+          if (modeledStopReason === "toolUse") stopReasonSource = "modeled";
+        } else if (modeledStopReason !== undefined) {
+          // `toolUse` is unreachable here: it is gated on an emitted tool call,
+          // and this branch runs only when there is none.
+          output.stopReason = modeledStopReason === "toolUse" ? "stop" : modeledStopReason;
+          stopReasonSource = modeledStopReason === "toolUse" ? "inferred" : "modeled";
+        } else if (!sawSettlingFrame) {
+          // No modeled stop reason and nothing to say the turn ever settled:
+          // treat it as cut off. `sawSettlingFrame` — not `receivedContextUsage`
+          // — because a metadataEvent settles the turn just as well, and reading
+          // only the contextUsage frame here fabricated `"length"` on any
+          // metadataEvent-only stream. That fabrication is not cosmetic: it makes
+          // wasPreviousResponseTruncated() prepend TRUNCATION_NOTICE to the next
+          // turn, asking the model to continue an answer it had finished.
           output.stopReason = "length";
         } else {
-          output.stopReason = emittedToolCalls > 0 ? "toolUse" : "stop";
+          output.stopReason = "stop";
+        }
+        // Record where this turn's numbers came from. `usage.provenance` and the
+        // modeled stop reason are both invisible in the emitted message: the
+        // usage numbers are a flat bag with no room to say whether a figure was
+        // measured or invented, and several `MetadataEvent.stopReason` members
+        // have no slot in pi's `stopReason` vocabulary at this peer (refusals,
+        // PAUSE_TURN, context overflow — see mapModeledStopReason). diagnostics[]
+        // is the only structured channel out of here — streamKiro never rejects,
+        // it encodes outcomes into the stream.
+        try {
+          PiAi.appendAssistantMessageDiagnostic(
+            output,
+            createKiroTurnProvenanceDiagnostic({
+              usage: usage.provenance,
+              stopReason: output.stopReason,
+              stopReasonSource,
+              rawStopReason: usageEvent?.rawStopReason,
+              stopDetails: usageEvent?.stopDetails,
+            }),
+          );
+        } catch (e) {
+          // Observational only. A malformed record must never cost the caller a
+          // turn that otherwise completed.
+          debugLog("diagnostics.failed", { error: formatSafeError(e) });
         }
         stream.push({ type: "done", reason: output.stopReason as "stop" | "toolUse", message: output });
         debugLog("response.done", {
