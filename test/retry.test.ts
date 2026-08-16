@@ -9,6 +9,7 @@ import {
   isNonRetryableBodyError,
   isTooBigError,
   MAX_RETRY_DELAY,
+  resolveStreamRetryDelay,
   retryConfig,
 } from "../src/retry.js";
 
@@ -36,6 +37,48 @@ describe("exponentialBackoff", () => {
 describe("MAX_RETRY_DELAY", () => {
   it("is exported as 10000ms", () => {
     expect(MAX_RETRY_DELAY).toBe(10000);
+  });
+});
+
+describe("resolveStreamRetryDelay", () => {
+  it("falls back to the computed backoff when the server states no delay", () => {
+    expect(resolveStreamRetryDelay(undefined, 1000, MAX_RETRY_DELAY)).toBe(1000);
+  });
+
+  it("prefers a stated delay longer than the computed backoff", () => {
+    // The case the blind backoff got wrong: server says 5s, backoff says 1s, so
+    // retrying on the backoff lands inside the throttle window and is rejected.
+    expect(resolveStreamRetryDelay(5000, 1000, MAX_RETRY_DELAY)).toBe(5000);
+  });
+
+  it("prefers a stated delay shorter than the computed backoff", () => {
+    // Server direction wins in both directions; it is not a floor on the backoff.
+    expect(resolveStreamRetryDelay(500, 8000, MAX_RETRY_DELAY)).toBe(500);
+  });
+
+  it("clamps a stated delay to maxMs", () => {
+    // Liveness guard: one frame must not be able to park the stream for an
+    // arbitrary time. Truncating does mean we retry before this window elapses.
+    expect(resolveStreamRetryDelay(60_000, 1000, MAX_RETRY_DELAY)).toBe(MAX_RETRY_DELAY);
+  });
+
+  it("passes through a stated delay exactly equal to maxMs", () => {
+    expect(resolveStreamRetryDelay(MAX_RETRY_DELAY, 1000, MAX_RETRY_DELAY)).toBe(MAX_RETRY_DELAY);
+  });
+
+  it("honors an explicit zero as retry-now rather than treating it as absent", () => {
+    // `0` is a real instruction and distinct from an omitted field. The retry
+    // count still bounds how many times this can happen.
+    expect(resolveStreamRetryDelay(0, 1000, MAX_RETRY_DELAY)).toBe(0);
+  });
+
+  it("ignores a negative stated delay", () => {
+    expect(resolveStreamRetryDelay(-5000, 1000, MAX_RETRY_DELAY)).toBe(1000);
+  });
+
+  it("ignores non-finite stated delays", () => {
+    expect(resolveStreamRetryDelay(Number.NaN, 1000, MAX_RETRY_DELAY)).toBe(1000);
+    expect(resolveStreamRetryDelay(Number.POSITIVE_INFINITY, 1000, MAX_RETRY_DELAY)).toBe(1000);
   });
 });
 

@@ -15,7 +15,13 @@ import { validateKiroConversation, validateKiroToolStructure } from "../src/hist
 import { capacityRetryConfig, retryConfig } from "../src/retry.js";
 import { resetProfileArnCache, streamKiro } from "../src/stream.js";
 import { EMPTY_CONTENT_PLACEHOLDER, type KiroHistoryEntry } from "../src/transform.js";
-import { concatMessages, encodeEventMessage } from "./helpers/event-stream.js";
+import {
+  concatMessages,
+  encodeEventMessage,
+  encodeExceptionMessage,
+  encodeExceptionMessageWithRawBody,
+  encodeRawExceptionMessage,
+} from "./helpers/event-stream.js";
 
 const ts = Date.now();
 const zeroUsage = {
@@ -3197,10 +3203,12 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
-  it("prefers usage event values over tiktoken when available", async () => {
+  it("prefers metadataEvent token usage over tiktoken when available", async () => {
     const mockFetch = mockFetchChunked([
       '{"content":"Hello"}',
-      '{"usage":{"inputTokens":500,"outputTokens":200}}',
+      // MetadataEvent shape from ChatResponseStream: token counts live under
+      // tokenUsage.uncachedInputTokens/outputTokens, not a top-level `usage`.
+      '{"tokenUsage":{"uncachedInputTokens":500,"outputTokens":200,"totalTokens":700}}',
       '{"contextUsagePercentage":10}',
     ]);
     vi.stubGlobal("fetch", mockFetch);
@@ -3220,6 +3228,849 @@ describe("Feature 9: Streaming Integration", () => {
     // contextPercent should still reflect the API's contextUsagePercentage,
     // not be derived from the (overwritten) input token count
     expect((msg.usage as unknown as Record<string, unknown>).contextPercent).toBe(10);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("records cacheRead/cacheWrite so a cached turn is not priced as uncached input", async () => {
+    // TokenUsage.uncachedInputTokens excludes cache reads. Taking `input` from
+    // it while leaving cacheRead at 0 would report ~200 input tokens for a turn
+    // that actually read 50k cached tokens, and price it accordingly.
+    const mockFetch = mockFetchChunked([
+      '{"content":"Hello"}',
+      '{"tokenUsage":{"uncachedInputTokens":200,"outputTokens":50,"totalTokens":50250,"cacheReadInputTokens":50000,"cacheWriteInputTokens":0}}',
+      '{"contextUsagePercentage":5}',
+    ]);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
+
+    expect(msg.usage.input).toBe(200);
+    expect(msg.usage.cacheRead).toBe(50000);
+    expect(msg.usage.cacheWrite).toBe(0);
+    // input + cacheRead + cacheWrite + output, matching the wire totalTokens.
+    expect(msg.usage.totalTokens).toBe(50250);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the wire totalTokens when the service omits an optional cache count", async () => {
+    // TokenUsage.totalTokens is required on the wire; cacheReadInputTokens and
+    // cacheWriteInputTokens are optional. Recomputing the total from components
+    // would report 250 for a turn the service says cost 50250 context tokens,
+    // and calculateContextTokens drives the context gauge from that total.
+    const mockFetch = mockFetchChunked([
+      '{"content":"Hello"}',
+      '{"tokenUsage":{"uncachedInputTokens":200,"outputTokens":50,"totalTokens":50250}}',
+    ]);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
+
+    expect(msg.usage.input).toBe(200);
+    expect(msg.usage.cacheRead).toBe(0);
+    expect(msg.usage.totalTokens).toBe(50250);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps metadataEvent token counts when a meteringEvent credit frame follows", async () => {
+    // MeteringEvent.usage is a NUMBER of credits. It is the only top-level
+    // `usage` the service emits, and the pre-routing field ladder consumed it as
+    // a token object, reading .inputTokens/.outputTokens off a number. Framed
+    // with an explicit `:event-type` because a units-only or count-only metering
+    // payload cannot be reliably inferred from its shape.
+    const frames = concatMessages(
+      encodeEventMessage({ content: "Hello" }),
+      encodeEventMessage(
+        { tokenUsage: { uncachedInputTokens: 500, outputTokens: 200, totalTokens: 700 } },
+        "metadataEvent",
+      ),
+      encodeEventMessage({ usage: 3, unit: "credit", unitPlural: "credits" }, "meteringEvent"),
+    );
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi
+            .fn()
+            .mockResolvedValueOnce({ done: false, value: frames })
+            .mockResolvedValueOnce({ done: true, value: undefined }),
+          releaseLock: () => {},
+        }),
+        cancel: async () => {},
+      },
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
+
+    // The credit count must not land in, or erase, token accounting.
+    expect(msg.usage.input).toBe(500);
+    expect(msg.usage.output).toBe(200);
+    expect(msg.usage.totalTokens).toBe(700);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("merges metadataEvent frames so a later stopReason frame cannot erase token counts", async () => {
+    // Every MetadataEvent field is optional; tokenUsage and stopReason may
+    // arrive in separate frames.
+    const mockFetch = mockFetchChunked([
+      '{"content":"Hello"}',
+      '{"tokenUsage":{"uncachedInputTokens":500,"outputTokens":200,"totalTokens":700}}',
+      '{"stopReason":"END_TURN"}',
+      '{"contextUsagePercentage":10}',
+    ]);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
+
+    expect(msg.usage.input).toBe(500);
+    expect(msg.usage.output).toBe(200);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("surfaces a mid-stream throttlingError frame and retries", async () => {
+    // throttlingError / validationError / serviceUnavailableError are distinct
+    // ChatResponseStream members targeting @error shapes, so the service frames
+    // them as `:message-type: exception`. Before key routing they reached the
+    // caller only as an opaque JSON blob with the modeled class discarded.
+    let callCount = 0;
+    const mockFetch = vi.fn().mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return {
+          ok: true,
+          body: {
+            getReader: () => ({
+              read: vi
+                .fn()
+                .mockResolvedValueOnce({
+                  done: false,
+                  value: concatMessages(
+                    encodeEventMessage({ content: "partial" }),
+                    encodeExceptionMessage("throttlingError", {
+                      message: "Too many requests",
+                      reason: "INSUFFICIENT_MODEL_CAPACITY",
+                      retryAfterMilliseconds: 10,
+                    }),
+                  ),
+                })
+                .mockResolvedValueOnce({ done: true, value: undefined }),
+              cancel: vi.fn().mockResolvedValue(undefined),
+              releaseLock: () => {},
+            }),
+          },
+        };
+      }
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({
+                done: false,
+                value: encodeBody('{"content":"recovered"}{"contextUsagePercentage":5}'),
+              })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+            cancel: vi.fn().mockResolvedValue(undefined),
+            releaseLock: () => {},
+          }),
+        },
+      };
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    const done = events.find((e) => e.type === "done");
+    expect(done?.type === "done" && (done.message.content[0] as TextContent).text).toBe("recovered");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("waits the server-stated throttle window instead of the computed backoff", async () => {
+    // `ThrottlingException.retryAfterMilliseconds` states how long the throttle
+    // window is. The retry site used to compute `exponentialBackoff(0, 1000, ...)`
+    // = 1000ms regardless, so a stated window was discarded and the retry fired
+    // inside it. 1000ms appears at this site ONLY if the backoff was used, which
+    // makes it a clean discriminator for the pre-fix behavior.
+    const STATED_MS = 20;
+    const COMPUTED_BACKOFF_MS = 1000;
+    const realSetTimeout = globalThis.setTimeout;
+    const requestedDelays: number[] = [];
+    // Pass-through spy: records what was asked for without altering timing, so
+    // the assertion is on the requested delay, not on wall-clock measurement.
+    vi.stubGlobal("setTimeout", ((fn: () => void, ms?: number, ...rest: unknown[]) => {
+      if (typeof ms === "number") requestedDelays.push(ms);
+      return (realSetTimeout as unknown as (...a: unknown[]) => unknown)(fn, ms, ...rest);
+    }) as unknown as typeof globalThis.setTimeout);
+
+    let callCount = 0;
+    const mockFetch = vi.fn().mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return {
+          ok: true,
+          body: {
+            getReader: () => ({
+              read: vi
+                .fn()
+                .mockResolvedValueOnce({
+                  done: false,
+                  value: encodeExceptionMessage("throttlingError", {
+                    message: "Too many requests",
+                    retryAfterMilliseconds: STATED_MS,
+                  }),
+                })
+                .mockResolvedValueOnce({ done: true, value: undefined }),
+              cancel: vi.fn().mockResolvedValue(undefined),
+              releaseLock: () => {},
+            }),
+          },
+        };
+      }
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({ done: false, value: encodeBody('{"content":"recovered"}') })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+            cancel: vi.fn().mockResolvedValue(undefined),
+            releaseLock: () => {},
+          }),
+        },
+      };
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(requestedDelays).toContain(STATED_MS);
+    expect(requestedDelays).not.toContain(COMPUTED_BACKOFF_MS);
+    const done = events.find((e) => e.type === "done");
+    expect(done?.type === "done" && (done.message.content[0] as TextContent).text).toBe("recovered");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("falls back to the computed backoff when a typed error states no delay", async () => {
+    // Negative control for the test above: same exception-framed member with
+    // `retryAfterMilliseconds` omitted must still use exponential backoff.
+    const realSetTimeout = globalThis.setTimeout;
+    const requestedDelays: number[] = [];
+    vi.stubGlobal("setTimeout", ((fn: () => void, ms?: number, ...rest: unknown[]) => {
+      if (typeof ms === "number") requestedDelays.push(ms);
+      // Collapse only the 1000ms retry backoff so the negative control stays
+      // fast; every other timer (first-token, idle) keeps its real duration.
+      const effective = ms === 1000 ? 1 : ms;
+      return (realSetTimeout as unknown as (...a: unknown[]) => unknown)(fn, effective, ...rest);
+    }) as unknown as typeof globalThis.setTimeout);
+
+    let callCount = 0;
+    const mockFetch = vi.fn().mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return {
+          ok: true,
+          body: {
+            getReader: () => ({
+              read: vi
+                .fn()
+                .mockResolvedValueOnce({
+                  done: false,
+                  value: encodeExceptionMessage("throttlingError", { message: "Too many requests" }),
+                })
+                .mockResolvedValueOnce({ done: true, value: undefined }),
+              cancel: vi.fn().mockResolvedValue(undefined),
+              releaseLock: () => {},
+            }),
+          },
+        };
+      }
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({ done: false, value: encodeBody('{"content":"recovered"}') })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+            cancel: vi.fn().mockResolvedValue(undefined),
+            releaseLock: () => {},
+          }),
+        },
+      };
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(requestedDelays).toContain(1000);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("does not reuse a previous attempt's stated delay for a later untimed error", async () => {
+    // `streamErrorData` is declared per attempt, so a stated window cannot pin
+    // every later delay. Hoisting that declaration out of the retry loop would
+    // make attempt 2 sleep attempt 1's 20ms instead of its own 2000ms backoff,
+    // which is why this is pinned rather than left to structure.
+    const realSetTimeout = globalThis.setTimeout;
+    const requestedDelays: number[] = [];
+    vi.stubGlobal("setTimeout", ((fn: () => void, ms?: number, ...rest: unknown[]) => {
+      if (typeof ms === "number") requestedDelays.push(ms);
+      // Collapse only the second-attempt backoff so the test stays fast.
+      const effective = ms === 2000 ? 1 : ms;
+      return (realSetTimeout as unknown as (...a: unknown[]) => unknown)(fn, effective, ...rest);
+    }) as unknown as typeof globalThis.setTimeout);
+
+    let callCount = 0;
+    const mockFetch = vi.fn().mockImplementation(async () => {
+      callCount++;
+      // Attempt 1: throttle stating 20ms. Attempt 2: a validation error with no
+      // stated delay, so it must fall back to its own backoff.
+      if (callCount <= 2) {
+        const frame =
+          callCount === 1
+            ? encodeExceptionMessage("throttlingError", {
+                message: "Too many requests",
+                retryAfterMilliseconds: 20,
+              })
+            : encodeExceptionMessage("serviceUnavailableError", { message: "unavailable" });
+        return {
+          ok: true,
+          body: {
+            getReader: () => ({
+              read: vi
+                .fn()
+                .mockResolvedValueOnce({ done: false, value: frame })
+                .mockResolvedValueOnce({ done: true, value: undefined }),
+              cancel: vi.fn().mockResolvedValue(undefined),
+              releaseLock: () => {},
+            }),
+          },
+        };
+      }
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({ done: false, value: encodeBody('{"content":"recovered"}') })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+            cancel: vi.fn().mockResolvedValue(undefined),
+            releaseLock: () => {},
+          }),
+        },
+      };
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    // Attempt 1 honored the stated window; attempt 2 used its own backoff.
+    expect(requestedDelays).toContain(20);
+    expect(requestedDelays).toContain(2000);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("reports the modeled exception class when a typed error frame outlives every retry", async () => {
+    // Exception-framed member: the marshaller throws whatever the deserializer
+    // returns for the `:exception-type` key, so the class name only survives if
+    // that callback recognizes the member. Returning the bare payload would
+    // surface `{"message":"capacity exhausted"}` with no class at all.
+    const mockFetch = vi.fn().mockImplementation(async () => ({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi
+            .fn()
+            .mockResolvedValueOnce({
+              done: false,
+              value: encodeExceptionMessage("serviceUnavailableError", { message: "capacity exhausted" }),
+            })
+            .mockResolvedValueOnce({ done: true, value: undefined }),
+          cancel: vi.fn().mockResolvedValue(undefined),
+          releaseLock: () => {},
+        }),
+      },
+    }));
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    const error = events.find((e) => e.type === "error");
+    expect(error?.type === "error" && error.error.errorMessage).toContain("ServiceUnavailableException");
+    expect(error?.type === "error" && error.error.errorMessage).toContain("capacity exhausted");
+
+    vi.unstubAllGlobals();
+  }, 30000);
+
+  it("keeps the exception-type name when the member is not one this client models", async () => {
+    // Smithy's own raw-body fallback only fires when the deserializer returns a
+    // `$unknown` property, which this one never does, so an unmodeled member
+    // would otherwise be thrown as the bare parsed object and reach the caller
+    // as `{"message":"..."}` with the member name gone — the same class loss
+    // this card removes for the four modeled members.
+    const mockFetch = vi.fn().mockImplementation(async () => ({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi
+            .fn()
+            .mockResolvedValueOnce({
+              done: false,
+              value: encodeRawExceptionMessage("quotaExceededError", { message: "monthly quota gone" }),
+            })
+            .mockResolvedValueOnce({ done: true, value: undefined }),
+          cancel: vi.fn().mockResolvedValue(undefined),
+          releaseLock: () => {},
+        }),
+      },
+    }));
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    const error = events.find((e) => e.type === "error");
+    expect(error?.type === "error" && error.error.errorMessage).toContain("quotaExceededError");
+    expect(error?.type === "error" && error.error.errorMessage).toContain("monthly quota gone");
+
+    vi.unstubAllGlobals();
+  }, 30000);
+
+  it("classifies an exception frame that names the exception class instead of the union member", async () => {
+    // `:exception-type` is chosen by the service and is not guaranteed to be the
+    // union member name: the hand-written event-stream bridge in the generated
+    // client for this same service accepts `throttlingError` OR
+    // `ThrottlingException` for every one of the four members.
+    //
+    // This is an end-to-end pin that a class-name token survives Smithy's
+    // exception framing intact. The classification itself (`kind: "throttling"`
+    // vs `"unknown"`) is asserted in test/event-parser.test.ts, because
+    // `KiroErrorData.kind` is not yet surfaced on the emitted AssistantMessage —
+    // the diagnostics card owns that.
+    const mockFetch = vi.fn().mockImplementation(async () => ({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi
+            .fn()
+            .mockResolvedValueOnce({
+              done: false,
+              value: encodeRawExceptionMessage("ServiceUnavailableException", { message: "capacity exhausted" }),
+            })
+            .mockResolvedValueOnce({ done: true, value: undefined }),
+          cancel: vi.fn().mockResolvedValue(undefined),
+          releaseLock: () => {},
+        }),
+      },
+    }));
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    const error = events.find((e) => e.type === "error");
+    expect(error?.type === "error" && error.error.errorMessage).toContain("ServiceUnavailableException");
+    expect(error?.type === "error" && error.error.errorMessage).toContain("capacity exhausted");
+
+    vi.unstubAllGlobals();
+  }, 30000);
+
+  it("keeps the modeled class when an exception frame body is not parseable JSON", async () => {
+    // The class is a header, so it survives a body this client cannot read.
+    // Parsing before the exception branch threw a SyntaxError out of the
+    // deserializer, and the caller reported "Unexpected end of JSON input" with
+    // the modeled class gone — the same class loss, reintroduced by a truncated
+    // or non-JSON body.
+    const mockFetch = vi.fn().mockImplementation(async () => ({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi
+            .fn()
+            .mockResolvedValueOnce({
+              done: false,
+              value: encodeExceptionMessageWithRawBody("throttlingError", ""),
+            })
+            .mockResolvedValueOnce({ done: true, value: undefined }),
+          cancel: vi.fn().mockResolvedValue(undefined),
+          releaseLock: () => {},
+        }),
+      },
+    }));
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    const error = events.find((e) => e.type === "error");
+    expect(error?.type === "error" && error.error.errorMessage).toContain("ThrottlingException");
+    expect(error?.type === "error" && error.error.errorMessage).not.toContain("JSON");
+
+    vi.unstubAllGlobals();
+  }, 30000);
+
+  it("does not inherit the failed attempt's cache counts when retrying", async () => {
+    // `usageEvent` is declared inside the retry loop, and the cache writes are
+    // post-loop, so an aborted attempt must contribute nothing to billing.
+    // cacheRead is priced as its own line in calculateCost, so inheriting a
+    // prior attempt's value would over-bill a turn that never read that cache.
+    //
+    // Priced deliberately: `makeModel()` defaults every rate to 0, so a
+    // `cost.*` assertion against the default model passes no matter what leaked
+    // across the retry boundary. Real per-million rates make these assertions
+    // able to fail at all. What actually holds this invariant is `usageEvent`'s
+    // loop scope, not the attempt-boundary reset — dropping the cache lines
+    // from `resetAttemptUsage` leaves this test green, because the aborted
+    // attempt errors before the post-stream cache writes ever run. The
+    // terminal-failure test below is what pins the reset itself.
+    const priced = makeModel({ cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 } });
+    let callCount = 0;
+    const mockFetch = vi.fn().mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return {
+          ok: true,
+          body: {
+            getReader: () => ({
+              read: vi
+                .fn()
+                .mockResolvedValueOnce({
+                  done: false,
+                  value: concatMessages(
+                    encodeEventMessage({
+                      tokenUsage: {
+                        uncachedInputTokens: 999,
+                        outputTokens: 111,
+                        totalTokens: 41110,
+                        cacheReadInputTokens: 40000,
+                        cacheWriteInputTokens: 7,
+                      },
+                    }),
+                    encodeExceptionMessage("throttlingError", { message: "throttled" }),
+                  ),
+                })
+                .mockResolvedValueOnce({ done: true, value: undefined }),
+              cancel: vi.fn().mockResolvedValue(undefined),
+              releaseLock: () => {},
+            }),
+          },
+        };
+      }
+      // Retry succeeds and reports NO metadataEvent at all.
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({
+                done: false,
+                value: encodeBody('{"content":"clean"}{"contextUsagePercentage":5}'),
+              })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+            cancel: vi.fn().mockResolvedValue(undefined),
+            releaseLock: () => {},
+          }),
+        },
+      };
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(priced, makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect((msg.content[0] as TextContent).text).toBe("clean");
+    // The abandoned attempt's counts must not appear anywhere in billing.
+    expect(msg.usage.cacheRead).toBe(0);
+    expect(msg.usage.cacheWrite).toBe(0);
+    expect(msg.usage.cost.cacheRead).toBe(0);
+    expect(msg.usage.cost.cacheWrite).toBe(0);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("reports zero tokens and zero cost when a priced attempt is replaced by a terminally failing retry", async () => {
+    // The post-stream usage writes and `calculateCost` both run BEFORE the
+    // empty-response retry check, so a degenerate attempt that reported
+    // metadataEvent counts leaves a real priced charge on `output.usage.cost`.
+    // `output` outlives the retry loop. If the attempt-boundary reset cleared
+    // only the token counts and left `cost` alone, the terminal error would be
+    // emitted with totalTokens 0 and a stale non-zero charge — an invented bill
+    // for a turn that produced nothing.
+    const priced = makeModel({ cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 } });
+    let callCount = 0;
+    const mockFetch = vi.fn().mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        // Degenerate but expensive: large counts, no text, no tool calls. Gets
+        // priced, then triggers the empty-response retry.
+        return {
+          ok: true,
+          body: {
+            getReader: () => ({
+              read: vi
+                .fn()
+                .mockResolvedValueOnce({
+                  done: false,
+                  value: encodeEventMessage({
+                    tokenUsage: {
+                      uncachedInputTokens: 90000,
+                      outputTokens: 4000,
+                      totalTokens: 194000,
+                      cacheReadInputTokens: 100000,
+                      cacheWriteInputTokens: 0,
+                    },
+                  }),
+                })
+                .mockResolvedValueOnce({ done: true, value: undefined }),
+              cancel: vi.fn().mockResolvedValue(undefined),
+              releaseLock: () => {},
+            }),
+          },
+        };
+      }
+      // Every later attempt fails with a modeled exception frame, so the retry
+      // budget is exhausted and the turn ends in a terminal error.
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({
+                done: false,
+                value: encodeExceptionMessage("serviceUnavailableError", { message: "unavailable" }),
+              })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+            cancel: vi.fn().mockResolvedValue(undefined),
+            releaseLock: () => {},
+          }),
+        },
+      };
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(priced, makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const error = events.find((e) => e.type === "error");
+    expect(error?.type).toBe("error");
+    if (error?.type !== "error") throw new Error("Expected a terminal error event");
+    expect(error.error.errorMessage).toContain("ServiceUnavailableException");
+
+    const usage = error.error.usage;
+    expect(usage.input).toBe(0);
+    expect(usage.output).toBe(0);
+    expect(usage.cacheRead).toBe(0);
+    expect(usage.cacheWrite).toBe(0);
+    expect(usage.totalTokens).toBe(0);
+    // The charge the abandoned attempt earned must be gone with its counts.
+    expect(usage.cost.input).toBe(0);
+    expect(usage.cost.output).toBe(0);
+    expect(usage.cost.cacheRead).toBe(0);
+    expect(usage.cost.cacheWrite).toBe(0);
+    expect(usage.cost.total).toBe(0);
+
+    vi.unstubAllGlobals();
+  }, 30000);
+
+  it("does not inherit the failed attempt's contextUsage input when retrying", async () => {
+    // `contextUsageEvent` writes `output.usage.input` and `contextPercent`
+    // straight onto the shared message, which outlives the retry loop. Routing
+    // typed error members made a mid-stream throttle a live retry trigger, so
+    // without an attempt-boundary reset the retried turn is billed for the
+    // abandoned attempt's input and reports its context gauge.
+    let callCount = 0;
+    const mockFetch = vi.fn().mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return {
+          ok: true,
+          body: {
+            getReader: () => ({
+              read: vi
+                .fn()
+                .mockResolvedValueOnce({
+                  done: false,
+                  value: concatMessages(
+                    encodeEventMessage({ content: "partial" }),
+                    encodeEventMessage({ contextUsagePercentage: 90 }),
+                    encodeExceptionMessage("throttlingError", { message: "slow down" }),
+                  ),
+                })
+                .mockResolvedValueOnce({ done: true, value: undefined }),
+              cancel: vi.fn().mockResolvedValue(undefined),
+              releaseLock: () => {},
+            }),
+          },
+        };
+      }
+      // Retry succeeds reporting NO contextUsage and NO metadataEvent.
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({ done: false, value: encodeEventMessage({ content: "clean" }) })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+            cancel: vi.fn().mockResolvedValue(undefined),
+            releaseLock: () => {},
+          }),
+        },
+      };
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect((msg.content[0] as TextContent).text).toBe("clean");
+    // 90% of a 200000-token window is 180000 input tokens the retried turn
+    // never used.
+    expect(msg.usage.input).toBe(0);
+    expect((msg.usage as unknown as Record<string, unknown>).contextPercent).toBeUndefined();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("does not inherit the failed attempt's token counts across an empty-response retry", async () => {
+    // The post-stream usage writes run BEFORE the empty-response retry check, so
+    // this path leaks differently from the mid-stream error path above. Routing
+    // metadataEvent made it reachable: previously the frame was dropped, so
+    // there were no wire counts to inherit.
+    let callCount = 0;
+    const mockFetch = vi.fn().mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        // A metadataEvent with large counts and no text or tool calls at all.
+        return {
+          ok: true,
+          body: {
+            getReader: () => ({
+              read: vi
+                .fn()
+                .mockResolvedValueOnce({
+                  done: false,
+                  value: encodeEventMessage({
+                    tokenUsage: {
+                      uncachedInputTokens: 999,
+                      outputTokens: 111,
+                      totalTokens: 41110,
+                      cacheReadInputTokens: 40000,
+                      cacheWriteInputTokens: 7,
+                    },
+                  }),
+                })
+                .mockResolvedValueOnce({ done: true, value: undefined }),
+              cancel: vi.fn().mockResolvedValue(undefined),
+              releaseLock: () => {},
+            }),
+          },
+        };
+      }
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({ done: false, value: encodeEventMessage({ content: "clean" }) })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+            cancel: vi.fn().mockResolvedValue(undefined),
+            releaseLock: () => {},
+          }),
+        },
+      };
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect((msg.content[0] as TextContent).text).toBe("clean");
+    expect(msg.usage.input).toBe(0);
+    expect(msg.usage.cacheRead).toBe(0);
+    expect(msg.usage.cacheWrite).toBe(0);
+    // Output falls back to counting the recovered text, never the 111 reported
+    // by the abandoned attempt.
+    expect(msg.usage.output).toBeLessThan(111);
+    expect(msg.usage.totalTokens).toBe(msg.usage.output);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("falls back to summing components when a non-conforming frame omits totalTokens", async () => {
+    // TokenUsage.totalTokens is required on the wire, so this branch only guards
+    // a non-conforming server. The sum must match how the service itself defines
+    // the total: uncachedInput + cacheRead + cacheWrite + output.
+    const mockFetch = mockFetchChunked([
+      '{"content":"Hello"}',
+      '{"tokenUsage":{"uncachedInputTokens":200,"outputTokens":50,"cacheReadInputTokens":50000,"cacheWriteInputTokens":0}}',
+    ]);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
+
+    // Same components as the wire-total test above, which reports 50250.
+    expect(msg.usage.totalTokens).toBe(50250);
 
     vi.unstubAllGlobals();
   });

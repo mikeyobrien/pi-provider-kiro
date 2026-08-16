@@ -28,6 +28,38 @@ export function exponentialBackoff(attempt: number, baseMs: number, maxMs: numbe
 
 export const MAX_RETRY_DELAY = 10_000;
 
+/**
+ * Resolve the wait before a mid-stream retry, preferring a server-stated delay.
+ *
+ * A modeled `ThrottlingException` carries `retryAfterMilliseconds`: the service
+ * stating how long its throttle window is. Computing our own exponential
+ * backoff instead retries *inside* that window, which is throttled again — the
+ * retry attempt is spent rather than used, and the caller pays the full retry
+ * budget without ever getting a response. When the server states a delay, that
+ * value wins over the computed backoff.
+ *
+ * The stated delay is clamped to `maxMs`. That cap is a liveness guard: an
+ * unbounded server-controlled sleep would let one frame park the stream for
+ * arbitrarily long. The tradeoff is real and deliberate — a stated delay longer
+ * than `maxMs` is truncated, so for those we still retry before the window
+ * elapses, exactly as before. The cap bounds the damage; it does not make a
+ * long throttle window fully honored.
+ *
+ * Absent, negative, and non-finite values are not usable delays and fall back to
+ * the computed backoff. An explicit `0` is a real instruction ("retry now") and
+ * is honored as such — distinct from absent — since the retry count remains
+ * bounded by the caller's `maxRetries`.
+ */
+export function resolveStreamRetryDelay(
+  retryAfterMilliseconds: number | undefined,
+  backoffMs: number,
+  maxMs: number,
+): number {
+  if (retryAfterMilliseconds === undefined) return backoffMs;
+  if (!Number.isFinite(retryAfterMilliseconds) || retryAfterMilliseconds < 0) return backoffMs;
+  return Math.min(retryAfterMilliseconds, maxMs);
+}
+
 // Size markers only. "Improperly formed request." is Kiro's generic
 // request-validation rejection (reason `REQUEST_BODY_INVALID`) — it is returned
 // for a malformed body of any size, including an empty `content` field or a

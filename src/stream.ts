@@ -28,7 +28,7 @@ import {
   type KiroAdditionalModelRequestFields,
 } from "./effort.js";
 import { getKiroEndpoints, getKiroRegionFromEndpoint } from "./endpoints.js";
-import { parseKiroEvent } from "./event-parser.js";
+import { type KiroErrorData, type KiroUsageData, parseKiroEvent, parseKiroExceptionFrame } from "./event-parser.js";
 import {
   addPlaceholderTools,
   assertHistoryWithinLimit,
@@ -54,6 +54,7 @@ import {
   isNonRetryableBodyError,
   isTooBigError,
   MAX_RETRY_DELAY,
+  resolveStreamRetryDelay,
 } from "./retry.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
 import { countTokens } from "./tokenizer.js";
@@ -300,8 +301,28 @@ export function streamKiro(
       let retryCount = 0;
       const maxRetries = 3;
       const conversationId = options?.sessionId ?? crypto.randomUUID();
+      // Every wire-derived usage figure is written straight onto `output`, which
+      // outlives the retry loop, so an abandoned attempt's accounting would
+      // otherwise be billed to the turn that replaced it. Two live paths:
+      // `contextUsageEvent` sets `usage.input`/`contextPercent` mid-stream, and
+      // the post-stream metadataEvent writes land *before* the empty-response /
+      // echo-loop retry check. Clearing at the attempt boundary keeps the whole
+      // usage block sourced from one attempt, matching how `usageEvent` itself
+      // is scoped per attempt.
+      const resetAttemptUsage = () => {
+        output.usage.input = 0;
+        output.usage.output = 0;
+        output.usage.cacheRead = 0;
+        output.usage.cacheWrite = 0;
+        output.usage.totalTokens = 0;
+        output.usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+        // Not part of pi's Usage shape; only present once a contextUsageEvent
+        // has been seen, so a retried turn must not report the old gauge.
+        delete (output.usage as unknown as Record<string, unknown>).contextPercent;
+      };
       while (retryCount <= maxRetries) {
         if (options?.signal?.aborted) throw options.signal.reason;
+        resetAttemptUsage();
         const effectiveSystemPrompt = systemPrompt;
         // Relocate a tool result that arrived behind a later assistant turn than
         // the one that called it, before anything positional runs. Interleaved
@@ -677,7 +698,7 @@ export function streamKiro(
         const bodyReader = (response.body as unknown as ReadableStream<Uint8Array>).getReader();
         let totalContent = "";
         let lastContentData = "";
-        let usageEvent: { inputTokens?: number; outputTokens?: number } | null = null;
+        let usageEvent: KiroUsageData | null = null;
         let receivedContextUsage = false;
         const thinkingParser = thinkingEnabled ? new ThinkingTagParser(output, stream) : null;
         let nativeThinkingBlockIndex: number | null = null;
@@ -726,6 +747,11 @@ export function streamKiro(
         let gotFirstToken = false;
         let firstTokenTimedOut = false;
         let streamError: string | null = null;
+        // Structured detail for the last modeled exception frame. The message
+        // string stays the retry/throw contract; this keeps `kind`, `reason`,
+        // and `retryAfterMilliseconds` addressable instead of only readable as
+        // prose inside that string.
+        let streamErrorData: KiroErrorData | null = null;
         const FIRST_TOKEN_SENTINEL = Symbol("firstTokenTimeout");
 
         // Smithy EventStreamMarshaller handles: chunk reassembly, CRC validation,
@@ -748,6 +774,48 @@ export function streamKiro(
           const entry = Object.entries(event)[0];
           if (!entry) throw new Error("Received an empty event stream message");
           const [key, msg] = entry;
+          // The four error members of ChatResponseStream target `@error` shapes,
+          // so the service frames them as `:message-type: exception`. The
+          // marshaller keys those by `:exception-type` and throws whatever this
+          // callback returns, so returning the bare payload would discard the
+          // modeled class. Return an Error carrying the parsed detail instead.
+          if (msg.headers[":message-type"]?.value === "exception") {
+            // Parsed defensively, and BEFORE the shared parse below: an exception
+            // body that is empty or not JSON would otherwise throw a SyntaxError
+            // out of this deserializer, and the caller would report
+            // "Unexpected end of JSON input" with the modeled class gone — the
+            // exact loss this routing removes. The class lives in the header, so
+            // it survives a body we cannot read. The same-service client's own
+            // bridge takes this position too (sse-middleware.ts: "Non-JSON body:
+            // still throw a typed exception with a fallback message").
+            let parsedException: Record<string, unknown> = {};
+            try {
+              const decoded = JSON.parse(utf8Decoder.decode(msg.body)) as unknown;
+              if (decoded && typeof decoded === "object") parsedException = decoded as Record<string, unknown>;
+            } catch {
+              // Header-only classification below.
+            }
+            // An unmodeled member (a fifth error added server-side, or `$unknown`)
+            // still arrives keyed by `:exception-type`. Smithy's own fail-open path
+            // is unreachable here — it only triggers when the deserializer returns
+            // a `$unknown` property, which this one never does — so without a
+            // fallback the marshaller would throw the bare parsed body and the
+            // member name would be lost in exactly the way this routing exists to
+            // prevent. Synthesize the same typed shape with `kind: "unknown"`.
+            const data: KiroErrorData = parseKiroExceptionFrame(key, parsedException) ?? {
+              error: key,
+              kind: "unknown",
+              ...(typeof parsedException.message === "string" ? { message: parsedException.message } : {}),
+              ...(typeof parsedException.reason === "string" ? { reason: parsedException.reason } : {}),
+              ...(typeof parsedException.retryAfterMilliseconds === "number"
+                ? { retryAfterMilliseconds: parsedException.retryAfterMilliseconds }
+                : {}),
+            };
+            const error = new Error(data.message ? `${data.error}: ${data.message}` : data.error);
+            error.name = data.error;
+            (error as Error & { kiroError?: KiroErrorData }).kiroError = data;
+            return { [key]: error } as Record<string, unknown>;
+          }
           const parsed = JSON.parse(utf8Decoder.decode(msg.body)) as Record<string, unknown>;
           return { [key]: parsed } as Record<string, unknown>;
         });
@@ -777,7 +845,11 @@ export function streamKiro(
               iterResult = await iterator.next();
             }
           } catch (e) {
-            // Smithy throws on :message-type error/exception headers
+            // Smithy throws on :message-type error/exception headers. A modeled
+            // exception frame arrives here as the Error built in the
+            // deserializer above, with its parsed detail attached.
+            const kiroError = (e as { kiroError?: KiroErrorData } | null)?.kiroError;
+            if (kiroError) streamErrorData = kiroError;
             streamError =
               e instanceof Error
                 ? e.message
@@ -787,9 +859,18 @@ export function streamKiro(
           const { done, value } = iterResult;
           if (done) break;
           resetIdle();
-          const eventPayload = Object.values(value as Record<string, unknown>)[0] as Record<string, unknown>;
-          const event = parseKiroEvent(eventPayload);
+          // The marshaller keys each frame by its modeled `ChatResponseStream`
+          // union member (from the `:event-type` header). Route on that key
+          // instead of guessing the member from which fields are populated.
+          const frameEntry = Object.entries(value as Record<string, unknown>)[0];
+          if (!frameEntry) continue;
+          const [frameKey, framePayload] = frameEntry;
+          const event = parseKiroEvent(frameKey, (framePayload ?? {}) as Record<string, unknown>);
           if (!event) continue;
+          if (event.type === "ignored") {
+            if (debugEnabled()) debugLog("stream.events.ignored", [event.data.key]);
+            continue;
+          }
           if (debugEnabled()) debugLog("stream.events", [event]);
           switch (event.type) {
             case "contextUsage": {
@@ -859,12 +940,23 @@ export function streamKiro(
               break;
             }
             case "usage": {
-              usageEvent = event.data;
+              // Every MetadataEvent field is optional, so the service may split
+              // tokenUsage and stopReason/stopDetails across frames. Merge so a
+              // later partial frame cannot erase counts already received.
+              const prev: KiroUsageData = usageEvent ?? {};
+              usageEvent = { ...prev, ...event.data };
+              break;
+            }
+            case "metering": {
+              // MeteringEvent.usage counts credits, not tokens. Recorded for
+              // observability only; never folded into token accounting.
+              if (debugEnabled()) debugLog("stream.metering", [event.data]);
               break;
             }
             case "error": {
               const errMsg = event.data.message ? `${event.data.error}: ${event.data.message}` : event.data.error;
               streamError = errMsg;
+              streamErrorData = event.data;
               void bodyReader.cancel().catch(() => {});
               break;
             }
@@ -877,7 +969,37 @@ export function streamKiro(
           // Timed out or received error mid-stream: retry with backoff
           if (retryCount < maxRetries) {
             retryCount++;
-            const delayMs = exponentialBackoff(retryCount - 1, 1000, MAX_RETRY_DELAY);
+            const backoffMs = exponentialBackoff(retryCount - 1, 1000, MAX_RETRY_DELAY);
+            // A modeled throttle frame states its own window in
+            // `retryAfterMilliseconds`. Honor it over the computed backoff:
+            // retrying earlier than the server said just gets throttled again
+            // and burns a retry. Not gated on `kind === "throttling"` — the
+            // field is only modeled on ThrottlingException today, but any member
+            // that states a wait is stating a wait, and the unknown-member
+            // fallback preserves it too.
+            const delayMs = resolveStreamRetryDelay(
+              streamErrorData?.retryAfterMilliseconds,
+              backoffMs,
+              MAX_RETRY_DELAY,
+            );
+            if (streamErrorData && debugEnabled()) {
+              debugLog("stream.error.typed", [streamErrorData, { delayMs, backoffMs }]);
+            }
+            // `output` is created once outside the retry loop, so anything the
+            // aborted attempt already appended survives into the next one. A
+            // typed error frame (throttling/validation/serviceUnavailable) can
+            // arrive after partial text, which would otherwise concatenate the
+            // abandoned prefix onto the retried response. The empty-response
+            // retry below resets for the same reason. `textBlockIndex` and the
+            // tool-call state are per-iteration and need no reset here; the
+            // usage block is cleared by `resetAttemptUsage` at the loop top.
+            //
+            // pi's event protocol has no retraction event, so deltas already
+            // pushed for the abandoned attempt cannot be withdrawn. The signals
+            // a consumer does get are the fresh `start` emitted for the retried
+            // attempt and the `partial` carried on every event, which is this
+            // same `output` object and so reflects the clear.
+            output.content = [];
             await abortableDelay(delayMs, options?.signal);
             continue;
           }
@@ -943,9 +1065,25 @@ export function streamKiro(
         // (accumulated into `totalContent` above). Otherwise tool-call-only
         // turns report 0 output tokens and break consumers like the TPS
         // extension that watch `usage.output`.
+        //
+        // `KiroUsageData.inputTokens` is `TokenUsage.uncachedInputTokens` — the
+        // input billed at full rate, NOT total input. pi's `usage.input` is the
+        // same uncached slot, with `cacheRead`/`cacheWrite` as siblings, and
+        // `calculateCost` prices all three separately. So the cache counts must
+        // land whenever `input` is taken from the wire; otherwise a cached turn
+        // reports a fraction of its real input and is priced far too low.
         if (usageEvent?.inputTokens !== undefined) output.usage.input = usageEvent.inputTokens;
+        if (usageEvent?.cacheReadInputTokens !== undefined) output.usage.cacheRead = usageEvent.cacheReadInputTokens;
+        if (usageEvent?.cacheWriteInputTokens !== undefined) output.usage.cacheWrite = usageEvent.cacheWriteInputTokens;
         output.usage.output = usageEvent?.outputTokens ?? countTokens(totalContent);
-        output.usage.totalTokens = output.usage.input + output.usage.output;
+        // `TokenUsage.totalTokens` is required on the wire while the cache counts
+        // are optional, so the service's own total is the authoritative figure —
+        // recomputing from components silently under-reports whenever a component
+        // is omitted. Prefer it and fall back to the sum, matching how pi's
+        // bedrock adapter treats the one other wire that supplies a total.
+        output.usage.totalTokens =
+          usageEvent?.totalTokens ??
+          output.usage.input + output.usage.cacheRead + output.usage.cacheWrite + output.usage.output;
         try {
           PiAi.calculateCost(model, output.usage);
         } catch {
