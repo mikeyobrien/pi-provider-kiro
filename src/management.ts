@@ -42,6 +42,34 @@ interface KiroListAvailableProfilesResponse {
 
 const profileArnCache = new Map<string, string>();
 const pendingProfileRequests = new Map<string, Promise<string>>();
+/**
+ * Region where the token actually has a profile, keyed like profileArnCache.
+ * Populated when resolveKiroProfileArn finds the ARN on a non-primary region so
+ * callers can route profile-dependent management calls (ListAvailableModels) to
+ * the same region where the profile exists.
+ */
+const profileRegionCache = new Map<string, string>();
+
+/**
+ * Canonical Kiro management regions. `resolveApiRegion` funnels every SSO region
+ * into one of these, but a user's actual Kiro profile may live in the other one
+ * (see #104: SSO eu-west-2 -> eu-central-1 while the profile is in us-east-1).
+ * ListAvailableProfiles is regional, so probe the canonical set when the primary
+ * region comes back empty before giving up.
+ */
+const CANONICAL_MANAGEMENT_REGIONS = ["us-east-1", "eu-central-1"] as const;
+
+function candidateManagementRegions(primary: string): string[] {
+  const seen = new Set<string>([primary]);
+  const candidates = [primary];
+  for (const region of CANONICAL_MANAGEMENT_REGIONS) {
+    if (!seen.has(region)) {
+      seen.add(region);
+      candidates.push(region);
+    }
+  }
+  return candidates;
+}
 
 /**
  * Explicit user override for which Kiro profile to resolve/use. When set, it
@@ -121,12 +149,14 @@ async function parseManagementResponse<TResponse>(
 }
 export function resetKiroProfileArnCache(): void {
   profileArnCache.clear();
+  profileRegionCache.clear();
   pendingProfileRequests.clear();
 }
 
 export function invalidateKiroProfileArn(auth: KiroManagementAuth): void {
   const key = profileCacheKey(auth);
   profileArnCache.delete(key);
+  profileRegionCache.delete(key);
   pendingProfileRequests.delete(key);
 }
 
@@ -152,20 +182,35 @@ export async function resolveKiroProfileArn(auth: KiroManagementAuth, providedAr
   if (pending) return pending;
 
   const request = (async () => {
-    const response = await requestManagement<KiroListAvailableProfilesResponse>(
-      auth,
-      "ListAvailableProfiles",
-      LIST_PROFILES_PATH,
-      "POST",
-      {},
-    );
-    const arn = response.profiles?.find((profile) => profile.arn)?.arn;
-    if (!arn) {
-      throw new Error(`Kiro management ListAvailableProfiles returned no profile in ${auth.region}`);
+    // ListAvailableProfiles is regional to where the profile actually lives, not
+    // to the SSO-derived API region. Probe the primary region first, then the
+    // remaining canonical management regions, so a region-mismatched token still
+    // resolves a profile instead of failing hard (#104).
+    let lastResponse: KiroListAvailableProfilesResponse | undefined;
+    for (const region of candidateManagementRegions(auth.region)) {
+      const response = await requestManagement<KiroListAvailableProfilesResponse>(
+        { ...auth, region },
+        "ListAvailableProfiles",
+        LIST_PROFILES_PATH,
+        "POST",
+        {},
+      );
+      lastResponse = response;
+      const arn = response.profiles?.find((profile) => profile.arn)?.arn;
+      if (arn) {
+        profileArnCache.set(key, arn);
+        profileRegionCache.set(key, region);
+        debugLog("profile.resolve", { source: "network", region, arn });
+        return arn;
+      }
     }
-    profileArnCache.set(key, arn);
-    debugLog("profile.resolve", { source: "network", region: auth.region, arn });
-    return arn;
+    const attemptedRegions = candidateManagementRegions(auth.region).join(", ");
+    throw new Error(
+      `Kiro management ListAvailableProfiles returned no profile in ${attemptedRegions} ` +
+        `(SSO-derived region: ${auth.region}). If kiro-cli works, verify your profile region with \`kiro-cli whoami\`; ` +
+        `the management API is regional to the profile, not to your login region.`,
+      ...(lastResponse ? [{ cause: lastResponse }] : []),
+    );
   })();
   pendingProfileRequests.set(key, request);
 
@@ -206,6 +251,13 @@ export async function fetchKiroModelCatalog(
   providedProfileArn?: string,
 ): Promise<KiroListAvailableModelsResponse> {
   const profileArn = await resolveKiroProfileArn(auth, providedProfileArn);
+  // Route the models query to the region where the profile actually lives — it
+  // may differ from the SSO-derived region (#104), and ListAvailableModels is
+  // regional to the profile too, not to the login region.
+  const region = profileRegionCache.get(profileCacheKey(auth)) ?? auth.region;
+  if (region !== auth.region) {
+    return listAvailableModels({ ...auth, region }, profileArn);
+  }
   return listAvailableModels(auth, profileArn);
 }
 

@@ -613,7 +613,9 @@ describe("Feature 9: Streaming Integration", () => {
 
   it("fails before inference when profile discovery returns no profile", async () => {
     resetProfileArnCache(false);
-    const mockFetch = vi.fn().mockResolvedValueOnce({
+    // Both canonical management regions return an empty profile list (#104):
+    // the provider probes the fallback region before failing to inference.
+    const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ profiles: [] }),
     });
@@ -621,8 +623,9 @@ describe("Feature 9: Streaming Integration", () => {
 
     const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
 
-    expect(mockFetch).toHaveBeenCalledOnce();
+    expect(mockFetch).toHaveBeenCalledTimes(2);
     expect(mockFetch.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
+    expect(mockFetch.mock.calls[1][0]).toBe("https://management.eu-central-1.kiro.dev/List-Available-Profiles");
     const error = events.find((event) => event.type === "error");
     expect(error?.type === "error" && error.error.errorMessage).toContain("returned no profile");
 

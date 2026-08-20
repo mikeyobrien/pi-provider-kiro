@@ -131,4 +131,76 @@ describe("Kiro management control plane", () => {
     await expect(resolveKiroProfileArn(auth, profileArn)).resolves.toBe(profileArn);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("falls back to the canonical profile region when the primary returns no profile (#104)", async () => {
+    const euArn = "arn:aws:codewhisperer:eu-central-1:123456789012:profile/eu";
+    const fetchMock = vi
+      .fn()
+      // Primary (eu-central-1): empty profile list
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ profiles: [] }) })
+      // Fallback (us-east-1): profile found
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ profiles: [{ arn: euArn }] }) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const euAuth = { accessToken: "test-access-token", region: "eu-central-1" };
+    await expect(resolveKiroProfileArn(euAuth)).resolves.toBe(euArn);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0][0]).toBe("https://management.eu-central-1.kiro.dev/List-Available-Profiles");
+    expect(fetchMock.mock.calls[1][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
+
+    // Second resolution is served from cache — no further probing.
+    await expect(resolveKiroProfileArn(euAuth)).resolves.toBe(euArn);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("routes ListAvailableModels to the region where the profile was found (#104)", async () => {
+    const modelsBody = { models: [{ modelId: "claude-sonnet-4-5" }], defaultModelId: "claude-sonnet-4-5" };
+    const fetchMock = vi
+      .fn()
+      // Profile resolution: primary empty, fallback found
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ profiles: [] }) })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ profiles: [{ arn: profileArn }] }),
+      })
+      // ListAvailableModels must hit the profile region, not the SSO-derived one
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(modelsBody) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const euAuth = { accessToken: "test-access-token", region: "eu-central-1" };
+    const catalog = await fetchKiroModelCatalog(euAuth);
+
+    expect(catalog.models).toEqual(modelsBody.models);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[0][0]).toBe("https://management.eu-central-1.kiro.dev/List-Available-Profiles");
+    expect(fetchMock.mock.calls[1][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
+    expect(fetchMock.mock.calls[2][0]).toContain("https://management.us-east-1.kiro.dev/List-Available-Models");
+  });
+
+  it("throws with region guidance when no canonical region yields a profile (#104)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ profiles: [] }) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const euAuth = { accessToken: "test-access-token", region: "eu-central-1" };
+    await expect(resolveKiroProfileArn(euAuth)).rejects.toThrow(
+      "Kiro management ListAvailableProfiles returned no profile in eu-central-1, us-east-1 (SSO-derived region: eu-central-1)",
+    );
+
+    // Both canonical regions were probed before failing.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not re-probe a region whitelisted by the SSO-derived primary (#104)", async () => {
+    // us-east-1 as primary: candidate set is [us-east-1, eu-central-1] — the
+    // same region should only be queried once.
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ profiles: [{ arn: profileArn }] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(resolveKiroProfileArn(auth)).resolves.toBe(profileArn);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });
