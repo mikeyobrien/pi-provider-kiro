@@ -180,6 +180,7 @@ function tryKiroCliToken(
     clientSecret,
     region,
     authMethod: "idc",
+    profileArn: tokenData.profile_arn || tokenData.profileArn,
   };
 }
 

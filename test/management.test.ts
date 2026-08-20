@@ -81,4 +81,54 @@ describe("Kiro management control plane", () => {
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(fetchMock.mock.calls[0][0]).toContain("https://management.us-east-1.kiro.dev/List-Available-Models?");
   });
+
+  it("honors KIRO_PROFILE_ARN override and skips only the profile round-trip (#110)", async () => {
+    const envArn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/pinned";
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ models: [{ modelId: "claude-sonnet-4-5" }] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const prev = process.env.KIRO_PROFILE_ARN;
+    process.env.KIRO_PROFILE_ARN = envArn;
+    try {
+      await expect(resolveKiroProfileArn(auth)).resolves.toBe(envArn);
+      const catalog = await fetchKiroModelCatalog(auth);
+      expect(catalog.models.map((m) => m.modelId)).toContain("claude-sonnet-4-5");
+      // Exactly one network call: ListAvailableModels. No ListAvailableProfiles probe.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0][0]).toContain("List-Available-Models");
+    } finally {
+      if (prev === undefined) delete process.env.KIRO_PROFILE_ARN;
+      else process.env.KIRO_PROFILE_ARN = prev;
+    }
+  });
+
+  it("env override wins over an explicitly provided token profileArn (#110)", async () => {
+    const envArn = "arn:aws:codewhisperer:eu-central-1:123456789012:profile/pinned";
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ models: [{ modelId: "claude-sonnet-4-5" }] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const prev = process.env.KIRO_PROFILE_ARN;
+    process.env.KIRO_PROFILE_ARN = envArn;
+    try {
+      await expect(resolveKiroProfileArn(auth, profileArn)).resolves.toBe(envArn);
+    } finally {
+      if (prev === undefined) delete process.env.KIRO_PROFILE_ARN;
+      else process.env.KIRO_PROFILE_ARN = prev;
+    }
+  });
+
+  it("falls back to the token-carried ARN when no env override is set (#110)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ models: [{ modelId: "claude-sonnet-4-5" }] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    delete process.env.KIRO_PROFILE_ARN;
+    await expect(resolveKiroProfileArn(auth, profileArn)).resolves.toBe(profileArn);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });

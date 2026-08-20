@@ -2,7 +2,7 @@
 // ABOUTME: Resolves profiles and discovers the current per-profile model catalog.
 
 import { createHash } from "node:crypto";
-import { redactSensitiveText } from "./debug.js";
+import { debugLog, redactSensitiveText } from "./debug.js";
 import { getKiroEndpoints } from "./endpoints.js";
 
 const LIST_PROFILES_PATH = "List-Available-Profiles";
@@ -42,6 +42,14 @@ interface KiroListAvailableProfilesResponse {
 
 const profileArnCache = new Map<string, string>();
 const pendingProfileRequests = new Map<string, Promise<string>>();
+
+/**
+ * Explicit user override for which Kiro profile to resolve/use. When set, it
+ * wins over any token-carried or network-discovered profile, fixing #110's
+ * "wrong profile picked among several -> reduced model catalog" for users who
+ * have multiple profiles and know which one they want.
+ */
+const ENV_PROFILE_ARN = "KIRO_PROFILE_ARN";
 
 export class KiroManagementHttpError extends Error {
   constructor(
@@ -123,7 +131,18 @@ export function invalidateKiroProfileArn(auth: KiroManagementAuth): void {
 }
 
 export async function resolveKiroProfileArn(auth: KiroManagementAuth, providedArn?: string): Promise<string> {
-  if (providedArn) return providedArn;
+  // Explicit user override (#110). Highest precedence: a user who pins
+  // KIRO_PROFILE_ARN knows which profile they want, even if the token or the
+  // profile list contains several candidates.
+  const envArn = process.env[ENV_PROFILE_ARN]?.trim();
+  if (envArn) {
+    debugLog("profile.resolve", { source: "env", arn: envArn });
+    return envArn;
+  }
+  if (providedArn) {
+    debugLog("profile.resolve", { source: "provided", arn: providedArn });
+    return providedArn;
+  }
 
   const key = profileCacheKey(auth);
   const cachedArn = profileArnCache.get(key);
@@ -145,6 +164,7 @@ export async function resolveKiroProfileArn(auth: KiroManagementAuth, providedAr
       throw new Error(`Kiro management ListAvailableProfiles returned no profile in ${auth.region}`);
     }
     profileArnCache.set(key, arn);
+    debugLog("profile.resolve", { source: "network", region: auth.region, arn });
     return arn;
   })();
   pendingProfileRequests.set(key, request);
