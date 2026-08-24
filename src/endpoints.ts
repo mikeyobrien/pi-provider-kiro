@@ -2,6 +2,7 @@
 // ABOUTME: Keeps management and runtime host selection independent from request URLs.
 
 const API_REGION_MAP: Record<string, string> = {
+  "sa-east-1": "us-east-1",
   "us-west-1": "us-east-1",
   "us-west-2": "us-east-1",
   "us-east-2": "us-east-1",

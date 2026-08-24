@@ -48,6 +48,7 @@ const IDC_PROBE_REGIONS = [
   "eu-west-2", // SSO region → eu-central-1 API
   "eu-west-3", // SSO region → eu-central-1 API
   "eu-north-1", // SSO region → eu-central-1 API
+  "sa-east-1", // SSO region → us-east-1 API
   "ap-southeast-1",
   "ap-northeast-1",
   "us-west-2",

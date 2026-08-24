@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Route IAM Identity Center sessions from `sa-east-1` to Kiro's `us-east-1` API region, avoiding catalog refresh requests to the unsupported `management.sa-east-1.kiro.dev` endpoint.
 - Preserve every literal `<thinking>`, `<think>`, `<reasoning>`, or `<thought>` region in one streamed response as its own thinking block instead of leaking every region after the first into visible assistant text.
 - Keep parsed thinking blocks in the order the wire delivered them instead of splicing them ahead of text already emitted. The parser moved a thinking block into the index of an existing text block to make the content array read thinking → text, which made the persisted array contradict the stream and reused one `contentIndex` for two different blocks — an index-addressed consumer such as pi-mono's proxy transport overwrote the text it had already placed and then threw on the following `text_end`. Empty tagged regions are still materialized. Presentation order is unaffected: outbound history still prepends every thinking block, and renderers drive thinking from stream events.
 
