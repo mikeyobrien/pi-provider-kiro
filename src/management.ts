@@ -81,7 +81,74 @@ function candidateManagementRegions(primary: string): string[] {
  */
 const ENV_PROFILE_ARN = "KIRO_PROFILE_ARN";
 
+/**
+ * Which Kiro plane produced an error.
+ *
+ * The distinction is load-bearing for a consumer deciding whether to re-
+ * authenticate:
+ *
+ * - `management` resolves *who you are* — `ListAvailableProfiles`,
+ *   `ListAvailableModels`, `GetUsageLimits`. There is no per-model entitlement
+ *   layer here to deny, so a 401/403 is a credential problem.
+ * - `runtime` is `generateAssistantResponse`. It can legitimately 403 a caller
+ *   whose credential is perfectly valid but who lacks entitlement for the
+ *   requested model — a config problem that re-authentication cannot fix.
+ *
+ * Collapsing the two makes a config error look re-authenticable and sends the
+ * consumer into a pointless re-login loop.
+ */
+export type KiroErrorPlane = "management" | "runtime";
+
+/**
+ * `AssistantMessageDiagnostic.type` under which `streamKiro` reports the plane of
+ * a failure.
+ *
+ * `streamKiro` flattens every thrown error into `AssistantMessage.errorMessage`,
+ * a string, so a consumer of the stream never receives the error object itself.
+ * This diagnostic is the machine-readable channel that survives that
+ * flattening: its `details` carry `plane`, `status`, and `refreshAttempted`.
+ *
+ * Only management-plane failures are tagged. A runtime failure — and any local
+ * precondition failure, such as absent credentials — emits no diagnostic of
+ * this type, so a management error is identified by its presence and everything
+ * else by its absence, without parsing `errorMessage`.
+ */
+export const KIRO_AUTH_PLANE_DIAGNOSTIC = "kiro_auth_plane";
+
+/**
+ * The data an `isKiroManagementHttpError()` caller may rely on.
+ *
+ * Deliberately narrower than `KiroManagementHttpError`: the guard also accepts a
+ * structurally-identical error from a duplicate copy of this package, which is
+ * not this class and therefore carries no methods. Narrowing to the class would
+ * let `markRefreshAttempted()` typecheck on such a value and throw at runtime.
+ *
+ * `refreshAttempted` is optional because a foreign copy may predate that field.
+ */
+export interface KiroManagementErrorInfo extends Error {
+  readonly plane: "management";
+  readonly status: number;
+  readonly refreshAttempted?: boolean;
+}
+
+/**
+ * A Kiro management control-plane HTTP failure.
+ *
+ * `message` is deliberately byte-identical to the string this class has always
+ * carried (`Kiro management <operation> failed in <region>: <status><statusText>`) —
+ * downstream consumers string-match it, so the text is an API contract. The
+ * typed fields are strictly additive: read them instead of parsing `message`.
+ */
 export class KiroManagementHttpError extends Error {
+  /**
+   * Discriminator so consumers need not parse `message` to tell the planes
+   * apart. Typed as the literal rather than `KiroErrorPlane` so a consumer
+   * comparing it against `"runtime"` is told that branch is unreachable.
+   */
+  readonly plane = "management" as const;
+
+  #refreshAttempted = false;
+
   constructor(
     message: string,
     readonly status: number,
@@ -89,6 +156,59 @@ export class KiroManagementHttpError extends Error {
     super(message);
     this.name = "KiroManagementHttpError";
   }
+
+  /**
+   * True when this provider already tried to obtain a working credential before
+   * the error escaped — either the refresh itself failed, or it produced a
+   * credential the management plane then rejected too. A consumer seeing `true`
+   * knows in-process re-auth was tried and lost, so prompting for another
+   * automatic retry is wasted work — the state needs a human to
+   * re-authenticate.
+   *
+   * Only `streamKiro` sets this, and it never rethrows to its caller — it
+   * flattens the error into `AssistantMessage.errorMessage`. Read this field
+   * from the `KIRO_AUTH_PLANE_DIAGNOSTIC` diagnostic on that message rather
+   * than expecting to catch the error object. It is readable directly only when
+   * calling the management helpers in this module yourself, and is always
+   * `false` there, because nothing but `streamKiro` attempts a refresh.
+   */
+  get refreshAttempted(): boolean {
+    return this.#refreshAttempted;
+  }
+
+  /**
+   * Record that a credential refresh was attempted, and return `this`.
+   *
+   * Returns the same instance rather than a copy because `stream.ts`
+   * deliberately rethrows the *original* error after a failed refresh; cloning
+   * would discard its stack and break `instanceof` identity for anything that
+   * captured the original.
+   */
+  markRefreshAttempted(): this {
+    this.#refreshAttempted = true;
+    return this;
+  }
+}
+
+/**
+ * True when `error` is a management-plane HTTP failure.
+ *
+ * For consumers of this package. Checks shape before `instanceof` so it still
+ * holds across duplicate copies of this package — a bundled consumer plus a
+ * `node_modules` copy produce two distinct classes, and `instanceof` alone
+ * would report `false` for a genuine management error from the other copy.
+ *
+ * Narrows to `KiroManagementErrorInfo`, not to this class: a foreign copy's
+ * error carries the data fields but no methods, so the narrowed type omits
+ * `markRefreshAttempted()` rather than letting a call on it typecheck and throw.
+ */
+export function isKiroManagementHttpError(error: unknown): error is KiroManagementErrorInfo {
+  if (!(error instanceof Error)) return false;
+  const candidate = error as Partial<KiroManagementErrorInfo>;
+  return (
+    (candidate.plane === "management" && typeof candidate.status === "number") ||
+    error instanceof KiroManagementHttpError
+  );
 }
 
 async function requestManagement<TResponse>(

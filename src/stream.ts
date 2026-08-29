@@ -41,6 +41,7 @@ import { parseInvokeToolCalls } from "./invoke-tool-parser.js";
 import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, refreshViaKiroCli } from "./kiro-cli.js";
 import {
   invalidateKiroProfileArn,
+  KIRO_AUTH_PLANE_DIAGNOSTIC,
   type KiroManagementAuth,
   KiroManagementHttpError,
   resetKiroProfileArnCache,
@@ -148,6 +149,25 @@ export function resetProfileArnCache(resolved = false): void {
   skipProfileResolutionForTests = resolved;
 }
 
+/**
+ * Resolve the profile ARN on a management call made *after* a credential
+ * refresh, flagging any management failure as refresh-already-attempted.
+ *
+ * A 401/403 here means the freshly-refreshed credential was itself rejected, so
+ * a consumer must not read it as a first-contact auth error it can recover from
+ * by refreshing again.
+ */
+async function resolveProfileArnAfterRefresh(auth: KiroManagementAuth): Promise<string> {
+  try {
+    return await resolveKiroProfileArn(auth);
+  } catch (error) {
+    // instanceof, not the structural guard: this error can only come from the
+    // module-local management.ts, so it is always the local class.
+    if (error instanceof KiroManagementHttpError) throw error.markRefreshAttempted();
+    throw error;
+  }
+}
+
 function emitToolCall(
   state: KiroToolCallState,
   output: AssistantMessage,
@@ -244,13 +264,15 @@ export function streamKiro(
         const storedCreds = getKiroCliCredentials();
         const freshCreds =
           storedCreds?.access && storedCreds.access !== accessToken ? storedCreds : refreshViaKiroCli();
-        if (!freshCreds?.access) throw error;
+        // Rethrow the ORIGINAL error, flagged so the consumer knows in-process
+        // re-auth was already tried and lost.
+        if (!freshCreds?.access) throw error.markRefreshAttempted();
 
         accessToken = freshCreds.access;
         managementAuth = { accessToken, region };
         profileArn =
           freshCreds.profileArn ||
-          (skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth));
+          (skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveProfileArnAfterRefresh(managementAuth));
       }
 
       // Trigger dynamic models cache update in the background if empty or stale
@@ -650,7 +672,9 @@ export function streamKiro(
               profileArn =
                 freshCreds?.profileArn ||
                 inheritedDesktopProfileArn ||
-                (skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth));
+                (skipProfileResolutionForTests
+                  ? TEST_PROFILE_ARN
+                  : await resolveProfileArnAfterRefresh(managementAuth));
               const delayMs = exponentialBackoff(retryCount - 1, 500, MAX_RETRY_DELAY);
               await abortableDelay(delayMs, options?.signal);
               break; // break inner loop, continue outer loop
@@ -1039,6 +1063,24 @@ export function streamKiro(
     } catch (error) {
       output.stopReason = options?.signal?.aborted ? "aborted" : "error";
       output.errorMessage = formatSafeError(error);
+      // `errorMessage` is a string, so the typed error object never reaches the
+      // consumer. Republish the management-plane discriminator through the
+      // diagnostics channel, which does survive on the AssistantMessage, so a
+      // consumer can classify the failure without matching error prose.
+      if (error instanceof KiroManagementHttpError) {
+        output.diagnostics = [
+          ...(output.diagnostics ?? []),
+          {
+            type: KIRO_AUTH_PLANE_DIAGNOSTIC,
+            timestamp: Date.now(),
+            details: {
+              plane: error.plane,
+              status: error.status,
+              refreshAttempted: error.refreshAttempted,
+            },
+          },
+        ];
+      }
       debugLog("response.caught", { stopReason: output.stopReason, error: output.errorMessage });
       stream.push({ type: "error", reason: output.stopReason, error: output });
       stream.end();

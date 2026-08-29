@@ -31,6 +31,12 @@ export {
   validateKiroConversation,
   validateKiroToolStructure,
 } from "./history-validator.js";
+export type { KiroErrorPlane, KiroManagementErrorInfo } from "./management.js";
+export {
+  isKiroManagementHttpError,
+  KIRO_AUTH_PLANE_DIAGNOSTIC,
+  KiroManagementHttpError,
+} from "./management.js";
 export { KIRO_MODEL_IDS, kiroModels, resolveKiroModel } from "./models.js";
 // Kiro's own error vocabulary and the predicates this provider classifies it
 // with. Published so consumers can interpret a reason code without an error

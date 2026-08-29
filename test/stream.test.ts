@@ -12,6 +12,7 @@ import { isContextOverflow } from "@earendil-works/pi-ai/compat";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { findJsonEnd } from "../src/bracket-tool-parser.js";
 import { validateKiroConversation, validateKiroToolStructure } from "../src/history-validator.js";
+import { KIRO_AUTH_PLANE_DIAGNOSTIC } from "../src/management.js";
 import { capacityRetryConfig, retryConfig } from "../src/retry.js";
 import { resetProfileArnCache, streamKiro } from "../src/stream.js";
 import { EMPTY_CONTENT_PLACEHOLDER, type KiroHistoryEntry } from "../src/transform.js";
@@ -4026,4 +4027,99 @@ describe("Feature 9: Streaming Integration", () => {
 
     vi.unstubAllGlobals();
   });
+});
+
+describe("auth-plane diagnostics on the flattened error", () => {
+  // streamKiro never rethrows: it flattens every error into
+  // AssistantMessage.errorMessage, a string. These tests assert the typed plane
+  // state still reaches a consumer, through the diagnostics channel, so nothing
+  // has to match the error prose.
+  const planeDiagnostic = (events: AssistantMessageEvent[]) => {
+    const error = events.find((event) => event.type === "error");
+    expect(error?.type).toBe("error");
+    const message = error?.type === "error" ? error.error : undefined;
+    return {
+      message,
+      diagnostic: message?.diagnostics?.find((entry) => entry.type === KIRO_AUTH_PLANE_DIAGNOSTIC),
+    };
+  };
+
+  it("tags a management failure with the plane, status and refreshAttempted", async () => {
+    resetProfileArnCache(false);
+    const mockFetch = vi
+      .fn()
+      // ListAvailableProfiles rejects the host's token.
+      .mockResolvedValueOnce({ ok: false, status: 403, statusText: "Forbidden" })
+      // ListAvailableProfiles fails again on the refreshed credential.
+      .mockResolvedValueOnce({ ok: false, status: 503, statusText: "Service Unavailable" });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const kiroCliModule = await import("../src/kiro-cli.js");
+    const getCredsSpy = vi.spyOn(kiroCliModule, "getKiroCliCredentials").mockReturnValue({
+      refresh: "fresh-refresh|client|secret|idc",
+      access: "fresh-access-token",
+      expires: Date.now() + 3_600_000,
+      clientId: "client",
+      clientSecret: "secret",
+      region: "us-east-1",
+      authMethod: "idc",
+    });
+
+    const { message, diagnostic } = planeDiagnostic(
+      await collect(streamKiro(makeModel(), makeContext(), { apiKey: "stale-token" })),
+    );
+
+    expect(diagnostic?.details).toEqual({ plane: "management", status: 503, refreshAttempted: true });
+    // The message contract downstream matchers rely on is untouched.
+    expect(message?.errorMessage).toContain("Kiro management ListAvailableProfiles failed in us-east-1: 503");
+
+    getCredsSpy.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
+  it("reports refreshAttempted false when no refresh was possible", async () => {
+    resetProfileArnCache(false);
+    const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 401, statusText: "Unauthorized" });
+    vi.stubGlobal("fetch", mockFetch);
+
+    // A 401 is not the 403 that triggers the refresh branch, so the error
+    // escapes without any refresh attempt.
+    const { diagnostic } = planeDiagnostic(
+      await collect(streamKiro(makeModel(), makeContext(), { apiKey: "stale-token" })),
+    );
+
+    expect(diagnostic?.details).toEqual({ plane: "management", status: 401, refreshAttempted: false });
+
+    vi.unstubAllGlobals();
+  });
+
+  it("leaves a runtime 403 untagged, so the planes are distinguishable without .message", async () => {
+    // Profile already resolved: every call below is the runtime plane.
+    resetProfileArnCache(true);
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      statusText: "Forbidden",
+      // A valid credential lacking entitlement for the requested model — the
+      // case re-authentication cannot fix.
+      text: () => Promise.resolve('{"message":"You do not have access to the model."}'),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const kiroCliModule = await import("../src/kiro-cli.js");
+    const refreshSpy = vi.spyOn(kiroCliModule, "refreshViaKiroCli").mockReturnValue(undefined);
+    const getCredsSpy = vi.spyOn(kiroCliModule, "getKiroCliCredentials").mockReturnValue(undefined);
+
+    const { message, diagnostic } = planeDiagnostic(
+      await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" })),
+    );
+
+    expect(message?.stopReason).toBe("error");
+    expect(diagnostic).toBeUndefined();
+    expect(message?.errorMessage).toContain("403");
+
+    getCredsSpy.mockRestore();
+    refreshSpy.mockRestore();
+    vi.unstubAllGlobals();
+  }, 20000);
 });
