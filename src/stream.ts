@@ -51,11 +51,14 @@ import { kiroAuthHeaders } from "./oauth.js";
 import {
   capacityRetryConfig,
   exponentialBackoff,
+  extractKiroReason,
   firstTokenTimeoutForModel,
   isCapacityError,
   isNonRetryableBodyError,
   isTooBigError,
+  KIRO_REASON_CODES,
   MAX_RETRY_DELAY,
+  resolveRequestRateRetryDelay,
   retryConfig,
 } from "./retry.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
@@ -667,7 +670,17 @@ export function streamKiro(
               errText = "";
             }
             const safeStatusText = redactSensitiveText(response.statusText);
-            debugLog("response.error", { status: response.status, statusText: safeStatusText, body: errText });
+            const reasonCode = extractKiroReason(errText);
+            const isRequestRateExceeded =
+              response.status === 429 &&
+              reasonCode === KIRO_REASON_CODES.USER_REQUEST_RATE_EXCEEDED &&
+              !isNonRetryableBodyError(errText) &&
+              !isCapacityError(errText);
+            debugLog("response.error", {
+              status: response.status,
+              statusText: safeStatusText,
+              ...(isRequestRateExceeded ? { reasonCode } : { body: errText }),
+            });
             // Retry transient capacity errors with longer backoff
             if (isCapacityError(errText) && capacityRetryCount < capacityRetryConfig.maxRetries) {
               capacityRetryCount++;
@@ -681,6 +694,25 @@ export function streamKiro(
               logCapacityEvent(
                 `INSUFFICIENT_MODEL_CAPACITY — exhausted ${capacityRetryConfig.maxRetries} retries, giving up`,
               );
+            }
+            if (isRequestRateExceeded) {
+              if (retryCount >= maxRetries) {
+                throw new Error(
+                  `Kiro API error: request window retry budget exhausted (${KIRO_REASON_CODES.USER_REQUEST_RATE_EXCEEDED})`,
+                );
+              }
+              retryCount++;
+              const retryDelay = resolveRequestRateRetryDelay(response.headers);
+              debugLog("request.rateWindowRetry", {
+                attempt: retryCount,
+                maxRetries,
+                delayMs: retryDelay.delayMs,
+                advertisedDelayMs: retryDelay.advertisedDelayMs,
+                capped: retryDelay.capped,
+                reasonCode,
+              });
+              await abortableDelay(retryDelay.delayMs, options?.signal);
+              continue requestLoop;
             }
             if (response.status === 403 && !isCapacityError(errText) && retryCount < maxRetries) {
               retryCount++;

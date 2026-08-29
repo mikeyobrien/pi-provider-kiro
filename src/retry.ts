@@ -30,6 +30,81 @@ export function exponentialBackoff(attempt: number, baseMs: number, maxMs: numbe
 }
 
 export const MAX_RETRY_DELAY = 10_000;
+/** Fallback used when a request-window response carries no valid server hint. */
+export const REQUEST_RATE_FALLBACK_DELAY_MS = 10_000;
+
+/** Pull the service's exact JSON `reason` field without retaining or returning the body. */
+export function extractKiroReason(errorText: string): string | undefined {
+  if (!errorText) return undefined;
+  try {
+    const parsed = JSON.parse(errorText) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    const reason = (parsed as { reason?: unknown }).reason;
+    return typeof reason === "string" && reason.length > 0 ? reason : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Read a server-advertised wait in milliseconds.
+ *
+ * `retry-after-ms` is milliseconds, numeric `retry-after` and
+ * `x-ratelimit-reset-after` are seconds, and an HTTP-date `retry-after` is
+ * relative to `nowMs`. Each header is an independent candidate, so an invalid
+ * earlier value does not hide a valid later one. A past HTTP date means retry
+ * now.
+ */
+export function parseRetryAfterMs(headers: Headers | undefined, nowMs: number = Date.now()): number | undefined {
+  const get = headers?.get?.bind(headers);
+  if (!get) return undefined;
+
+  const milliseconds = nonNegativeNumber(get("retry-after-ms"));
+  if (milliseconds !== undefined) return Math.round(milliseconds);
+
+  const retryAfter = get("retry-after");
+  if (retryAfter !== null && retryAfter.trim() !== "") {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds)) {
+      // Numeric Retry-After is delay-seconds, never a date. In particular,
+      // do not let Date.parse reinterpret a negative delay as a year.
+      if (seconds >= 0) {
+        const delayMs = seconds * 1000;
+        if (Number.isFinite(delayMs)) return Math.round(delayMs);
+      }
+    } else {
+      const dateMs = Date.parse(retryAfter);
+      if (!Number.isNaN(dateMs)) return Math.max(0, dateMs - nowMs);
+    }
+  }
+
+  const resetAfterSeconds = nonNegativeNumber(get("x-ratelimit-reset-after"));
+  if (resetAfterSeconds !== undefined) {
+    const delayMs = resetAfterSeconds * 1000;
+    if (Number.isFinite(delayMs)) return Math.round(delayMs);
+  }
+
+  return undefined;
+}
+
+export function resolveRequestRateRetryDelay(
+  headers: Headers | undefined,
+  nowMs: number = Date.now(),
+): { delayMs: number; advertisedDelayMs?: number; capped: boolean } {
+  const advertisedDelayMs = parseRetryAfterMs(headers, nowMs);
+  const requestedDelayMs = advertisedDelayMs ?? REQUEST_RATE_FALLBACK_DELAY_MS;
+  return {
+    delayMs: Math.min(requestedDelayMs, MAX_RETRY_DELAY),
+    ...(advertisedDelayMs !== undefined ? { advertisedDelayMs } : {}),
+    capped: requestedDelayMs > MAX_RETRY_DELAY,
+  };
+}
+
+function nonNegativeNumber(value: string | null): number | undefined {
+  if (value === null || value.trim() === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
 
 /**
  * Machine reason codes returned by the Kiro API, plus the one prose marker the
@@ -50,6 +125,8 @@ export const KIRO_REASON_CODES = Object.freeze({
   MONTHLY_REQUEST_COUNT: "MONTHLY_REQUEST_COUNT",
   /** Model capacity temporarily unavailable — transient, worth retrying. */
   INSUFFICIENT_MODEL_CAPACITY: "INSUFFICIENT_MODEL_CAPACITY",
+  /** Short-window request throttle — retry only within the provider budget. */
+  USER_REQUEST_RATE_EXCEEDED: "USER_REQUEST_RATE_EXCEEDED",
   /**
    * Generic request-validation rejection, returned for a malformed body of any
    * size (empty `content`, history referencing tools absent from the catalog).

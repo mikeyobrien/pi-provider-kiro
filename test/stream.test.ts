@@ -8,7 +8,7 @@ import type {
   TextContent,
   ToolResultMessage,
 } from "@earendil-works/pi-ai";
-import { isContextOverflow } from "@earendil-works/pi-ai/compat";
+import { isContextOverflow, isRetryableAssistantError } from "@earendil-works/pi-ai/compat";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { findJsonEnd } from "../src/bracket-tool-parser.js";
 import { validateKiroConversation, validateKiroToolStructure } from "../src/history-validator.js";
@@ -148,9 +148,9 @@ function encodeBody(body: string): Uint8Array {
   return concatMessages(...parseJsonObjects(body).map((o) => encodeEventMessage(o)));
 }
 
-function mockFetchOk(body: string) {
+function makeOkResponse(body: string): Response {
   const frames = encodeBody(body);
-  return vi.fn().mockResolvedValueOnce({
+  return {
     ok: true,
     body: {
       getReader: () => ({
@@ -162,7 +162,21 @@ function mockFetchOk(body: string) {
       }),
       cancel: async () => {},
     },
-  });
+  } as unknown as Response;
+}
+
+function mockFetchOk(body: string) {
+  return vi.fn().mockResolvedValueOnce(makeOkResponse(body));
+}
+
+function makeRequestRateResponse(headers?: Record<string, string>): Response {
+  return {
+    ok: false,
+    status: 429,
+    statusText: "Too Many Requests",
+    headers: new Headers(headers),
+    text: () => Promise.resolve('{"message":"Please wait before trying again","reason":"USER_REQUEST_RATE_EXCEEDED"}'),
+  } as unknown as Response;
 }
 
 function mockFetchChunked(chunks: string[]) {
@@ -2359,7 +2373,7 @@ describe("Feature 9: Streaming Integration", () => {
       ok: false,
       status: 429,
       statusText: "Too Many Requests",
-      text: () => Promise.resolve("MONTHLY_REQUEST_COUNT exceeded"),
+      text: () => Promise.resolve('{"message":"Monthly quota exhausted","reason":"MONTHLY_REQUEST_COUNT"}'),
     });
     vi.stubGlobal("fetch", mockFetch);
 
@@ -3048,7 +3062,136 @@ describe("Feature 9: Streaming Integration", () => {
   // Provider-level HTTP error handling
   // =========================================================================
 
-  it("propagates 429 immediately so pi-coding-agent can own outer retries", async () => {
+  it.each([
+    ["retry-after-ms milliseconds", { "retry-after-ms": "25" }, 25],
+    ["retry-after seconds", { "retry-after": "0.025" }, 25],
+    ["retry-after HTTP date", { "retry-after": "Sat, 29 Aug 2026 00:00:05 GMT" }, 5000],
+    ["x-ratelimit-reset-after seconds", { "x-ratelimit-reset-after": "0.025" }, 25],
+  ])("honors %s for exact USER_REQUEST_RATE_EXCEEDED and then succeeds", async (_name, headers, delayMs) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-29T00:00:00Z"));
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce(makeRequestRateResponse(headers))
+      .mockResolvedValueOnce(makeOkResponse('{"content":"ok"}{"contextUsagePercentage":5}'));
+    vi.stubGlobal("fetch", mockFetch);
+
+    try {
+      const eventsPromise = collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mockFetch).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(delayMs - 1);
+      expect(mockFetch).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      const events = await eventsPromise;
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(events.find((event) => event.type === "done")).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each([
+    ["an absent hint", undefined],
+    [
+      "malformed, non-finite, and negative hints",
+      { "retry-after-ms": "not-a-number", "retry-after": "-1", "x-ratelimit-reset-after": "Infinity" },
+    ],
+  ])("uses the 10-second request-window fallback for %s", async (_name, headers) => {
+    vi.useFakeTimers();
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce(makeRequestRateResponse(headers))
+      .mockResolvedValueOnce(makeOkResponse('{"content":"ok"}{"contextUsagePercentage":5}'));
+    vi.stubGlobal("fetch", mockFetch);
+
+    try {
+      const eventsPromise = collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(mockFetch).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      const events = await eventsPromise;
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(events.find((event) => event.type === "done")).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("caps a longer server request-window hint at 10 seconds", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce(makeRequestRateResponse({ "retry-after-ms": "15000" }))
+      .mockResolvedValueOnce(makeOkResponse('{"content":"ok"}{"contextUsagePercentage":5}'));
+    vi.stubGlobal("fetch", mockFetch);
+
+    try {
+      const eventsPromise = collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(mockFetch).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      const events = await eventsPromise;
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(events.find((event) => event.type === "done")).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("preserves caller cancellation during request-window backoff", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const mockFetch = vi.fn().mockResolvedValue(makeRequestRateResponse());
+    vi.stubGlobal("fetch", mockFetch);
+
+    try {
+      const eventsPromise = collect(
+        streamKiro(makeModel(), makeContext(), { apiKey: "tok", signal: controller.signal }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      controller.abort(new DOMException("cancelled by caller", "AbortError"));
+      const events = await eventsPromise;
+
+      expect(mockFetch).toHaveBeenCalledOnce();
+      const error = events.find((event) => event.type === "error");
+      expect(error?.type === "error" && error.error.stopReason).toBe("aborted");
+      expect(error?.type === "error" && error.error.errorMessage).toContain("cancelled by caller");
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("exhausts the shared provider retry budget without starting a new Pi retry episode", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn().mockResolvedValue(makeRequestRateResponse());
+    vi.stubGlobal("fetch", mockFetch);
+
+    try {
+      const eventsPromise = collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+      await vi.advanceTimersByTimeAsync(30_000);
+      const events = await eventsPromise;
+
+      expect(mockFetch).toHaveBeenCalledTimes(4);
+      const error = events.find((event) => event.type === "error");
+      expect(error?.type === "error" && error.error.errorMessage).toBe(
+        "Kiro API error: request window retry budget exhausted (USER_REQUEST_RATE_EXCEEDED)",
+      );
+      expect(error?.type === "error" && isRetryableAssistantError(error.error)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("propagates an unknown 429 immediately so pi-coding-agent can own outer retries", async () => {
     const mockFetch = vi
       .fn()
       .mockResolvedValueOnce({

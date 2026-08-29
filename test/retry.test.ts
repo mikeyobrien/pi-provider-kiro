@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   CAPACITY_PATTERN,
   exponentialBackoff,
+  extractKiroReason,
   FIRST_TOKEN_TIMEOUT,
   isCapacityError,
   isNonRetryableBodyError,
@@ -12,6 +13,9 @@ import {
   KIRO_REASON_CODES,
   MAX_RETRY_DELAY,
   NON_RETRYABLE_BODY_PATTERNS,
+  parseRetryAfterMs,
+  REQUEST_RATE_FALLBACK_DELAY_MS,
+  resolveRequestRateRetryDelay,
   retryConfig,
   TOO_BIG_PATTERNS,
 } from "../src/retry.js";
@@ -50,6 +54,7 @@ describe("KIRO_REASON_CODES", () => {
       INPUT_TOO_LONG: "Input is too long",
       MONTHLY_REQUEST_COUNT: "MONTHLY_REQUEST_COUNT",
       INSUFFICIENT_MODEL_CAPACITY: "INSUFFICIENT_MODEL_CAPACITY",
+      USER_REQUEST_RATE_EXCEEDED: "USER_REQUEST_RATE_EXCEEDED",
       REQUEST_BODY_INVALID: "REQUEST_BODY_INVALID",
     });
   });
@@ -76,6 +81,58 @@ describe("KIRO_REASON_CODES", () => {
     expect(TOO_BIG_PATTERNS).not.toContain(KIRO_REASON_CODES.REQUEST_BODY_INVALID);
     expect(NON_RETRYABLE_BODY_PATTERNS).not.toContain(KIRO_REASON_CODES.REQUEST_BODY_INVALID);
     expect(isTooBigError(400, KIRO_REASON_CODES.REQUEST_BODY_INVALID)).toBe(false);
+  });
+});
+
+describe("request-window retry classification", () => {
+  it("reads only an exact JSON reason field", () => {
+    expect(extractKiroReason('{"message":"slow down","reason":"USER_REQUEST_RATE_EXCEEDED"}')).toBe(
+      KIRO_REASON_CODES.USER_REQUEST_RATE_EXCEEDED,
+    );
+    expect(extractKiroReason('{"reasonCode":"USER_REQUEST_RATE_EXCEEDED"}')).toBeUndefined();
+    expect(extractKiroReason("USER_REQUEST_RATE_EXCEEDED")).toBeUndefined();
+    expect(extractKiroReason('{"reason":123}')).toBeUndefined();
+    expect(extractKiroReason("not json")).toBeUndefined();
+  });
+
+  it("parses each supported header with explicit units", () => {
+    expect(parseRetryAfterMs(new Headers({ "retry-after-ms": "1500" }))).toBe(1500);
+    expect(parseRetryAfterMs(new Headers({ "retry-after": "1.5" }))).toBe(1500);
+    expect(parseRetryAfterMs(new Headers({ "x-ratelimit-reset-after": "1.5" }))).toBe(1500);
+
+    const now = Date.parse("2026-08-29T00:00:00Z");
+    expect(parseRetryAfterMs(new Headers({ "retry-after": "Sat, 29 Aug 2026 00:00:02 GMT" }), now)).toBe(2000);
+  });
+
+  it("lets a later valid header win after malformed or negative candidates", () => {
+    expect(
+      parseRetryAfterMs(
+        new Headers({
+          "retry-after-ms": "not-a-number",
+          "retry-after": "-5",
+          "x-ratelimit-reset-after": "2",
+        }),
+      ),
+    ).toBe(2000);
+    expect(parseRetryAfterMs(new Headers({ "retry-after-ms": "Infinity" }))).toBeUndefined();
+    expect(parseRetryAfterMs(new Headers({ "retry-after": "-1" }))).toBeUndefined();
+    expect(parseRetryAfterMs(new Headers({ "retry-after": "1e308", "x-ratelimit-reset-after": "2" }))).toBe(2000);
+    expect(parseRetryAfterMs(new Headers({ "x-ratelimit-reset-after": "1e308" }))).toBeUndefined();
+  });
+
+  it("treats an elapsed HTTP date as retry-now", () => {
+    const now = Date.parse("2026-08-29T00:00:00Z");
+    expect(parseRetryAfterMs(new Headers({ "retry-after": "Fri, 28 Aug 2026 23:59:59 GMT" }), now)).toBe(0);
+  });
+
+  it("falls back to 10 seconds and caps longer server hints at 10 seconds", () => {
+    expect(REQUEST_RATE_FALLBACK_DELAY_MS).toBe(10_000);
+    expect(resolveRequestRateRetryDelay(undefined)).toEqual({ delayMs: 10_000, capped: false });
+    expect(resolveRequestRateRetryDelay(new Headers({ "retry-after-ms": "15000" }))).toEqual({
+      delayMs: 10_000,
+      advertisedDelayMs: 15_000,
+      capped: true,
+    });
   });
 });
 

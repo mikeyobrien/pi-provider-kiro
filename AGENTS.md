@@ -55,6 +55,8 @@ Raw bytes → `parseKiroEvents()` → typed `KiroStreamEvent` → `ThinkingTagPa
 ### Retry with Reduction
 On 413/too-large: error propagated immediately to the caller (no retry). The caller is responsible for handling context overflow (e.g., compaction or history trimming), matching kiro-cli behavior.
 
+HTTP 429 is provider-retried only when its JSON `reason` is exactly `USER_REQUEST_RATE_EXCEEDED`; server wait hints and the 10-second fallback/cap are owned by `src/retry.ts`. Other generic 429/5xx responses remain owned by Pi's outer retry layer.
+
 ### Credential Cascade
 1. kiro-cli SQLite DB — checks social token first (`kirocli:social:token`), then IDC token, then external IdP token (`kirocli:external-idp:token`)
 2. OAuth device code flow (interactive, opens browser)
