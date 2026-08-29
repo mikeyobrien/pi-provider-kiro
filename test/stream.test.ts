@@ -4417,4 +4417,34 @@ describe("Feature 9: Streaming Integration", () => {
 
     vi.unstubAllGlobals();
   });
+
+  it("preserves literal think tags in Luna's visible answer", async () => {
+    const mockFetch = mockFetchOk(
+      '{"content":"OPEN=<think>; CLOSE=</think>; PATH=bin/fm-wake-drain.sh"}{"contextUsagePercentage":10}',
+    );
+    vi.stubGlobal("fetch", mockFetch);
+
+    try {
+      const events = await collect(
+        streamKiro(
+          makeModel({
+            id: "gpt-5-6-luna",
+            kiroModelId: "gpt-5.6-luna",
+            input: ["text", "image"],
+            additionalModelRequestFieldsSchema: effortSchema("reasoning", ["low", "medium", "high", "max"]),
+          }),
+          makeContext(),
+          { apiKey: "test-token", reasoning: "max" },
+        ),
+      );
+
+      expect(events.some((event) => event.type === "thinking_start")).toBe(false);
+      const done = events.find((event) => event.type === "done");
+      const text =
+        done?.type === "done" ? done.message.content.find((block) => block.type === "text")?.text : undefined;
+      expect(text).toBe("OPEN=<think>; CLOSE=</think>; PATH=bin/fm-wake-drain.sh");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
