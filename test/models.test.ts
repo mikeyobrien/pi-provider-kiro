@@ -53,6 +53,12 @@ const catalogFixture: KiroCatalogModel[] = [
     additionalModelRequestFieldsSchema: effortSchema("reasoning", ["none", "low", "medium", "high", "xhigh", "max"]),
   },
   {
+    modelId: "gpt-5.6-luna",
+    displayName: "GPT 5.6 Luna",
+    tokenLimits: { maxInputTokens: 300_000, maxOutputTokens: 128_000 },
+    additionalModelRequestFieldsSchema: effortSchema("reasoning", ["none", "low", "medium", "high", "xhigh", "max"]),
+  },
+  {
     modelId: "claude-opus-4.8",
     displayName: "Catalog Opus 4.8",
     tokenLimits: { maxInputTokens: 900_000, maxOutputTokens: 100_000 },
@@ -164,11 +170,18 @@ describe("Feature 2: Model Definitions", () => {
       expect(mapped.find((model) => model.id === expected.id)).toMatchObject(expected);
     });
 
+    it("advertises verified Luna vision without broadening other non-Claude models", () => {
+      expect(mapped.find((model) => model.id === "gpt-5-6-luna")?.input).toEqual(["text", "image"]);
+      expect(mapped.find((model) => model.id === "openai-gpt-5-6")?.input).toEqual(["text"]);
+      expect(mapped.find((model) => model.id === "qwen3-coder-next")?.input).toEqual(["text"]);
+    });
+
     it("retains fresh schema and token metadata for a model also present in the bootstrap list", () => {
       const opus = mapped.find((model) => model.id === "claude-opus-4-8");
       expect(opus?.name).toBe("Catalog Opus 4.8");
-      expect(opus?.additionalModelRequestFieldsSchema).toEqual(catalogFixture[1].additionalModelRequestFieldsSchema);
-      expect(opus?.tokenLimits).toEqual(catalogFixture[1].tokenLimits);
+      const catalogOpus = catalogFixture.find((model) => model.modelId === "claude-opus-4.8");
+      expect(opus?.additionalModelRequestFieldsSchema).toEqual(catalogOpus?.additionalModelRequestFieldsSchema);
+      expect(opus?.tokenLimits).toEqual(catalogOpus?.tokenLimits);
       expect(opus?.contextWindow).not.toBe(kiroModels.find((model) => model.id === opus?.id)?.contextWindow);
     });
 
@@ -239,6 +252,26 @@ describe("Feature 2: Model Definitions", () => {
       expect(isCacheStale(TEST_REGION)).toBe(false);
     });
 
+    it("repairs stale Luna image metadata in memory without rewriting the cache", () => {
+      const [cachedLuna] = mapKiroCatalogModels([{ modelId: "gpt-5.6-luna" }], TEST_REGION);
+      cachedLuna.input = ["text"];
+      const serialized = JSON.stringify({
+        version: KIRO_MANAGEMENT_CACHE_VERSION,
+        source: KIRO_MANAGEMENT_CACHE_SOURCE,
+        regions: {
+          [TEST_REGION]: {
+            region: TEST_REGION,
+            fetchedAt: Date.now(),
+            models: [cachedLuna],
+          },
+        },
+      });
+      writeFileSync(KIRO_MANAGEMENT_CACHE_PATH, serialized, "utf-8");
+
+      expect(getCachedModels(TEST_REGION)[0]?.input).toEqual(["text", "image"]);
+      expect(readFileSync(KIRO_MANAGEMENT_CACHE_PATH, "utf-8")).toBe(serialized);
+    });
+
     it("ignores both the old Q cache path and an unversioned cache at the management path", () => {
       const legacyModels = [{ ...kiroModels[0], id: "legacy-only", kiroModelId: "legacy-only" }];
       const legacyCache = JSON.stringify({ [TEST_REGION]: legacyModels });
@@ -288,7 +321,7 @@ describe("Feature 2: Model Definitions", () => {
       expect(kiroModels.find((model) => model.id === "minimax-m2-1")?.reasoning).toBe(false);
     });
 
-    it("uses image input for Claude and text input for other concrete models", () => {
+    it("uses image input for Claude and text input for other concrete bootstrap models", () => {
       const claudeModels = kiroModels.filter((model) => model.id.startsWith("claude-"));
       const nonClaudeModels = kiroModels.filter((model) => !model.id.startsWith("claude-") && model.id !== "auto");
       expect(claudeModels.every((model) => model.input.includes("text") && model.input.includes("image"))).toBe(true);

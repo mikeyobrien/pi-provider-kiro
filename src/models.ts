@@ -21,6 +21,8 @@ const DEFAULT_MAX_TOKENS = 8_192;
 const BASE_URL = getKiroEndpoints("us-east-1").runtime;
 const ZERO_COST = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 const REASONING_FAMILY_MARKERS = ["opus", "sonnet", "fable", "coder", "deepseek", "gpt", "glm", "qwen"];
+/** Non-Claude models whose Kiro runtime vision support has been verified end to end. */
+const VERIFIED_IMAGE_MODEL_IDS = new Set(["gpt-5.6-luna"]);
 
 type KiroTokenLimits = NonNullable<KiroCatalogModel["tokenLimits"]>;
 
@@ -454,6 +456,16 @@ function hasReasoningFamilyFallback(modelId: string): boolean {
   return normalizedId === "auto" || REASONING_FAMILY_MARKERS.some((marker) => normalizedId.includes(marker));
 }
 
+function hasVerifiedImageInput(kiroModelId: string): boolean {
+  return kiroModelId.startsWith("claude-") || VERIFIED_IMAGE_MODEL_IDS.has(kiroModelId.toLowerCase());
+}
+
+/** Correct capability metadata from older caches without rewriting the user's cache file. */
+function applyVerifiedCapabilities(model: KiroModel): KiroModel {
+  if (!hasVerifiedImageInput(model.kiroModelId) || model.input.includes("image")) return model;
+  return { ...model, input: ["text", "image"] };
+}
+
 function validateCatalogMetadata(model: KiroCatalogModel): {
   schema?: Record<string, unknown>;
   tokenLimits?: KiroTokenLimits;
@@ -526,7 +538,7 @@ export function mapKiroCatalogModels(catalogModels: KiroCatalogModel[], region: 
         (schema === undefined && hasReasoningFamilyFallback(id)),
       ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
       ...(thinking ? { thinking } : {}),
-      input: existing ? [...existing.input] : isClaude ? ["text", "image"] : ["text"],
+      input: existing ? [...existing.input] : hasVerifiedImageInput(kiroModelId) ? ["text", "image"] : ["text"],
       recoverTextToolCalls: isClaude ? false : undefined,
       cost: ZERO_COST,
       contextWindow: tokenLimits?.maxInputTokens ?? DEFAULT_CONTEXT_WINDOW,
@@ -555,7 +567,14 @@ export function loadCachedModelIds(): void {
 export function getCachedModels(region: string): KiroModel[] {
   const cache = readManagementCache();
   refreshKnownModelIds(cache);
-  return cache?.regions[region]?.models ?? kiroModels;
+  const models = cache?.regions[region]?.models ?? kiroModels;
+  let changed = false;
+  const corrected = models.map((model) => {
+    const result = applyVerifiedCapabilities(model);
+    if (result !== model) changed = true;
+    return result;
+  });
+  return changed ? corrected : models;
 }
 
 export function isCacheStale(region: string): boolean {
