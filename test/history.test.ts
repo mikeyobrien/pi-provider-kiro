@@ -3,6 +3,7 @@ import {
   addPlaceholderTools,
   assertHistoryWithinLimit,
   extractToolNamesFromHistory,
+  HISTORY_IMAGE_BASE64_LIMIT,
   HISTORY_LIMIT,
   HISTORY_LIMIT_CONTEXT_WINDOW,
   injectSyntheticToolCalls,
@@ -197,31 +198,30 @@ describe("Feature 6: History Management", () => {
   });
 
   describe("stripHistoryImages", () => {
-    it("removes images from user input messages in history", () => {
-      const h: KiroHistoryEntry[] = [
-        {
-          userInputMessage: {
-            content: "Look at this image",
-            modelId: "M",
-            origin: "KIRO_CLI",
-            images: [{ format: "png", source: { bytes: "base64data" } }],
-          },
-        },
-        assistantEntry("I see the image"),
-      ];
+    const imageEntry = (content: string, bytes: string): KiroHistoryEntry => ({
+      userInputMessage: {
+        content,
+        modelId: "M",
+        origin: "KIRO_CLI",
+        images: [{ format: "png", source: { bytes } }],
+      },
+    });
+
+    it("keeps only the newest image-bearing history entry", () => {
+      const h = [imageEntry("old", "old-image"), assistantEntry("old reply"), imageEntry("new", "new-image")];
       const stripped = stripHistoryImages(h);
+
       expect(stripped[0].userInputMessage?.images).toBeUndefined();
-      expect(stripped[0].userInputMessage?.content).toBe("Look at this image");
-      expect(stripped[1].assistantResponseMessage?.content).toBe("I see the image");
+      expect(stripped[0].userInputMessage?.content).toBe("old");
+      expect(stripped[2].userInputMessage?.images?.[0]?.source.bytes).toBe("new-image");
     });
 
     it("preserves entries without images unchanged", () => {
       const h: KiroHistoryEntry[] = [userEntry("hello"), assistantEntry("hi")];
-      const stripped = stripHistoryImages(h);
-      expect(stripped).toEqual(h);
+      expect(stripHistoryImages(h)).toEqual(h);
     });
 
-    it("removes images from tool result messages in history", () => {
+    it("keeps the newest bounded tool-result image and its tool payload", () => {
       const h: KiroHistoryEntry[] = [
         userEntry("go"),
         assistantEntry("ok", [{ name: "screenshot", toolUseId: "tc1", input: {} }]),
@@ -238,42 +238,53 @@ describe("Feature 6: History Management", () => {
         },
       ];
       const stripped = stripHistoryImages(h);
-      expect(stripped[2].userInputMessage?.images).toBeUndefined();
+      expect(stripped[2].userInputMessage?.images?.[0]?.source.bytes).toBe("screenshot-data");
       expect(stripped[2].userInputMessage?.userInputMessageContext?.toolResults).toHaveLength(1);
+    });
+
+    it("drops the newest image set when it exceeds the explicit byte bound", () => {
+      const stripped = stripHistoryImages([imageEntry("huge", "x".repeat(HISTORY_IMAGE_BASE64_LIMIT + 1))]);
+      expect(stripped[0].userInputMessage?.images).toBeUndefined();
+    });
+
+    it("strips every image when the active model is text-only", () => {
+      const stripped = stripHistoryImages([imageEntry("old", "old"), imageEntry("new", "new")], false);
+      expect(stripped.every((entry) => entry.userInputMessage?.images === undefined)).toBe(true);
     });
 
     it("does not mutate the original history array", () => {
       const images = [{ format: "png", source: { bytes: "data" } }];
-      const h: KiroHistoryEntry[] = [
-        {
-          userInputMessage: { content: "hi", modelId: "M", origin: "KIRO_CLI", images },
-        },
-      ];
+      const h: KiroHistoryEntry[] = [{ userInputMessage: { content: "hi", modelId: "M", origin: "KIRO_CLI", images } }];
       stripHistoryImages(h);
       expect(h[0].userInputMessage?.images).toEqual(images);
     });
   });
 
   describe("prepareHistory with images", () => {
-    it("strips images from prepared history", () => {
+    it("preserves only the newest bounded image in prepared history", () => {
       const h: KiroHistoryEntry[] = [
         {
           userInputMessage: {
-            content: "Look at this",
+            content: "Old image",
             modelId: "M",
             origin: "KIRO_CLI",
-            images: [{ format: "png", source: { bytes: "x".repeat(1000) } }],
+            images: [{ format: "png", source: { bytes: "old-image" } }],
           },
         },
-        assistantEntry("I see it"),
-        userEntry("thanks"),
-        assistantEntry("welcome"),
+        assistantEntry("I saw the old image"),
+        {
+          userInputMessage: {
+            content: "New image",
+            modelId: "M",
+            origin: "KIRO_CLI",
+            images: [{ format: "png", source: { bytes: "new-image" } }],
+          },
+        },
+        assistantEntry("I saw the new image"),
       ];
       const result = prepareHistory(h);
-      // All image data should be stripped from history
-      for (const entry of result) {
-        expect(entry.userInputMessage?.images).toBeUndefined();
-      }
+      expect(result[0].userInputMessage?.images).toBeUndefined();
+      expect(result[2].userInputMessage?.images?.[0]?.source.bytes).toBe("new-image");
     });
 
     it("removes a huge image before enforcing the limit", () => {
@@ -295,7 +306,7 @@ describe("Feature 6: History Management", () => {
       const resultSize = JSON.stringify(result).length;
       expect(() => assertHistoryWithinLimit(result, HISTORY_LIMIT)).not.toThrow();
       expect(resultSize).toBeLessThanOrEqual(HISTORY_LIMIT);
-      // Should still have entries (not wiped out)
+      expect(result[0].userInputMessage?.images).toBeUndefined();
       expect(result.length).toBeGreaterThan(0);
     });
   });

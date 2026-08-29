@@ -38,7 +38,13 @@ import {
 } from "./history.js";
 import { isKiroToolStructureRule, kiroConversationEntries, repairKiroConversation } from "./history-validator.js";
 import { parseInvokeToolCalls } from "./invoke-tool-parser.js";
-import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, refreshViaKiroCli } from "./kiro-cli.js";
+import {
+  getKiroCliCredentials,
+  getKiroCliCredentialsAllowExpired,
+  getKiroCliSocialToken,
+  getKiroCliSocialTokenAllowExpired,
+  refreshViaKiroCli,
+} from "./kiro-cli.js";
 import {
   invalidateKiroProfileArn,
   type KiroManagementAuth,
@@ -270,8 +276,13 @@ export function streamKiro(
       const optionProfileArn =
         (options as unknown as { credentials?: { profileArn?: string }; profileArn?: string })?.credentials
           ?.profileArn || (options as unknown as { profileArn?: string })?.profileArn;
-      const cliCreds = getKiroCliCredentials() ?? getKiroCliCredentialsAllowExpired();
-      const cliProfileArn = cliCreds?.access === accessToken ? cliCreds.profileArn : undefined;
+      const cliCreds = [
+        getKiroCliSocialToken(),
+        getKiroCliCredentials(),
+        getKiroCliSocialTokenAllowExpired(),
+        getKiroCliCredentialsAllowExpired(),
+      ].find((credential) => credential?.access === accessToken);
+      const cliProfileArn = cliCreds?.profileArn;
       const initialProfileArn = modelMetadata.kiroProfileArn || optionProfileArn || cliProfileArn;
       let profileArn: string;
       try {
@@ -315,6 +326,7 @@ export function streamKiro(
         options?.reasoning,
       );
       const thinkingEnabled = !!options?.reasoning || model.reasoning;
+      const usesLegacyThinkingTags = thinkingEnabled && effortConfig?.field !== "reasoning";
       debugLog("request.init", {
         endpoint,
         model: model.id,
@@ -333,7 +345,7 @@ export function streamKiro(
       // user-visible thinking stream when the legacy thinking markers are also
       // present. Keep both controls: structured fields select effort, while these
       // markers preserve the <thinking> content consumed by ThinkingTagParser.
-      if (thinkingEnabled && effortConfig?.field !== "reasoning") {
+      if (usesLegacyThinkingTags) {
         const budget =
           options?.reasoning === "xhigh"
             ? 50000
@@ -363,7 +375,7 @@ export function streamKiro(
           currentMsgStartIdx,
         } = buildHistory(normalized, kiroModelId, effectiveSystemPrompt);
         // Preserve semantic context locally; Pi owns lossy compaction.
-        const history = prepareHistory(rawHistory);
+        const history = prepareHistory(rawHistory, model.input.includes("image"));
         const dynamicHistoryLimit = Math.floor((model.contextWindow / HISTORY_LIMIT_CONTEXT_WINDOW) * HISTORY_LIMIT);
         const toolResultLimit = TOOL_RESULT_LIMIT;
         const currentMessages = normalized.slice(currentMsgStartIdx);
@@ -776,7 +788,11 @@ export function streamKiro(
         let lastContentData = "";
         let usageEvent: { inputTokens?: number; outputTokens?: number } | null = null;
         let receivedContextUsage = false;
-        const thinkingParser = thinkingEnabled ? new ThinkingTagParser(output, stream) : null;
+        // Structured `reasoning` models (including Luna) expose native thinking
+        // events. Parsing XML-like tags in their visible answer corrupts literal
+        // examples, so leak recovery is limited to models for which we injected
+        // the legacy thinking markers above.
+        const thinkingParser = usesLegacyThinkingTags ? new ThinkingTagParser(output, stream) : null;
         let nativeThinkingBlockIndex: number | null = null;
         let nativeThinkingEnded = false;
         const ensureNativeThinkingBlock = (): { block: ThinkingContent; contentIndex: number } => {
