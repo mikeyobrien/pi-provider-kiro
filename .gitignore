@@ -7,3 +7,4 @@ dist/
 .agents/
 .ralph/
 *.tgz
+node_modules
