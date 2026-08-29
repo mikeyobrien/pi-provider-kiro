@@ -54,6 +54,7 @@ import {
 } from "./management.js";
 import { resolveKiroModel } from "./models.js";
 import { kiroAuthHeaders } from "./oauth.js";
+import { requestPacer } from "./pacing.js";
 import {
   capacityRetryConfig,
   exponentialBackoff,
@@ -61,10 +62,13 @@ import {
   firstTokenTimeoutForModel,
   isCapacityError,
   isNonRetryableBodyError,
+  isRateLimitError,
   isTooBigError,
   KIRO_REASON_CODES,
   MAX_RETRY_DELAY,
-  resolveRequestRateRetryDelay,
+  parseRetryAfterMs,
+  rateLimitBackoff,
+  rateLimitRetryConfig,
   retryConfig,
 } from "./retry.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
@@ -357,6 +361,9 @@ export function streamKiro(
         systemPrompt = `<thinking_mode>enabled</thinking_mode><max_thinking_length>${budget}</max_thinking_length>${systemPrompt ? `\n${systemPrompt}` : ""}`;
       }
       let retryCount = 0;
+      // Rate rejections are account-scoped rather than attempt-scoped, so this
+      // budget spans the whole call instead of resetting per outer attempt.
+      let rateLimitRetryCount = 0;
       const maxRetries = 3;
       const conversationId = options?.sessionId ?? crypto.randomUUID();
       requestLoop: while (retryCount <= maxRetries) {
@@ -636,6 +643,9 @@ export function streamKiro(
             toolResultCount: wireUimc?.toolResults?.length ?? 0,
             request,
           });
+          // Spaces out request starts once the account has been rate-limited.
+          // Dormant (single promise hop) until a 429 is actually observed.
+          await requestPacer.acquire(options?.signal);
           const responseHeaderDeadline = createResponseHeaderDeadline(
             options?.signal,
             retryConfig.requestHeaderTimeoutMs,
@@ -707,24 +717,33 @@ export function streamKiro(
                 `INSUFFICIENT_MODEL_CAPACITY — exhausted ${capacityRetryConfig.maxRetries} retries, giving up`,
               );
             }
-            if (isRequestRateExceeded) {
-              if (retryCount >= maxRetries) {
-                throw new Error(
-                  `Kiro API error: request window retry budget exhausted (${KIRO_REASON_CODES.USER_REQUEST_RATE_EXCEEDED})`,
+            // Account-level rate rejection. Transient and unrelated to the
+            // request body, so it is retried on its own budget without
+            // consuming the outer attempt count. The hard monthly quota also
+            // arrives as 429, so it is excluded first — retrying it can never
+            // succeed. Every rejection also widens the process-wide pacing so
+            // the rest of a parallel fan-out stops piling on.
+            if (
+              isRateLimitError(response.status, errText) &&
+              !isNonRetryableBodyError(errText) &&
+              !isCapacityError(errText)
+            ) {
+              requestPacer.penalize();
+              if (rateLimitRetryCount < rateLimitRetryConfig.maxRetries) {
+                rateLimitRetryCount++;
+                const delayMs = rateLimitBackoff(
+                  rateLimitRetryCount - 1,
+                  parseRetryAfterMs(response.headers?.get?.("retry-after")),
                 );
+                logCapacityEvent(
+                  `USER_REQUEST_RATE_EXCEEDED — retrying in ${delayMs}ms (${rateLimitRetryCount}/${rateLimitRetryConfig.maxRetries}, pacing ${requestPacer.spacingMs}ms)`,
+                );
+                await abortableDelay(delayMs, options?.signal);
+                continue;
               }
-              retryCount++;
-              const retryDelay = resolveRequestRateRetryDelay(response.headers);
-              debugLog("request.rateWindowRetry", {
-                attempt: retryCount,
-                maxRetries,
-                delayMs: retryDelay.delayMs,
-                advertisedDelayMs: retryDelay.advertisedDelayMs,
-                capped: retryDelay.capped,
-                reasonCode,
-              });
-              await abortableDelay(retryDelay.delayMs, options?.signal);
-              continue requestLoop;
+              logCapacityEvent(
+                `USER_REQUEST_RATE_EXCEEDED — exhausted ${rateLimitRetryConfig.maxRetries} retries, giving up`,
+              );
             }
             if (response.status === 403 && !isCapacityError(errText) && retryCount < maxRetries) {
               retryCount++;

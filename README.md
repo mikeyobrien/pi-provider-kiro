@@ -77,13 +77,62 @@ Reasoning is automatically enabled for supported models. Use `/reasoning` to adj
 
 ## Retry Behavior
 
-Generic transient retries such as HTTP `429` and `5xx` are handled by `pi-coding-agent` at the session layer.
+Generic transient retries such as `5xx` are handled by `pi-coding-agent` at the
+session layer.
 
-This provider only keeps local recovery for Kiro-specific cases:
+This provider keeps local recovery for Kiro-specific cases:
 - `403` auth races, where it can refresh credentials from `kiro-cli`
 - first-token / stalled-stream recovery
 - empty-stream retries
 - non-retryable Kiro body markers like `MONTHLY_REQUEST_COUNT` and `INSUFFICIENT_MODEL_CAPACITY`
+- account rate rejections (`429` / `USER_REQUEST_RATE_EXCEEDED`) — see below
+
+### Rate limiting
+
+Kiro's rate limit is scoped to the **account**, so a parallel fan-out competes
+with itself: every concurrent stream, every session, and every pi process on the
+machine draws from one budget. The provider owns this case rather than delegating
+it, because recovering well needs three things the session layer cannot do —
+honor `Retry-After`, spread simultaneous retries apart, and slow down the
+requests that have not been sent yet.
+
+- **Retry**: up to 8 attempts on a budget of its own, so a rejection never costs
+  a token-refresh or timeout retry. Delays use full jitter over a growing window
+  (1s–60s); a `Retry-After` header is taken as the floor. An exhausted budget
+  surfaces the `429` so session-level retry remains the outer safety net.
+- **Pacing**: spacing between request *starts* — never a concurrency cap, so a
+  long stream cannot block a queued one. Zero until a rejection is observed, one
+  step wider per rejection *burst* (rejections within 1s count once), decaying
+  back to zero after 30s of quiet. State lives in
+  `~/.pi/logs/kiro-pacing.json`, so a process that starts right after a
+  rejection inherits the spacing instead of bursting into the same wall.
+
+Measured on a 100-request burst against a live account: 15 rejections, 0
+surfaced errors, 100/100 completed. Letting each rejection widen spacing
+individually (instead of per burst) drove spacing to its ceiling from one
+collision and tripled wall time — 38.0s versus 13.8s for identical work.
+
+Rate-limit events are appended to `~/.pi/logs/capacity-retries.log`:
+
+```
+USER_REQUEST_RATE_EXCEEDED — retrying in 1903ms (2/8, pacing 400ms)
+```
+
+Environment overrides:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `KIRO_REQUEST_PACING=off` | on | Disable pacing; retry still applies |
+| `KIRO_PACING_SHARED=off` | on | Keep pacing state process-local |
+| `KIRO_PACING_MIN_MS` | `200` | Spacing after the first rejection |
+| `KIRO_PACING_MAX_MS` | `4000` | Spacing ceiling |
+| `KIRO_PACING_DECAY_MS` | `30000` | Quiet period before relaxing one step |
+| `KIRO_PACING_COALESCE_MS` | `1000` | Window in which rejections count once |
+| `KIRO_PACING_POLL_MS` | `2000` | How often a dormant process re-reads shared state |
+| `KIRO_PACING_STATE_FILE` | `~/.pi/logs/kiro-pacing.json` | Shared state location |
+
+To reproduce load locally: `N=100 node scripts/kiro-loadtest.mjs` (reads the
+credential from pi's auth store and prints only aggregates).
 
 The reason codes this provider classifies on are published from the package
 entry point, so consumers can interpret a code without hardcoding their own copy
@@ -94,11 +143,13 @@ import {
   KIRO_REASON_CODES,
   isCapacityError,
   isNonRetryableBodyError,
+  isRateLimitError,
   isTooBigError,
 } from "pi-provider-kiro";
 
 isTooBigError(400, body); // size rejection → safe to compact and retry
 isCapacityError(body); // transient capacity → safe to retry as-is
+isRateLimitError(429, body); // account rate limit → retry after a delay
 isNonRetryableBodyError(body); // hard quota → do not retry
 ```
 
