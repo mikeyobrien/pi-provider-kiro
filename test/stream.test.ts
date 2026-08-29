@@ -2803,6 +2803,137 @@ describe("Feature 9: Streaming Integration", () => {
   });
 
   // =========================================================================
+  // Response-header timeout
+  // =========================================================================
+
+  it("times out a fetch that never returns response headers", async () => {
+    vi.useFakeTimers();
+    const originalTimeout = retryConfig.requestHeaderTimeoutMs;
+    retryConfig.requestHeaderTimeoutMs = 10;
+    const fetchMock = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const eventsPromise = collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+      await vi.advanceTimersByTimeAsync(7_100);
+      const events = await eventsPromise;
+
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+      const error = events.find((event) => event.type === "error");
+      expect(error?.type === "error" && error.error.errorMessage).toBe(
+        "Kiro API error: response headers timeout after max retries",
+      );
+    } finally {
+      retryConfig.requestHeaderTimeoutMs = originalTimeout;
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("preserves caller cancellation during the response-header wait", async () => {
+    const controller = new AbortController();
+    const removeListenerSpy = vi.spyOn(controller.signal, "removeEventListener");
+    let notifyFetchStarted: (() => void) | undefined;
+    const fetchStarted = new Promise<void>((resolve) => {
+      notifyFetchStarted = resolve;
+    });
+    const fetchMock = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+      notifyFetchStarted?.();
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const eventsPromise = collect(
+        streamKiro(makeModel(), makeContext(), { apiKey: "tok", signal: controller.signal }),
+      );
+      await fetchStarted;
+      controller.abort(new DOMException("cancelled by caller", "AbortError"));
+      const events = await eventsPromise;
+
+      expect(fetchMock).toHaveBeenCalledOnce();
+      const error = events.find((event) => event.type === "error");
+      expect(error?.type === "error" && error.error.stopReason).toBe("aborted");
+      expect(error?.type === "error" && error.error.errorMessage).toContain("cancelled by caller");
+      expect(error?.type === "error" && error.error.errorMessage).not.toContain("response headers timeout");
+      expect(removeListenerSpy).toHaveBeenCalledWith("abort", expect.any(Function));
+    } finally {
+      removeListenerSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("clears the response-header timer and caller listener after headers arrive", async () => {
+    vi.useFakeTimers();
+    const originalTimeout = retryConfig.requestHeaderTimeoutMs;
+    retryConfig.requestHeaderTimeoutMs = 10;
+    const controller = new AbortController();
+    const removeListenerSpy = vi.spyOn(controller.signal, "removeEventListener");
+    const fetchMock = mockFetchOk('{"content":"ok"}{"contextUsagePercentage":5}');
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const events = await collect(
+        streamKiro(makeModel(), makeContext(), { apiKey: "tok", signal: controller.signal }),
+      );
+      const requestInit = fetchMock.mock.calls[0]?.[1] as RequestInit;
+      const responseHeaderSignal = requestInit.signal as AbortSignal;
+
+      expect(events.find((event) => event.type === "done")).toBeDefined();
+      expect(responseHeaderSignal.aborted).toBe(false);
+      expect(removeListenerSpy).toHaveBeenCalledWith("abort", expect.any(Function));
+      await vi.advanceTimersByTimeAsync(11);
+      expect(responseHeaderSignal.aborted).toBe(false);
+    } finally {
+      retryConfig.requestHeaderTimeoutMs = originalTimeout;
+      removeListenerSpy.mockRestore();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("retries a response-header timeout and succeeds", async () => {
+    vi.useFakeTimers();
+    const originalTimeout = retryConfig.requestHeaderTimeoutMs;
+    retryConfig.requestHeaderTimeoutMs = 10;
+    const successfulFetch = mockFetchOk('{"content":"ok"}{"contextUsagePercentage":5}');
+    const requestSignals: AbortSignal[] = [];
+    const fetchMock = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+      requestSignals.push(init?.signal as AbortSignal);
+      if (requestSignals.length === 1) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+        });
+      }
+      return successfulFetch();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const eventsPromise = collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+      await vi.advanceTimersByTimeAsync(1_010);
+      const events = await eventsPromise;
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(requestSignals[0]?.reason).toMatchObject({ name: "TimeoutError" });
+      expect(requestSignals[1]?.aborted).toBe(false);
+      expect(events.find((event) => event.type === "done")).toBeDefined();
+      await vi.advanceTimersByTimeAsync(11);
+      expect(requestSignals[1]?.aborted).toBe(false);
+    } finally {
+      retryConfig.requestHeaderTimeoutMs = originalTimeout;
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  // =========================================================================
   // First-token timeout (Task 1.2)
   // =========================================================================
 
@@ -3228,6 +3359,9 @@ describe("Feature 9: Streaming Integration", () => {
   });
 
   it("does not retry repeated 429 responses inside the provider", async () => {
+    vi.useFakeTimers();
+    const originalTimeout = retryConfig.requestHeaderTimeoutMs;
+    retryConfig.requestHeaderTimeoutMs = 10;
     const mockFetch = vi.fn().mockResolvedValue({
       ok: false,
       status: 429,
@@ -3236,15 +3370,24 @@ describe("Feature 9: Streaming Integration", () => {
     });
     vi.stubGlobal("fetch", mockFetch);
 
-    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
-    const events = await collect(stream);
+    try {
+      const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+      const events = await collect(stream);
+      const requestInit = mockFetch.mock.calls[0]?.[1] as RequestInit;
+      const responseHeaderSignal = requestInit.signal as AbortSignal;
 
-    expect(mockFetch).toHaveBeenCalledTimes(1);
-    const error = events.find((e) => e.type === "error");
-    expect(error).toBeDefined();
-    expect(error?.type === "error" && error.error.stopReason).toBe("error");
-
-    vi.unstubAllGlobals();
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const error = events.find((e) => e.type === "error");
+      expect(error).toBeDefined();
+      expect(error?.type === "error" && error.error.stopReason).toBe("error");
+      await vi.advanceTimersByTimeAsync(11);
+      expect(responseHeaderSignal.aborted).toBe(false);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    } finally {
+      retryConfig.requestHeaderTimeoutMs = originalTimeout;
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
   }, 15000);
 
   it("aborts promptly during 403 retry backoff delay", async () => {

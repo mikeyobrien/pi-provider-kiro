@@ -7,6 +7,8 @@ import { kiroModels } from "./models.js";
 // and 5-minute stalled stream grace period. 90s matches the TUI's
 // INITIAL_RESPONSE_TIMEOUT_MS for the first event from the backend.
 export const FIRST_TOKEN_TIMEOUT = 90_000;
+/** Maximum wait for the runtime endpoint to return HTTP response headers. */
+export const REQUEST_HEADER_TIMEOUT = 90_000;
 
 export function firstTokenTimeoutForModel(modelId: string): number {
   // Allow test overrides via retryConfig.firstTokenTimeoutMs
@@ -20,6 +22,7 @@ export function firstTokenTimeoutForModel(modelId: string): number {
 // Mutable config for values that tests need to override
 export const retryConfig = {
   firstTokenTimeoutMs: FIRST_TOKEN_TIMEOUT,
+  requestHeaderTimeoutMs: REQUEST_HEADER_TIMEOUT,
 };
 
 export function exponentialBackoff(attempt: number, baseMs: number, maxMs: number): number {

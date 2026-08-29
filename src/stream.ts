@@ -56,6 +56,7 @@ import {
   isNonRetryableBodyError,
   isTooBigError,
   MAX_RETRY_DELAY,
+  retryConfig,
 } from "./retry.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
 import { kiroTokenTypeHeaders } from "./token-type.js";
@@ -110,16 +111,55 @@ function logCapacityEvent(message: string): void {
 function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(signal.reason);
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        reject(signal.reason);
-      },
-      { once: true },
-    );
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+function createResponseHeaderDeadline(
+  callerSignal: AbortSignal | undefined,
+  timeoutMs: number,
+): {
+  signal: AbortSignal;
+  didTimeout: () => boolean;
+  cleanup: () => void;
+} {
+  const controller = new AbortController();
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout>;
+  const onCallerAbort = () => {
+    clearTimeout(timer);
+    callerSignal?.removeEventListener("abort", onCallerAbort);
+    controller.abort(callerSignal?.reason);
+  };
+  timer = setTimeout(() => {
+    timedOut = true;
+    callerSignal?.removeEventListener("abort", onCallerAbort);
+    controller.abort(new DOMException("Kiro response headers timeout", "TimeoutError"));
+  }, timeoutMs);
+
+  if (callerSignal?.aborted) {
+    onCallerAbort();
+  } else {
+    callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
+  }
+
+  return {
+    signal: controller.signal,
+    didTimeout: () => timedOut,
+    cleanup: () => {
+      clearTimeout(timer);
+      callerSignal?.removeEventListener("abort", onCallerAbort);
+    },
+  };
 }
 
 interface KiroRequest {
@@ -304,7 +344,7 @@ export function streamKiro(
       let retryCount = 0;
       const maxRetries = 3;
       const conversationId = options?.sessionId ?? crypto.randomUUID();
-      while (retryCount <= maxRetries) {
+      requestLoop: while (retryCount <= maxRetries) {
         if (options?.signal?.aborted) throw options.signal.reason;
         const effectiveSystemPrompt = systemPrompt;
         // Relocate a tool result that arrived behind a later assistant turn than
@@ -581,23 +621,44 @@ export function streamKiro(
             toolResultCount: wireUimc?.toolResults?.length ?? 0,
             request,
           });
-          response = await fetch(endpoint, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Accept: "application/vnd.amazon.eventstream",
-              ...kiroAuthHeaders(accessToken),
-              ...kiroTokenTypeHeaders(accessToken),
-              "x-amzn-codewhisperer-optout": "true",
-              "amz-sdk-invocation-id": crypto.randomUUID(),
-              "amz-sdk-request": "attempt=1; max=1",
-              "x-amzn-kiro-agent-mode": "vibe",
-              "x-amz-user-agent": ua,
-              "user-agent": ua,
-            },
-            body: JSON.stringify(request),
-            signal: options?.signal,
-          });
+          const responseHeaderDeadline = createResponseHeaderDeadline(
+            options?.signal,
+            retryConfig.requestHeaderTimeoutMs,
+          );
+          let responseHeadersTimedOut = false;
+          try {
+            response = await fetch(endpoint, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Accept: "application/vnd.amazon.eventstream",
+                ...kiroAuthHeaders(accessToken),
+                ...kiroTokenTypeHeaders(accessToken),
+                "x-amzn-codewhisperer-optout": "true",
+                "amz-sdk-invocation-id": crypto.randomUUID(),
+                "amz-sdk-request": "attempt=1; max=1",
+                "x-amzn-kiro-agent-mode": "vibe",
+                "x-amz-user-agent": ua,
+                "user-agent": ua,
+              },
+              body: JSON.stringify(request),
+              signal: responseHeaderDeadline.signal,
+            });
+          } catch (error) {
+            if (!responseHeaderDeadline.didTimeout() || options?.signal?.aborted) throw error;
+            responseHeadersTimedOut = true;
+          } finally {
+            responseHeaderDeadline.cleanup();
+          }
+          if (responseHeadersTimedOut) {
+            if (retryCount >= maxRetries) {
+              throw new Error("Kiro API error: response headers timeout after max retries");
+            }
+            retryCount++;
+            const delayMs = exponentialBackoff(retryCount - 1, 1000, MAX_RETRY_DELAY);
+            await abortableDelay(delayMs, options?.signal);
+            continue requestLoop;
+          }
           if (!response.ok) {
             let errText = "";
             try {

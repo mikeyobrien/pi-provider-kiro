@@ -102,3 +102,10 @@ npm run test:watch # vitest (watch mode)
 - Output token count is estimated (`content.length / 4`), not from the API
 - `contextUsagePercentage` is the only usage metric Kiro provides; input tokens are back-calculated
 - Social login (Google/GitHub) requires `kiro-cli` to be installed — pi delegates the auth flow to it
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.
