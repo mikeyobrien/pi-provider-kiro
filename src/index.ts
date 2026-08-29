@@ -36,14 +36,27 @@ export { KIRO_MODEL_IDS, kiroModels, resolveKiroModel } from "./models.js";
 // with. Published so consumers can interpret a reason code without an error
 // instance in hand (e.g. a persisted log line) instead of hardcoding copies of
 // the literals, which drift when the service adds a code.
+export {
+  FilePacingStore,
+  type PacingState,
+  type PacingStore,
+  pacingConfig,
+  RequestPacer,
+  requestPacer,
+} from "./pacing.js";
 export type { KiroReasonCode } from "./retry.js";
 export {
   CAPACITY_PATTERN,
   isCapacityError,
   isNonRetryableBodyError,
+  isRateLimitError,
   isTooBigError,
   KIRO_REASON_CODES,
   NON_RETRYABLE_BODY_PATTERNS,
+  parseRetryAfterMs,
+  RATE_LIMIT_PATTERNS,
+  rateLimitBackoff,
+  rateLimitRetryConfig,
   TOO_BIG_PATTERNS,
 } from "./retry.js";
 export { streamKiro } from "./stream.js";

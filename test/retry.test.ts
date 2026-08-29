@@ -9,12 +9,17 @@ import {
   FIRST_TOKEN_TIMEOUT,
   isCapacityError,
   isNonRetryableBodyError,
+  isRateLimitError,
   isTooBigError,
   KIRO_REASON_CODES,
   MAX_RETRY_DELAY,
   NON_RETRYABLE_BODY_PATTERNS,
+  parseRetryAfterFromHeaders,
   parseRetryAfterMs,
+  RATE_LIMIT_PATTERNS,
   REQUEST_RATE_FALLBACK_DELAY_MS,
+  rateLimitBackoff,
+  rateLimitRetryConfig,
   resolveRequestRateRetryDelay,
   retryConfig,
   TOO_BIG_PATTERNS,
@@ -63,6 +68,7 @@ describe("KIRO_REASON_CODES", () => {
     expect(Object.isFrozen(KIRO_REASON_CODES)).toBe(true);
     expect(Object.isFrozen(TOO_BIG_PATTERNS)).toBe(true);
     expect(Object.isFrozen(NON_RETRYABLE_BODY_PATTERNS)).toBe(true);
+    expect(Object.isFrozen(RATE_LIMIT_PATTERNS)).toBe(true);
   });
 
   it("is the source the pattern lists derive from", () => {
@@ -96,17 +102,17 @@ describe("request-window retry classification", () => {
   });
 
   it("parses each supported header with explicit units", () => {
-    expect(parseRetryAfterMs(new Headers({ "retry-after-ms": "1500" }))).toBe(1500);
-    expect(parseRetryAfterMs(new Headers({ "retry-after": "1.5" }))).toBe(1500);
-    expect(parseRetryAfterMs(new Headers({ "x-ratelimit-reset-after": "1.5" }))).toBe(1500);
+    expect(parseRetryAfterFromHeaders(new Headers({ "retry-after-ms": "1500" }))).toBe(1500);
+    expect(parseRetryAfterFromHeaders(new Headers({ "retry-after": "1.5" }))).toBe(1500);
+    expect(parseRetryAfterFromHeaders(new Headers({ "x-ratelimit-reset-after": "1.5" }))).toBe(1500);
 
     const now = Date.parse("2026-08-29T00:00:00Z");
-    expect(parseRetryAfterMs(new Headers({ "retry-after": "Sat, 29 Aug 2026 00:00:02 GMT" }), now)).toBe(2000);
+    expect(parseRetryAfterFromHeaders(new Headers({ "retry-after": "Sat, 29 Aug 2026 00:00:02 GMT" }), now)).toBe(2000);
   });
 
   it("lets a later valid header win after malformed or negative candidates", () => {
     expect(
-      parseRetryAfterMs(
+      parseRetryAfterFromHeaders(
         new Headers({
           "retry-after-ms": "not-a-number",
           "retry-after": "-5",
@@ -114,15 +120,17 @@ describe("request-window retry classification", () => {
         }),
       ),
     ).toBe(2000);
-    expect(parseRetryAfterMs(new Headers({ "retry-after-ms": "Infinity" }))).toBeUndefined();
-    expect(parseRetryAfterMs(new Headers({ "retry-after": "-1" }))).toBeUndefined();
-    expect(parseRetryAfterMs(new Headers({ "retry-after": "1e308", "x-ratelimit-reset-after": "2" }))).toBe(2000);
-    expect(parseRetryAfterMs(new Headers({ "x-ratelimit-reset-after": "1e308" }))).toBeUndefined();
+    expect(parseRetryAfterFromHeaders(new Headers({ "retry-after-ms": "Infinity" }))).toBeUndefined();
+    expect(parseRetryAfterFromHeaders(new Headers({ "retry-after": "-1" }))).toBeUndefined();
+    expect(parseRetryAfterFromHeaders(new Headers({ "retry-after": "1e308", "x-ratelimit-reset-after": "2" }))).toBe(
+      2000,
+    );
+    expect(parseRetryAfterFromHeaders(new Headers({ "x-ratelimit-reset-after": "1e308" }))).toBeUndefined();
   });
 
   it("treats an elapsed HTTP date as retry-now", () => {
     const now = Date.parse("2026-08-29T00:00:00Z");
-    expect(parseRetryAfterMs(new Headers({ "retry-after": "Fri, 28 Aug 2026 23:59:59 GMT" }), now)).toBe(0);
+    expect(parseRetryAfterFromHeaders(new Headers({ "retry-after": "Fri, 28 Aug 2026 23:59:59 GMT" }), now)).toBe(0);
   });
 
   it("falls back to 10 seconds and caps longer server hints at 10 seconds", () => {
@@ -209,5 +217,93 @@ describe("FIRST_TOKEN_TIMEOUT", () => {
     retryConfig.firstTokenTimeoutMs = 100;
     expect(retryConfig.firstTokenTimeoutMs).toBe(100);
     retryConfig.firstTokenTimeoutMs = original;
+  });
+});
+
+describe("isRateLimitError", () => {
+  it("classifies any 429 as a rate rejection", () => {
+    expect(isRateLimitError(429, "")).toBe(true);
+    expect(isRateLimitError(429, "Too many requests, please wait before trying again.")).toBe(true);
+  });
+
+  it("classifies the reason code regardless of status", () => {
+    expect(isRateLimitError(400, KIRO_REASON_CODES.USER_REQUEST_RATE_EXCEEDED)).toBe(true);
+    expect(isRateLimitError(500, "Too many requests")).toBe(true);
+  });
+
+  it("leaves unrelated failures alone", () => {
+    expect(isRateLimitError(403, "ExpiredTokenException")).toBe(false);
+    expect(isRateLimitError(400, KIRO_REASON_CODES.REQUEST_BODY_INVALID)).toBe(false);
+    expect(isRateLimitError(500, "internal error")).toBe(false);
+  });
+
+  it("exposes the reason code through the pattern list", () => {
+    expect(RATE_LIMIT_PATTERNS).toContain(KIRO_REASON_CODES.USER_REQUEST_RATE_EXCEEDED);
+  });
+
+  it("overlaps with hard quota, which callers must exclude first", () => {
+    // Monthly quota also arrives as 429; the caller checks
+    // isNonRetryableBodyError() before isRateLimitError() for that reason.
+    const monthly = KIRO_REASON_CODES.MONTHLY_REQUEST_COUNT;
+    expect(isRateLimitError(429, monthly)).toBe(true);
+    expect(isNonRetryableBodyError(monthly)).toBe(true);
+  });
+});
+
+describe("parseRetryAfterMs", () => {
+  it("parses delay-seconds", () => {
+    expect(parseRetryAfterMs("3")).toBe(3000);
+    expect(parseRetryAfterMs(" 0 ")).toBe(0);
+    expect(parseRetryAfterMs("1.5")).toBe(1500);
+  });
+
+  it("parses an HTTP-date relative to now", () => {
+    const now = Date.parse("2026-08-29T10:00:00Z");
+    expect(parseRetryAfterMs("Sat, 29 Aug 2026 10:00:05 GMT", now)).toBe(5000);
+  });
+
+  it("clamps a past HTTP-date to zero", () => {
+    const now = Date.parse("2026-08-29T10:00:00Z");
+    expect(parseRetryAfterMs("Sat, 29 Aug 2026 09:59:00 GMT", now)).toBe(0);
+  });
+
+  it("returns undefined when absent or unparseable", () => {
+    expect(parseRetryAfterMs(undefined)).toBeUndefined();
+    expect(parseRetryAfterMs(null)).toBeUndefined();
+    expect(parseRetryAfterMs("")).toBeUndefined();
+    expect(parseRetryAfterMs("soon")).toBeUndefined();
+  });
+});
+
+describe("rateLimitBackoff", () => {
+  it("jitters within a growing window instead of a fixed ramp", () => {
+    const { baseDelayMs } = rateLimitRetryConfig;
+    expect(rateLimitBackoff(0, undefined, () => 0)).toBe(baseDelayMs);
+    // Attempt 2 window is base*4; full jitter spans [base, base*4].
+    expect(rateLimitBackoff(2, undefined, () => 0)).toBe(baseDelayMs);
+    expect(rateLimitBackoff(2, undefined, () => 1)).toBe(baseDelayMs * 4);
+    expect(rateLimitBackoff(2, undefined, () => 0.5)).toBe(baseDelayMs * 2.5);
+  });
+
+  it("never exceeds maxDelayMs", () => {
+    expect(rateLimitBackoff(30, undefined, () => 1)).toBe(rateLimitRetryConfig.maxDelayMs);
+  });
+
+  it("treats Retry-After as a floor and adds jitter on top", () => {
+    expect(rateLimitBackoff(0, 5000, () => 0)).toBe(5000);
+    expect(rateLimitBackoff(0, 5000, () => 1)).toBe(5000 + rateLimitRetryConfig.baseDelayMs);
+  });
+
+  it("caps a Retry-After beyond the ceiling", () => {
+    expect(rateLimitBackoff(0, rateLimitRetryConfig.maxDelayMs + 10_000, () => 1)).toBe(
+      rateLimitRetryConfig.maxDelayMs,
+    );
+  });
+
+  it("spreads two simultaneous rejections apart", () => {
+    // Same attempt number, different draws — the point of full jitter.
+    const a = rateLimitBackoff(3, undefined, () => 0.1);
+    const b = rateLimitBackoff(3, undefined, () => 0.9);
+    expect(a).not.toBe(b);
   });
 });

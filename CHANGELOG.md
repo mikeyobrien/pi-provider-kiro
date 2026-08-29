@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Retry account-level rate rejections (`USER_REQUEST_RATE_EXCEEDED` / HTTP 429) inside the provider instead of surfacing them. Delays honor a `Retry-After` header as a floor and add full jitter, since every concurrent request of a parallel fan-out is rejected by the same account-scoped limit at the same instant and a deterministic backoff would retry them in lockstep. Rate retries run on their own budget (`rateLimitRetryConfig`, 8 attempts, 1s–60s) and do not consume the outer attempt count, so a rejection no longer costs a token-refresh or timeout retry. The hard monthly quota (`MONTHLY_REQUEST_COUNT`), which arrives under the same status, is still failed immediately.
+- Adaptive request pacing shared by every stream in the process and, through `~/.pi/logs/kiro-pacing.json`, across pi processes (`src/pacing.ts`). Spacing between request *starts* is zero until a rejection is observed, widens one step per rejection *burst* (200ms–4s), and decays back to zero after 30s of quiet, so a fan-out stops re-triggering the limit it just hit and a newly started process inherits spacing instead of bursting into the same wall. Concurrency is never capped, so a long stream cannot block a queued one. Penalties are coalesced within a 1s window: a 100-way fan-out is rejected all at once, and letting each rejection double the spacing drove it to the ceiling from a single collision — measured on a 100-request burst, per-rejection doubling finished in 38.0s (max latency 38.0s) while burst coalescing finished the same work in 13.8s (max 13.8s), both with zero surfaced errors. The state file is read on every reservation while spacing is active and at most every 2s while dormant; a corrupt or unwritable file degrades to process-local pacing. Disable with `KIRO_REQUEST_PACING=off` or `KIRO_PACING_SHARED=off`; tune with `KIRO_PACING_MIN_MS`, `KIRO_PACING_MAX_MS`, `KIRO_PACING_DECAY_MS`, `KIRO_PACING_COALESCE_MS`, `KIRO_PACING_POLL_MS`, `KIRO_PACING_STATE_FILE`.
+- `scripts/kiro-loadtest.mjs` reproduces account rate limiting locally (`N=100 node scripts/kiro-loadtest.mjs`). It drives the provider directly from one process, reads the credential from pi's auth store, and reports only aggregates.
+
+### Changed
+
+- A 429 is no longer propagated immediately for the host to retry. The provider owns it because only the provider can honor `Retry-After`, jitter across concurrent callers, and pace subsequent starts; an exhausted rate budget still surfaces the 429 so host-level retry remains the outer safety net. 5xx propagation is unchanged.
+
+### Fixed
+
+- Profile discovery now continues probing the remaining canonical management regions after a regional 403 on ListAvailableProfiles, instead of aborting on the primary region. A region-mismatched token whose profile lives in another canonical region (e.g. us-east-1 token, eu-central-1 profile) previously surfacing `ListAvailableProfiles failed in <region>: 403 Forbidden` now resolves correctly (#131). A 403 on every region is still rethrown so credential refresh/retry paths (#107) engage for genuine auth failures.
+- Normalize cross-provider tool-call IDs before sending them to Kiro. OpenAI Responses persists compound IDs such as `call_…|fc_…` that exceed Kiro's 64-character limit and contain an unsupported pipe, which previously wedged a session with `400 REQUEST_BODY_INVALID` after switching models. Native Kiro IDs remain unchanged, while remapped tool uses and results retain the same deterministic ID.
+
 ### Fixed
 
 - Normalize cross-provider tool-call IDs before sending them to Kiro. OpenAI Responses persists compound IDs such as `call_…|fc_…` that exceed Kiro's 64-character limit and contain an unsupported pipe, which previously wedged a session with `400 REQUEST_BODY_INVALID` after switching models. Native Kiro IDs remain unchanged, while remapped tool uses and results retain the same deterministic ID.

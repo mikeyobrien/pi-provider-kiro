@@ -55,7 +55,10 @@ export function extractKiroReason(errorText: string): string | undefined {
  * earlier value does not hide a valid later one. A past HTTP date means retry
  * now.
  */
-export function parseRetryAfterMs(headers: Headers | undefined, nowMs: number = Date.now()): number | undefined {
+export function parseRetryAfterFromHeaders(
+  headers: Headers | undefined,
+  nowMs: number = Date.now(),
+): number | undefined {
   const get = headers?.get?.bind(headers);
   if (!get) return undefined;
 
@@ -91,7 +94,7 @@ export function resolveRequestRateRetryDelay(
   headers: Headers | undefined,
   nowMs: number = Date.now(),
 ): { delayMs: number; advertisedDelayMs?: number; capped: boolean } {
-  const advertisedDelayMs = parseRetryAfterMs(headers, nowMs);
+  const advertisedDelayMs = parseRetryAfterFromHeaders(headers, nowMs);
   const requestedDelayMs = advertisedDelayMs ?? REQUEST_RATE_FALLBACK_DELAY_MS;
   return {
     delayMs: Math.min(requestedDelayMs, MAX_RETRY_DELAY),
@@ -125,7 +128,12 @@ export const KIRO_REASON_CODES = Object.freeze({
   MONTHLY_REQUEST_COUNT: "MONTHLY_REQUEST_COUNT",
   /** Model capacity temporarily unavailable — transient, worth retrying. */
   INSUFFICIENT_MODEL_CAPACITY: "INSUFFICIENT_MODEL_CAPACITY",
-  /** Short-window request throttle — retry only within the provider budget. */
+  /**
+   * Per-user request rate exceeded — transient. The service returns it as HTTP
+   * 429 and it is scoped to the account, not to a model or a process, so every
+   * concurrent caller sees it at once. Retrying after a delay is the only
+   * remedy; the request itself is well-formed.
+   */
   USER_REQUEST_RATE_EXCEEDED: "USER_REQUEST_RATE_EXCEEDED",
   /**
    * Generic request-validation rejection, returned for a malformed body of any
@@ -167,4 +175,75 @@ export function isNonRetryableBodyError(errorText: string): boolean {
 /** Check whether the error is a transient capacity issue worth retrying. */
 export function isCapacityError(errorText: string): boolean {
   return errorText.includes(CAPACITY_PATTERN);
+}
+
+/**
+ * Rate-limit markers. The reason code is authoritative; the prose form is the
+ * message body the service pairs with it, kept so a 429 whose body was
+ * truncated or redacted still classifies.
+ */
+export const RATE_LIMIT_PATTERNS: readonly string[] = Object.freeze([
+  KIRO_REASON_CODES.USER_REQUEST_RATE_EXCEEDED,
+  "Too many requests",
+]);
+
+export const RATE_LIMIT_MAX_RETRIES = 8;
+export const RATE_LIMIT_BASE_DELAY_MS = 1_000;
+export const RATE_LIMIT_MAX_DELAY_MS = 60_000;
+
+/** Mutable rate-limit config for testing and for user-side tuning. */
+export const rateLimitRetryConfig = {
+  maxRetries: RATE_LIMIT_MAX_RETRIES,
+  baseDelayMs: RATE_LIMIT_BASE_DELAY_MS,
+  maxDelayMs: RATE_LIMIT_MAX_DELAY_MS,
+};
+
+/**
+ * Check whether the response is an account-level rate rejection.
+ *
+ * The status alone is enough: the service only uses 429 for rate/quota, and the
+ * hard-quota case (`MONTHLY_REQUEST_COUNT`) is filtered by the caller through
+ * `isNonRetryableBodyError` before this runs. The body patterns additionally
+ * catch a rate rejection surfaced under a different status.
+ */
+export function isRateLimitError(status: number, errorText: string): boolean {
+  return status === 429 || RATE_LIMIT_PATTERNS.some((p) => errorText.includes(p));
+}
+
+/**
+ * Parse a `Retry-After` header into milliseconds. Supports both forms defined
+ * by RFC 9110: delay-seconds and an HTTP-date. Returns undefined when absent or
+ * unparseable so the caller falls back to computed backoff.
+ */
+export function parseRetryAfterMs(headerValue: string | null | undefined, now = Date.now()): number | undefined {
+  if (!headerValue) return undefined;
+  const raw = headerValue.trim();
+  if (raw === "") return undefined;
+  if (/^\d+(\.\d+)?$/.test(raw)) {
+    const seconds = Number(raw);
+    if (!Number.isFinite(seconds)) return undefined;
+    return Math.max(0, Math.round(seconds * 1000));
+  }
+  const timestamp = Date.parse(raw);
+  if (Number.isNaN(timestamp)) return undefined;
+  return Math.max(0, timestamp - now);
+}
+
+/**
+ * Delay before the next rate-limit attempt.
+ *
+ * Uses full jitter — a uniform draw over the whole window rather than a fixed
+ * ramp — because every concurrent request of a parallel fan-out is rejected by
+ * the same account-level limit at the same instant. A deterministic backoff
+ * would retry them all together and reproduce the burst that caused the
+ * rejection. A server-supplied `Retry-After` is honored as a floor, with jitter
+ * added on top for the same reason.
+ */
+export function rateLimitBackoff(attempt: number, retryAfterMs?: number, random: () => number = Math.random): number {
+  const { baseDelayMs, maxDelayMs } = rateLimitRetryConfig;
+  const window = Math.min(baseDelayMs * 2 ** attempt, maxDelayMs);
+  const jittered = baseDelayMs + random() * Math.max(0, window - baseDelayMs);
+  if (retryAfterMs === undefined) return Math.round(jittered);
+  const spread = Math.min(baseDelayMs, Math.max(0, maxDelayMs - retryAfterMs));
+  return Math.round(Math.min(maxDelayMs, retryAfterMs + random() * spread));
 }

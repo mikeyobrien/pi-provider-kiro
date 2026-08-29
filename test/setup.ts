@@ -12,6 +12,11 @@ process.env.USERPROFILE = testHome;
 process.env.APPDATA = join(testHome, "AppData", "Roaming");
 process.env.PATH = testHome;
 
+// Cross-process pacing state is a file shared by every pacer in the process, so
+// one test's rate rejection would otherwise pace every later test in the file.
+// Sharing is covered explicitly in pacing.test.ts through an injected store.
+process.env.KIRO_PACING_SHARED = "off";
+
 // Each test file gets its own setup context and temporary home.
 afterAll(() => {
   rmSync(testHome, { recursive: true, force: true });
