@@ -1,5 +1,7 @@
 // Feature 5: Message Transformation
 
+import { createHash } from "node:crypto";
+
 import type {
   AssistantMessage,
   ImageContent,
@@ -78,6 +80,20 @@ export function truncate(text: string, limit: number): string {
   if (text.length <= limit) return text;
   const half = Math.floor(limit / 2);
   return `${text.substring(0, half)}\n... [TRUNCATED] ...\n${text.substring(text.length - half)}`;
+}
+
+const KIRO_TOOL_USE_ID_PATTERN = /^[a-zA-Z0-9_.:-]{1,64}$/;
+
+/**
+ * Preserve native Kiro tool IDs, but deterministically remap IDs from providers
+ * whose syntax Kiro rejects (for example OpenAI Responses' 83-character
+ * `call_…|fc_…` IDs). Tool uses and results are transformed independently, so
+ * the mapping must be stable rather than random.
+ */
+export function toKiroToolUseId(toolUseId: string): string {
+  if (KIRO_TOOL_USE_ID_PATTERN.test(toolUseId)) return toolUseId;
+  const digest = createHash("sha256").update(toolUseId).digest("base64url").slice(0, 32);
+  return `pi_${digest}`;
 }
 
 export function normalizeMessages(messages: Message[]): Message[] {
@@ -253,7 +269,7 @@ export function buildHistory(
             const tc = block as ToolCall;
             armToolUses.push({
               name: tc.name,
-              toolUseId: tc.id,
+              toolUseId: toKiroToolUseId(tc.id),
               input: typeof tc.arguments === "string" ? JSON.parse(tc.arguments) : tc.arguments,
             });
             armHadBlocks = true;
@@ -273,7 +289,7 @@ export function buildHistory(
         {
           content: [{ text: truncate(getContentText(msg), toolResultLimit) }],
           status: trMsg.isError ? "error" : "success",
-          toolUseId: trMsg.toolCallId,
+          toolUseId: toKiroToolUseId(trMsg.toolCallId),
         },
       ];
       const trImages: ImageContent[] = [];
@@ -285,7 +301,7 @@ export function buildHistory(
         toolResults.push({
           content: [{ text: truncate(getContentText(next), toolResultLimit) }],
           status: next.isError ? "error" : "success",
-          toolUseId: next.toolCallId,
+          toolUseId: toKiroToolUseId(next.toolCallId),
         });
         if (Array.isArray(next.content))
           for (const c of next.content) if (c.type === "image") trImages.push(c as ImageContent);

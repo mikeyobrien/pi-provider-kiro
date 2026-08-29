@@ -4026,4 +4026,32 @@ describe("Feature 9: Streaming Integration", () => {
 
     vi.unstubAllGlobals();
   });
+  it("normalizes cross-provider tool call IDs for Kiro requests", async () => {
+    const openAiToolCallId = "call_7co4xEgttSQcqULvGmpE7qVJ|fc_07f9a04520d21e6a016a912c2adb8487d0aa2368675a637b3b";
+    const context: Context = {
+      systemPrompt: "You are helpful",
+      messages: [
+        { role: "user", content: "Read the file", timestamp: ts },
+        makeToolCall(openAiToolCallId),
+        makeToolResult(openAiToolCallId),
+      ],
+      tools: [{ name: "read", description: "Read a file", parameters: { type: "object", properties: {} } }],
+    };
+    const mockFetch = mockFetchOk('{"content":"Done."}{"contextUsagePercentage":8}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    await collect(streamKiro(makeModel(), context, { apiKey: "tok" }));
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    const toolUseId = body.conversationState.history
+      .flatMap((entry: KiroHistoryEntry) => entry.assistantResponseMessage?.toolUses ?? [])
+      .at(-1).toolUseId;
+    const toolResultId =
+      body.conversationState.currentMessage.userInputMessage.userInputMessageContext.toolResults[0].toolUseId;
+    expect(toolUseId).toBe(toolResultId);
+    expect(toolUseId).toMatch(/^[a-zA-Z0-9_.:-]{1,64}$/);
+    expect(toolUseId).not.toBe(openAiToolCallId);
+
+    vi.unstubAllGlobals();
+  });
 });

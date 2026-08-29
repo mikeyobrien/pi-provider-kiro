@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Normalize cross-provider tool-call IDs before sending them to Kiro. OpenAI Responses persists compound IDs such as `call_…|fc_…` that exceed Kiro's 64-character limit and contain an unsupported pipe, which previously wedged a session with `400 REQUEST_BODY_INVALID` after switching models. Native Kiro IDs remain unchanged, while remapped tool uses and results retain the same deterministic ID.
 - Profile discovery now continues probing the remaining canonical management regions after a regional 403 on ListAvailableProfiles, instead of aborting on the primary region. A region-mismatched token whose profile lives in another canonical region (e.g. us-east-1 token, eu-central-1 profile) previously surfacing `ListAvailableProfiles failed in <region>: 403 Forbidden` now resolves correctly (#131). A 403 on every region is still rethrown so credential refresh/retry paths (#107) engage for genuine auth failures.
 
 ## [0.10.1] - 2026-08-24
