@@ -1227,7 +1227,7 @@ describe("Feature 9: Streaming Integration", () => {
   // Images in history don't break session (regression)
   // =========================================================================
 
-  it("strips images from history entries so they don't bloat the request", async () => {
+  it("keeps the newest bounded image in history for follow-up recognition", async () => {
     const imageContent: ImageContent = { type: "image", data: "x".repeat(100000), mimeType: "image/png" };
     const context: Context = {
       systemPrompt: "You are helpful",
@@ -1256,11 +1256,9 @@ describe("Feature 9: Streaming Integration", () => {
     expect(done).toBeDefined();
     expect(done?.type === "done" && done.message.stopReason).toBe("stop");
 
-    // History should NOT contain the image base64 data
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     const historyStr = JSON.stringify(body.conversationState.history ?? []);
-    expect(historyStr).not.toContain("x".repeat(1000));
-    // But the history entry text should still be there
+    expect(historyStr).toContain("x".repeat(1000));
     expect(historyStr).toContain("Look at this");
 
     vi.unstubAllGlobals();
@@ -4337,6 +4335,85 @@ describe("Feature 9: Streaming Integration", () => {
     expect(toolUseId).toBe(toolResultId);
     expect(toolUseId).toMatch(/^[a-zA-Z0-9_.:-]{1,64}$/);
     expect(toolUseId).not.toBe(openAiToolCallId);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("strips historical images when the active model is text-only", async () => {
+    const imageContent: ImageContent = { type: "image", data: "image-data", mimeType: "image/png" };
+    const context: Context = {
+      systemPrompt: "You are helpful",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "Look" }, imageContent], timestamp: ts },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "I saw it" }],
+          api: "kiro-api",
+          provider: "kiro",
+          model: "gpt-text-only",
+          usage: zeroUsage,
+          stopReason: "stop",
+          timestamp: ts,
+        } as AssistantMessage,
+        { role: "user", content: "Describe it again", timestamp: ts },
+      ],
+    };
+    const mockFetch = mockFetchOk('{"content":"No image available"}{"contextUsagePercentage":5}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    await collect(streamKiro(makeModel({ input: ["text"] }), context, { apiKey: "tok" }));
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(JSON.stringify(body.conversationState.history ?? [])).not.toContain("image-data");
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps only the newest bounded historical image", async () => {
+    const largeImage: ImageContent = { type: "image", data: "y".repeat(500000), mimeType: "image/jpeg" };
+    const context: Context = {
+      systemPrompt: "You are helpful",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "Image 1" }, largeImage], timestamp: ts },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "Got it" }],
+          api: "kiro-api",
+          provider: "kiro",
+          model: "claude-sonnet-4-5",
+          usage: zeroUsage,
+          stopReason: "stop",
+          timestamp: ts,
+        } as AssistantMessage,
+        { role: "user", content: [{ type: "text", text: "Image 2" }, largeImage], timestamp: ts },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "Got that too" }],
+          api: "kiro-api",
+          provider: "kiro",
+          model: "claude-sonnet-4-5",
+          usage: zeroUsage,
+          stopReason: "stop",
+          timestamp: ts,
+        } as AssistantMessage,
+        { role: "user", content: "Describe both images", timestamp: ts },
+      ],
+    };
+    const mockFetch = mockFetchOk('{"content":"Both were photos."}{"contextUsagePercentage":5}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), context, { apiKey: "tok" });
+    const events = await collect(stream);
+
+    const done = events.find((e) => e.type === "done");
+    expect(done).toBeDefined();
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    const imageEntries = (body.conversationState.history ?? []).filter(
+      (entry: KiroHistoryEntry) => (entry.userInputMessage?.images?.length ?? 0) > 0,
+    );
+    expect(imageEntries).toHaveLength(1);
+    expect(imageEntries[0].userInputMessage.images[0].source.bytes).toHaveLength(500000);
+    expect(JSON.stringify(body).length).toBeLessThan(850000);
 
     vi.unstubAllGlobals();
   });

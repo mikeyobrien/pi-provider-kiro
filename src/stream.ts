@@ -363,7 +363,7 @@ export function streamKiro(
           currentMsgStartIdx,
         } = buildHistory(normalized, kiroModelId, effectiveSystemPrompt);
         // Preserve semantic context locally; Pi owns lossy compaction.
-        const history = prepareHistory(rawHistory);
+        const history = prepareHistory(rawHistory, model.input.includes("image"));
         const dynamicHistoryLimit = Math.floor((model.contextWindow / HISTORY_LIMIT_CONTEXT_WINDOW) * HISTORY_LIMIT);
         const toolResultLimit = TOOL_RESULT_LIMIT;
         const currentMessages = normalized.slice(currentMsgStartIdx);

@@ -5,13 +5,34 @@ import type { KiroHistoryEntry, KiroToolSpec } from "./transform.js";
 export const HISTORY_LIMIT = 850000;
 /** The context window size (in tokens) that HISTORY_LIMIT was calibrated for. */
 export const HISTORY_LIMIT_CONTEXT_WINDOW = 200000;
+/** Maximum combined base64 characters retained for one historical image-bearing turn. */
+export const HISTORY_IMAGE_BASE64_LIMIT = 512 * 1024;
 
-/** Remove images from history entries — they've already been processed by the
- *  model in previous turns and re-sending them wastes context / causes 413s. */
-export function stripHistoryImages(history: KiroHistoryEntry[]): KiroHistoryEntry[] {
-  return history.map((entry) => {
-    if (!entry.userInputMessage?.images) return entry;
-    const { images, ...rest } = entry.userInputMessage;
+/**
+ * Keep at most the newest bounded image-bearing history entry.
+ *
+ * Older images are removed to bound request growth. If the newest image set is
+ * itself too large, remove it as well rather than substituting an older image
+ * that no longer matches a follow-up such as "look at that image again".
+ */
+export function stripHistoryImages(history: KiroHistoryEntry[], keepNewestBounded = true): KiroHistoryEntry[] {
+  let newestImageIndex = -1;
+  for (let index = history.length - 1; index >= 0; index--) {
+    if ((history[index]?.userInputMessage?.images?.length ?? 0) > 0) {
+      newestImageIndex = index;
+      break;
+    }
+  }
+
+  const newestImages = newestImageIndex >= 0 ? history[newestImageIndex]?.userInputMessage?.images : undefined;
+  const keepNewest =
+    keepNewestBounded &&
+    newestImages !== undefined &&
+    newestImages.reduce((size, image) => size + image.source.bytes.length, 0) <= HISTORY_IMAGE_BASE64_LIMIT;
+
+  return history.map((entry, index) => {
+    if (!entry.userInputMessage?.images || (index === newestImageIndex && keepNewest)) return entry;
+    const { images: _images, ...rest } = entry.userInputMessage;
     return { ...entry, userInputMessage: { ...rest } };
   });
 }
@@ -71,8 +92,8 @@ export function injectSyntheticToolCalls(history: KiroHistoryEntry[]): KiroHisto
   return result;
 }
 
-export function prepareHistory(history: KiroHistoryEntry[]): KiroHistoryEntry[] {
-  return injectSyntheticToolCalls(sanitizeHistory(stripHistoryImages(history)));
+export function prepareHistory(history: KiroHistoryEntry[], keepNewestBoundedImage = true): KiroHistoryEntry[] {
+  return injectSyntheticToolCalls(sanitizeHistory(stripHistoryImages(history, keepNewestBoundedImage)));
 }
 
 /** Fail before sending rather than silently discarding conversation context. */
