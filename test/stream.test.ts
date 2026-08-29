@@ -12,6 +12,7 @@ import { isContextOverflow, isRetryableAssistantError } from "@earendil-works/pi
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { findJsonEnd } from "../src/bracket-tool-parser.js";
 import { validateKiroConversation, validateKiroToolStructure } from "../src/history-validator.js";
+import * as kiroCliModule from "../src/kiro-cli.js";
 import { capacityRetryConfig, retryConfig } from "../src/retry.js";
 import { resetProfileArnCache, streamKiro } from "../src/stream.js";
 import { EMPTY_CONTENT_PLACEHOLDER, type KiroHistoryEntry } from "../src/transform.js";
@@ -4446,5 +4447,44 @@ describe("Feature 9: Streaming Integration", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it("uses the matching social CLI profile when generic CLI credentials belong to IDC", async () => {
+    resetProfileArnCache(false);
+    const socialProfileArn = "arn:aws:codewhisperer:us-east-1:123:profile/SOCIAL";
+    const socialCreds = {
+      refresh: "social-refresh|desktop",
+      access: "social-token",
+      expires: Date.now() + 3_600_000,
+      clientId: "",
+      clientSecret: "",
+      region: "us-east-1",
+      authMethod: "desktop" as const,
+      profileArn: socialProfileArn,
+    };
+    const idcCreds = {
+      refresh: "idc-refresh|client|secret|idc",
+      access: "idc-token",
+      expires: Date.now() + 3_600_000,
+      clientId: "client",
+      clientSecret: "secret",
+      region: "eu-central-1",
+      authMethod: "idc" as const,
+    };
+    const socialSpy = vi.spyOn(kiroCliModule, "getKiroCliSocialToken").mockReturnValue(socialCreds);
+    const genericSpy = vi.spyOn(kiroCliModule, "getKiroCliCredentials").mockReturnValue(idcCreds);
+    const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":5}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: socialCreds.access }));
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch.mock.calls[0][0]).toBe("https://runtime.us-east-1.kiro.dev/generateAssistantResponse");
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).profileArn).toBe(socialProfileArn);
+    expect(events.find((event) => event.type === "done")).toBeDefined();
+
+    socialSpy.mockRestore();
+    genericSpy.mockRestore();
+    vi.unstubAllGlobals();
   });
 });

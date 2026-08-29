@@ -38,7 +38,13 @@ import {
 } from "./history.js";
 import { isKiroToolStructureRule, kiroConversationEntries, repairKiroConversation } from "./history-validator.js";
 import { parseInvokeToolCalls } from "./invoke-tool-parser.js";
-import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, refreshViaKiroCli } from "./kiro-cli.js";
+import {
+  getKiroCliCredentials,
+  getKiroCliCredentialsAllowExpired,
+  getKiroCliSocialToken,
+  getKiroCliSocialTokenAllowExpired,
+  refreshViaKiroCli,
+} from "./kiro-cli.js";
 import {
   invalidateKiroProfileArn,
   type KiroManagementAuth,
@@ -270,8 +276,13 @@ export function streamKiro(
       const optionProfileArn =
         (options as unknown as { credentials?: { profileArn?: string }; profileArn?: string })?.credentials
           ?.profileArn || (options as unknown as { profileArn?: string })?.profileArn;
-      const cliCreds = getKiroCliCredentials() ?? getKiroCliCredentialsAllowExpired();
-      const cliProfileArn = cliCreds?.access === accessToken ? cliCreds.profileArn : undefined;
+      const cliCreds = [
+        getKiroCliSocialToken(),
+        getKiroCliCredentials(),
+        getKiroCliSocialTokenAllowExpired(),
+        getKiroCliCredentialsAllowExpired(),
+      ].find((credential) => credential?.access === accessToken);
+      const cliProfileArn = cliCreds?.profileArn;
       const initialProfileArn = modelMetadata.kiroProfileArn || optionProfileArn || cliProfileArn;
       let profileArn: string;
       try {
