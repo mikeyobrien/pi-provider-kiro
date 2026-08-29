@@ -315,6 +315,7 @@ export function streamKiro(
         options?.reasoning,
       );
       const thinkingEnabled = !!options?.reasoning || model.reasoning;
+      const usesLegacyThinkingTags = thinkingEnabled && effortConfig?.field !== "reasoning";
       debugLog("request.init", {
         endpoint,
         model: model.id,
@@ -333,7 +334,7 @@ export function streamKiro(
       // user-visible thinking stream when the legacy thinking markers are also
       // present. Keep both controls: structured fields select effort, while these
       // markers preserve the <thinking> content consumed by ThinkingTagParser.
-      if (thinkingEnabled && effortConfig?.field !== "reasoning") {
+      if (usesLegacyThinkingTags) {
         const budget =
           options?.reasoning === "xhigh"
             ? 50000
@@ -776,7 +777,11 @@ export function streamKiro(
         let lastContentData = "";
         let usageEvent: { inputTokens?: number; outputTokens?: number } | null = null;
         let receivedContextUsage = false;
-        const thinkingParser = thinkingEnabled ? new ThinkingTagParser(output, stream) : null;
+        // Structured `reasoning` models (including Luna) expose native thinking
+        // events. Parsing XML-like tags in their visible answer corrupts literal
+        // examples, so leak recovery is limited to models for which we injected
+        // the legacy thinking markers above.
+        const thinkingParser = usesLegacyThinkingTags ? new ThinkingTagParser(output, stream) : null;
         let nativeThinkingBlockIndex: number | null = null;
         let nativeThinkingEnded = false;
         const ensureNativeThinkingBlock = (): { block: ThinkingContent; contentIndex: number } => {
