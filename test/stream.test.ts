@@ -14,6 +14,7 @@ import { findJsonEnd } from "../src/bracket-tool-parser.js";
 import { validateKiroConversation, validateKiroToolStructure } from "../src/history-validator.js";
 import { capacityRetryConfig, retryConfig } from "../src/retry.js";
 import { resetProfileArnCache, streamKiro } from "../src/stream.js";
+import type { KiroUsage } from "../src/token-usage.js";
 import { EMPTY_CONTENT_PLACEHOLDER, type KiroHistoryEntry } from "../src/transform.js";
 import { concatMessages, encodeEventMessage } from "./helpers/event-stream.js";
 import { RECORD_279_COMMAND, RECORD_279_SUMMARY, RECORD_279_TEXT } from "./helpers/invoke-fixture.js";
@@ -3612,10 +3613,390 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
-  it("prefers usage event values over tiktoken when available", async () => {
+  it("prefers measured token counts over the tiktoken estimate", async () => {
     const mockFetch = mockFetchChunked([
       '{"content":"Hello"}',
-      '{"usage":{"inputTokens":500,"outputTokens":200}}',
+      // MetadataEvent shape from ChatResponseStream: token counts live under
+      // tokenUsage.uncachedInputTokens/outputTokens, not a top-level `usage`.
+      '{"tokenUsage":{"uncachedInputTokens":500,"outputTokens":200,"totalTokens":700}}',
+      '{"contextUsagePercentage":10}',
+    ]);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
+    const usage = msg.usage as KiroUsage;
+
+    // Measured counts win over both the tiktoken estimate and the input figure
+    // back-computed from contextUsagePercentage.
+    expect(usage.input).toBe(500);
+    expect(usage.output).toBe(200);
+    expect(usage.totalTokens).toBe(700);
+    expect(usage.provenance?.input).toBe("measured");
+    expect(usage.provenance?.output).toBe("measured");
+
+    // contextPercent stays the API's own contextUsagePercentage — never
+    // re-derived from the (now overwritten) input count.
+    expect(usage.contextPercent).toBe(10);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("reports prompt-cache tokens from metadataEvent.tokenUsage", async () => {
+    const mockFetch = mockFetchChunked([
+      '{"content":"Hello"}',
+      JSON.stringify({
+        tokenUsage: {
+          uncachedInputTokens: 1_200,
+          outputTokens: 340,
+          totalTokens: 9_540,
+          cacheReadInputTokens: 8_000,
+          cacheWriteInputTokens: 0,
+          normalizedTokenUsage: 12.5,
+        },
+      }),
+    ]);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
+    const usage = msg.usage as KiroUsage;
+
+    expect(usage.cacheRead).toBe(8_000);
+    expect(usage.cacheWrite).toBe(0);
+    expect(usage.provenance?.cache).toBe("measured");
+    // The wire's totalTokens is authoritative, not input+output.
+    expect(usage.totalTokens).toBe(9_540);
+    expect(usage.normalizedTokenUsage).toBe(12.5);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("merges token counts split across separate metadataEvent frames", async () => {
+    const mockFetch = mockFetchChunked([
+      '{"content":"Hello"}',
+      // Every MetadataEvent field is optional, so the service may send tokenUsage
+      // and stopReason in separate frames. The second must not erase the first.
+      JSON.stringify({ tokenUsage: { uncachedInputTokens: 1_200, outputTokens: 340, cacheReadInputTokens: 8_000 } }),
+      JSON.stringify({ stopReason: "END_TURN" }),
+    ]);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
+    const usage = msg.usage as KiroUsage;
+
+    // Without the merge, the stopReason-only frame clobbers these and output
+    // silently falls back to the tiktoken estimate.
+    expect(usage.input).toBe(1_200);
+    expect(usage.output).toBe(340);
+    expect(usage.cacheRead).toBe(8_000);
+    expect(usage.provenance?.output).toBe("measured");
+    expect(usage.provenance?.cache).toBe("measured");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("does not carry a failed attempt's cache tokens into a successful retry", async () => {
+    // Attempt 1 is degenerate (no text, no tool calls) so it is retried, but it
+    // did report cache tokens and metering credits. Attempt 2 succeeds and
+    // reports neither — none of attempt 1's figures may survive into it.
+    //
+    // This is the empty-response retry path specifically, and it differs from the
+    // stream-error path in a way that matters: a throttle/validation error hits
+    // `if (streamError) break` and retries BEFORE the usage-finalizing block ever
+    // runs, so nothing was written to carry over. Here finalization runs first and
+    // calculateCost has already priced the turn, and only then is the retry
+    // decided — so the cache counts are already on the shared usage object when
+    // the next attempt starts. Priced with a non-zero-cost model so the assertion
+    // covers the money, not just the counts.
+    const emptyWithCache = concatMessages(
+      encodeEventMessage({ usage: 9, unit: "credit", unitPlural: "credits" }),
+      encodeEventMessage({
+        tokenUsage: { uncachedInputTokens: 1_200, outputTokens: 340, cacheReadInputTokens: 8_000 },
+      }),
+      encodeEventMessage({ contextUsagePercentage: 50 }),
+    );
+    const goodResponse = concatMessages(
+      encodeEventMessage({ content: "recovered" }),
+      encodeEventMessage({ tokenUsage: { uncachedInputTokens: 10, outputTokens: 5 } }),
+    );
+
+    const respond = (body: Uint8Array) => ({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi
+            .fn()
+            .mockResolvedValueOnce({ done: false, value: body })
+            .mockResolvedValueOnce({ done: true, value: undefined }),
+          releaseLock: () => {},
+        }),
+      },
+    });
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce(respond(emptyWithCache))
+      .mockResolvedValueOnce(respond(goodResponse));
+    vi.stubGlobal("fetch", mockFetch);
+
+    const priced = makeModel({ cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 } });
+    const stream = streamKiro(priced, makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
+    const usage = msg.usage as KiroUsage;
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(usage.input).toBe(10);
+    expect(usage.output).toBe(5);
+    expect(usage.cacheRead).toBe(0);
+    expect(usage.provenance?.cache).toBeUndefined();
+    expect(usage.credits).toBeUndefined();
+    // The leak is a billing defect, not just a reporting one: calculateCost
+    // prices cacheRead on its own line, so an inherited count charges for a
+    // cache read this turn never performed.
+    expect(usage.cost.cacheRead).toBe(0);
+    // The stale 8000 cache-read tokens must not be summed into this total.
+    expect(usage.totalTokens).toBe(15);
+    expect(usage.contextPercent).toBeUndefined();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("does not bill an errored turn for a priced attempt it abandoned", async () => {
+    // The empty-response/echo-loop retry is decided AFTER finalizeKiroUsage and
+    // PiAi.calculateCost have run, so attempt 1 here — degenerate (no text, no
+    // tool calls) but reporting real token counts — prices the turn before it is
+    // retried. The remaining attempts fail terminally, so the turn is emitted
+    // through the error path with the reset zeroed counts. Without cost in the
+    // reset, that error message carries attempt 1's charge against zero tokens:
+    // a priced turn with nothing backing the price.
+    const pricedDegenerate = encodeEventMessage({
+      tokenUsage: { uncachedInputTokens: 100_000, outputTokens: 50_000, totalTokens: 150_000 },
+    });
+    const failing = encodeEventMessage({ message: "capacity exhausted" }, "serviceUnavailableError");
+
+    const respond = (body: Uint8Array) => ({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi
+            .fn()
+            .mockResolvedValueOnce({ done: false, value: body })
+            .mockResolvedValueOnce({ done: true, value: undefined }),
+          cancel: vi.fn().mockResolvedValue(undefined),
+          releaseLock: () => {},
+        }),
+      },
+    });
+    const mockFetch = vi.fn().mockResolvedValueOnce(respond(pricedDegenerate)).mockResolvedValue(respond(failing));
+    vi.stubGlobal("fetch", mockFetch);
+
+    const priced = makeModel({ cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 } });
+    const stream = streamKiro(priced, makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    const error = events.find((e) => e.type === "error");
+    expect(error?.type).toBe("error");
+    if (error?.type !== "error") throw new Error("Expected an errored turn");
+    const usage = error.error.usage as KiroUsage;
+
+    expect(usage.totalTokens).toBe(0);
+    expect(usage.input).toBe(0);
+    expect(usage.output).toBe(0);
+    // Attempt 1 priced at ~1.05; none of it may survive onto this turn.
+    expect(usage.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 });
+
+    vi.unstubAllGlobals();
+  }, 30000);
+
+  it("records meteringEvent credits without folding them into token counts", async () => {
+    const mockFetch = mockFetchChunked([
+      '{"content":"Hello"}',
+      // MeteringEvent.usage is a COUNT OF CREDITS, not tokens.
+      '{"usage":3,"unit":"credit","unitPlural":"credits"}',
+      JSON.stringify({ tokenUsage: { uncachedInputTokens: 10, outputTokens: 5, totalTokens: 15 } }),
+    ]);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
+    const usage = msg.usage as KiroUsage;
+
+    expect(usage.credits).toBe(3);
+    expect(usage.creditUnit).toBe("credits");
+    // Credits must not leak into token accounting or cost.
+    expect(usage.input).toBe(10);
+    expect(usage.output).toBe(5);
+    expect(usage.totalTokens).toBe(15);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("records the singular credit unit for a one-credit turn", async () => {
+    const mockFetch = mockFetchChunked([
+      '{"content":"Hello"}',
+      // Both grammatical forms are on the wire; the count selects one. Passing
+      // only unitPlural through would render "1 credits".
+      '{"usage":1,"unit":"credit","unitPlural":"credits"}',
+      JSON.stringify({ tokenUsage: { uncachedInputTokens: 10, outputTokens: 5, totalTokens: 15 } }),
+    ]);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
+    const usage = msg.usage as KiroUsage;
+
+    expect(usage.credits).toBe(1);
+    expect(usage.creditUnit).toBe("credit");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("singularizes the credit unit when the count arrives in a later metering frame", async () => {
+    // Every MeteringEvent field is optional, so the unit strings can arrive before
+    // the count. The units frame has no count to agree with, so its plural choice
+    // is provisional and must be revised once the count lands. Framed with an
+    // explicit key because a units-only payload has no numeric `usage` for the
+    // fixture helper to infer `meteringEvent` from — on the wire the union member
+    // comes from the `:event-type` header, not the payload shape.
+    const body = concatMessages(
+      encodeEventMessage({ content: "Hello" }),
+      encodeEventMessage({ unit: "credit", unitPlural: "credits" }, "meteringEvent"),
+      encodeEventMessage({ usage: 1 }, "meteringEvent"),
+      encodeEventMessage({ tokenUsage: { uncachedInputTokens: 10, outputTokens: 5, totalTokens: 15 } }),
+    );
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi
+            .fn()
+            .mockResolvedValueOnce({ done: false, value: body })
+            .mockResolvedValueOnce({ done: true, value: undefined }),
+          releaseLock: () => {},
+        }),
+      },
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
+    const usage = msg.usage as KiroUsage;
+
+    expect(usage.credits).toBe(1);
+    expect(usage.creditUnit).toBe("credit");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("leaves cache provenance absent when no metadataEvent arrives", async () => {
+    const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":10}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
+    const usage = msg.usage as KiroUsage;
+
+    // The zeros satisfy pi's Usage type; absent provenance is what stops a
+    // consumer rendering them as a measured 0% cache hit rate.
+    expect(usage.cacheRead).toBe(0);
+    expect(usage.cacheWrite).toBe(0);
+    expect(usage.provenance?.cache).toBeUndefined();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("records cacheRead/cacheWrite so a cached turn is not priced as uncached input", async () => {
+    // TokenUsage.uncachedInputTokens excludes cache reads. Taking `input` from
+    // it while leaving cacheRead at 0 would report ~200 input tokens for a turn
+    // that actually read 50k cached tokens, and price it accordingly.
+    const mockFetch = mockFetchChunked([
+      '{"content":"Hello"}',
+      '{"tokenUsage":{"uncachedInputTokens":200,"outputTokens":50,"totalTokens":50250,"cacheReadInputTokens":50000,"cacheWriteInputTokens":0}}',
+      '{"contextUsagePercentage":5}',
+    ]);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
+
+    expect(msg.usage.input).toBe(200);
+    expect(msg.usage.cacheRead).toBe(50000);
+    expect(msg.usage.cacheWrite).toBe(0);
+    // input + cacheRead + cacheWrite + output, matching the wire totalTokens.
+    expect(msg.usage.totalTokens).toBe(50250);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the wire totalTokens when the service omits an optional cache count", async () => {
+    // TokenUsage.totalTokens is required on the wire; cacheReadInputTokens and
+    // cacheWriteInputTokens are optional. Recomputing the total from components
+    // would report 250 for a turn the service says cost 50250 context tokens,
+    // and calculateContextTokens drives the context gauge from that total.
+    const mockFetch = mockFetchChunked([
+      '{"content":"Hello"}',
+      '{"tokenUsage":{"uncachedInputTokens":200,"outputTokens":50,"totalTokens":50250}}',
+    ]);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
+
+    expect(msg.usage.input).toBe(200);
+    expect(msg.usage.cacheRead).toBe(0);
+    expect(msg.usage.totalTokens).toBe(50250);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("merges metadataEvent frames so a later stopReason frame cannot erase token counts", async () => {
+    // Every MetadataEvent field is optional; tokenUsage and stopReason may
+    // arrive in separate frames.
+    const mockFetch = mockFetchChunked([
+      '{"content":"Hello"}',
+      '{"tokenUsage":{"uncachedInputTokens":500,"outputTokens":200,"totalTokens":700}}',
+      '{"stopReason":"END_TURN"}',
       '{"contextUsagePercentage":10}',
     ]);
     vi.stubGlobal("fetch", mockFetch);
@@ -3627,14 +4008,199 @@ describe("Feature 9: Streaming Integration", () => {
     expect(msg).toBeDefined();
     if (!msg) throw new Error("Expected a completed assistant message");
 
-    // Usage event values should take precedence
     expect(msg.usage.input).toBe(500);
     expect(msg.usage.output).toBe(200);
-    expect(msg.usage.totalTokens).toBe(700);
 
-    // contextPercent should still reflect the API's contextUsagePercentage,
-    // not be derived from the (overwritten) input token count
-    expect((msg.usage as unknown as Record<string, unknown>).contextPercent).toBe(10);
+    vi.unstubAllGlobals();
+  });
+
+  it("surfaces a mid-stream throttlingError frame and retries", async () => {
+    // throttlingError / validationError / serviceUnavailableError are distinct
+    // ChatResponseStream members. Before key routing they matched no branch and
+    // were dropped, so the turn looked like an empty response. Now they abort
+    // the read and enter the retry path with the modeled class in the message.
+    let callCount = 0;
+    const mockFetch = vi.fn().mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return {
+          ok: true,
+          body: {
+            getReader: () => ({
+              read: vi
+                .fn()
+                .mockResolvedValueOnce({
+                  done: false,
+                  value: concatMessages(
+                    encodeEventMessage({ content: "partial" }),
+                    encodeEventMessage(
+                      {
+                        message: "Too many requests",
+                        reason: "INSUFFICIENT_MODEL_CAPACITY",
+                        retryAfterMilliseconds: 10,
+                      },
+                      "throttlingError",
+                    ),
+                  ),
+                })
+                .mockResolvedValueOnce({ done: true, value: undefined }),
+              cancel: vi.fn().mockResolvedValue(undefined),
+              releaseLock: () => {},
+            }),
+          },
+        };
+      }
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({
+                done: false,
+                value: encodeBody('{"content":"recovered"}{"contextUsagePercentage":5}'),
+              })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+            cancel: vi.fn().mockResolvedValue(undefined),
+            releaseLock: () => {},
+          }),
+        },
+      };
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    const done = events.find((e) => e.type === "done");
+    expect(done?.type === "done" && (done.message.content[0] as TextContent).text).toBe("recovered");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("reports the modeled exception class when a typed error frame outlives every retry", async () => {
+    const mockFetch = vi.fn().mockImplementation(async () => ({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi
+            .fn()
+            .mockResolvedValueOnce({
+              done: false,
+              value: encodeEventMessage({ message: "capacity exhausted" }, "serviceUnavailableError"),
+            })
+            .mockResolvedValueOnce({ done: true, value: undefined }),
+          cancel: vi.fn().mockResolvedValue(undefined),
+          releaseLock: () => {},
+        }),
+      },
+    }));
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    const error = events.find((e) => e.type === "error");
+    expect(error?.type === "error" && error.error.errorMessage).toContain("ServiceUnavailableException");
+    expect(error?.type === "error" && error.error.errorMessage).toContain("capacity exhausted");
+
+    vi.unstubAllGlobals();
+  }, 30000);
+
+  it("does not inherit the failed attempt's cache counts when retrying", async () => {
+    // `usageEvent` is declared inside the retry loop, and the cache writes are
+    // post-loop, so an aborted attempt must contribute nothing to billing.
+    // cacheRead is priced as its own line in calculateCost, so inheriting a
+    // prior attempt's value would over-bill a turn that never read that cache.
+    let callCount = 0;
+    const mockFetch = vi.fn().mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return {
+          ok: true,
+          body: {
+            getReader: () => ({
+              read: vi
+                .fn()
+                .mockResolvedValueOnce({
+                  done: false,
+                  value: concatMessages(
+                    encodeEventMessage({
+                      tokenUsage: {
+                        uncachedInputTokens: 999,
+                        outputTokens: 111,
+                        totalTokens: 41110,
+                        cacheReadInputTokens: 40000,
+                        cacheWriteInputTokens: 7,
+                      },
+                    }),
+                    encodeEventMessage({ message: "throttled" }, "throttlingError"),
+                  ),
+                })
+                .mockResolvedValueOnce({ done: true, value: undefined }),
+              cancel: vi.fn().mockResolvedValue(undefined),
+              releaseLock: () => {},
+            }),
+          },
+        };
+      }
+      // Retry succeeds and reports NO metadataEvent at all.
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({
+                done: false,
+                value: encodeBody('{"content":"clean"}{"contextUsagePercentage":5}'),
+              })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+            cancel: vi.fn().mockResolvedValue(undefined),
+            releaseLock: () => {},
+          }),
+        },
+      };
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect((msg.content[0] as TextContent).text).toBe("clean");
+    // The abandoned attempt's counts must not appear anywhere in billing.
+    expect(msg.usage.cacheRead).toBe(0);
+    expect(msg.usage.cacheWrite).toBe(0);
+    expect(msg.usage.cost.cacheRead).toBe(0);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("falls back to summing components when a non-conforming frame omits totalTokens", async () => {
+    // TokenUsage.totalTokens is required on the wire, so this branch only guards
+    // a non-conforming server. The sum must match how the service itself defines
+    // the total: uncachedInput + cacheRead + cacheWrite + output.
+    const mockFetch = mockFetchChunked([
+      '{"content":"Hello"}',
+      '{"tokenUsage":{"uncachedInputTokens":200,"outputTokens":50,"cacheReadInputTokens":50000,"cacheWriteInputTokens":0}}',
+    ]);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a completed assistant message");
+
+    // Same components as the wire-total test above, which reports 50250.
+    expect(msg.usage.totalTokens).toBe(50250);
 
     vi.unstubAllGlobals();
   });
@@ -3649,10 +4215,12 @@ describe("Feature 9: Streaming Integration", () => {
     const msg = done?.type === "done" ? done.message : undefined;
     expect(msg).toBeDefined();
     if (!msg) throw new Error("Expected a completed assistant message");
+    const usage = msg.usage as KiroUsage;
 
-    expect((msg.usage as unknown as Record<string, unknown>).contextPercent).toBe(42);
+    expect(usage.contextPercent).toBe(42);
     // input should be back-calculated from percentage
-    expect(msg.usage.input).toBe(Math.round(0.42 * 200000));
+    expect(usage.input).toBe(Math.round(0.42 * 200000));
+    expect(usage.provenance?.input).toBe("derived");
 
     vi.unstubAllGlobals();
   });
