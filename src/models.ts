@@ -1,9 +1,9 @@
 // Feature 2: Model Definitions
 
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { Model, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { getKiroEffortConfig, type KiroEffortConfig } from "./effort.js";
 import { getKiroEndpoints } from "./endpoints.js";
@@ -13,7 +13,8 @@ export { resolveApiRegion } from "./endpoints.js";
 
 export const KIRO_MANAGEMENT_CACHE_VERSION = 2;
 export const KIRO_MANAGEMENT_CACHE_SOURCE = "kiro-management";
-export const KIRO_MANAGEMENT_CACHE_PATH = join(homedir(), ".kiro-management-models-cache.json");
+export const KIRO_MANAGEMENT_CACHE_PATH = join(homedir(), ".pi", "agent", "kiro-management-models-cache.json");
+export const LEGACY_HOME_CACHE_PATH = join(homedir(), ".kiro-management-models-cache.json");
 
 const CACHE_MAX_AGE_MS = 3600_000;
 const DEFAULT_CONTEXT_WINDOW = 200_000;
@@ -401,15 +402,21 @@ function parseManagementCache(raw: string): ManagementModelsCache | undefined {
 }
 
 function readManagementCache(): ManagementModelsCache | undefined {
-  if (!existsSync(KIRO_MANAGEMENT_CACHE_PATH)) return undefined;
+  const cachePath = existsSync(KIRO_MANAGEMENT_CACHE_PATH)
+    ? KIRO_MANAGEMENT_CACHE_PATH
+    : existsSync(LEGACY_HOME_CACHE_PATH)
+      ? LEGACY_HOME_CACHE_PATH
+      : undefined;
+  if (!cachePath) return undefined;
   try {
-    return parseManagementCache(readFileSync(KIRO_MANAGEMENT_CACHE_PATH, "utf-8"));
+    return parseManagementCache(readFileSync(cachePath, "utf-8"));
   } catch {
     return undefined;
   }
 }
 
 function writeManagementCache(cache: ManagementModelsCache): void {
+  mkdirSync(dirname(KIRO_MANAGEMENT_CACHE_PATH), { recursive: true });
   const temporaryPath = `${KIRO_MANAGEMENT_CACHE_PATH}.${process.pid}.${randomUUID()}.tmp`;
   try {
     writeFileSync(temporaryPath, JSON.stringify(cache, null, 2), "utf-8");
