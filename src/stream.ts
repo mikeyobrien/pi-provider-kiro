@@ -28,6 +28,7 @@ import {
   type KiroAdditionalModelRequestFields,
 } from "./effort.js";
 import { getKiroEndpoints, getKiroRegionFromEndpoint } from "./endpoints.js";
+import { extractKiroReasonCode, KiroApiError, parseRetryAfterMs } from "./errors.js";
 import { parseKiroEvent } from "./event-parser.js";
 import {
   addPlaceholderTools,
@@ -346,6 +347,12 @@ export function streamKiro(
       }
       let retryCount = 0;
       const maxRetries = 3;
+      // Cumulative provider-internal retry tallies reported on KiroApiError.
+      // `retryCount` cannot stand in for either: it is also consumed by stream
+      // errors, idle/first-token timeouts, and empty-response retries, and
+      // `capacityRetryCount` resets on every outer iteration.
+      let credentialRefreshTotal = 0;
+      let capacityRetryTotal = 0;
       const conversationId = options?.sessionId ?? crypto.randomUUID();
       requestLoop: while (retryCount <= maxRetries) {
         if (options?.signal?.aborted) throw options.signal.reason;
@@ -684,6 +691,7 @@ export function streamKiro(
             // Retry transient capacity errors with longer backoff
             if (isCapacityError(errText) && capacityRetryCount < capacityRetryConfig.maxRetries) {
               capacityRetryCount++;
+              capacityRetryTotal++;
               const delayMs = exponentialBackoff(capacityRetryCount - 1, capacityRetryConfig.baseDelayMs, 30_000);
               const msg = `INSUFFICIENT_MODEL_CAPACITY — retrying in ${delayMs}ms (${capacityRetryCount}/${capacityRetryConfig.maxRetries})`;
               logCapacityEvent(msg);
@@ -716,6 +724,7 @@ export function streamKiro(
             }
             if (response.status === 403 && !isCapacityError(errText) && retryCount < maxRetries) {
               retryCount++;
+              credentialRefreshTotal++;
               // Re-read the shared store first in case another process already
               // rotated the token. If it still contains the rejected token,
               // force kiro-cli to refresh before retrying runtime.
@@ -753,14 +762,43 @@ export function streamKiro(
             // Kiro quota/capacity body markers as generic retryable 429s.
             // This covers both hard quota (MONTHLY_REQUEST_COUNT) and
             // exhausted capacity retries (INSUFFICIENT_MODEL_CAPACITY).
+            //
+            // The three throws below carry identical `message` text to what this
+            // provider has always emitted — pi-ai, pi-coding-agent, and
+            // downstream consumers all string-match it. KiroApiError adds the
+            // classification as typed fields alongside that text; it never
+            // changes it.
+            const errorMeta = {
+              reasonCode: extractKiroReasonCode(errText),
+              retryAfterMs: parseRetryAfterMs(response.headers),
+              providerAttempts: { credentialRefresh: credentialRefreshTotal, capacity: capacityRetryTotal },
+            };
             if (isNonRetryableBodyError(errText) || isCapacityError(errText)) {
-              throw new Error(`Kiro API error: ${errText || safeStatusText}`);
+              throw new KiroApiError(
+                `Kiro API error: ${errText || safeStatusText}`,
+                response.status,
+                errorMeta.reasonCode,
+                errorMeta.retryAfterMs,
+                errorMeta.providerAttempts,
+              );
             }
             // Format error so pi-ai's isContextOverflow() recognizes it
             if (isTooBigError(response.status, errText)) {
-              throw new Error(`Kiro API error: context_length_exceeded (${response.status} ${errText})`);
+              throw new KiroApiError(
+                `Kiro API error: context_length_exceeded (${response.status} ${errText})`,
+                response.status,
+                errorMeta.reasonCode,
+                errorMeta.retryAfterMs,
+                errorMeta.providerAttempts,
+              );
             }
-            throw new Error(`Kiro API error: ${response.status} ${safeStatusText} ${errText}`);
+            throw new KiroApiError(
+              `Kiro API error: ${response.status} ${safeStatusText} ${errText}`,
+              response.status,
+              errorMeta.reasonCode,
+              errorMeta.retryAfterMs,
+              errorMeta.providerAttempts,
+            );
           }
           break; // success, break inner loop
         }
@@ -1133,6 +1171,22 @@ export function streamKiro(
     } catch (error) {
       output.stopReason = options?.signal?.aborted ? "aborted" : "error";
       output.errorMessage = formatSafeError(error);
+      // Surface the typed classification the throw site already computed.
+      // `errorMessage` is a flat string by contract, so without this a consumer
+      // has to regex the class back out of prose. Diagnostics are the sanctioned
+      // structured channel for exactly this ("provider/runtime diagnostics for
+      // failures and recoveries").
+      if (error instanceof KiroApiError) {
+        PiAi.appendAssistantMessageDiagnostic(
+          output,
+          PiAi.createAssistantMessageDiagnostic("kiro_api_error", error, {
+            status: error.status,
+            ...(error.reasonCode !== undefined ? { reasonCode: error.reasonCode } : {}),
+            ...(error.retryAfterMs !== undefined ? { retryAfterMs: error.retryAfterMs } : {}),
+            ...(error.providerAttempts !== undefined ? { providerAttempts: error.providerAttempts } : {}),
+          }),
+        );
+      }
       debugLog("response.caught", { stopReason: output.stopReason, error: output.errorMessage });
       stream.push({ type: "error", reason: output.stopReason, error: output });
       stream.end();
