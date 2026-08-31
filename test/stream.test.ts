@@ -38,6 +38,7 @@ type TestKiroModel = Model<Api> & {
 function makeModel(overrides?: Partial<TestKiroModel>): TestKiroModel {
   return {
     id: "claude-sonnet-4-5",
+    kiroModelId: "claude-sonnet-4.5",
     name: "Sonnet",
     api: "kiro-api",
     provider: "kiro",

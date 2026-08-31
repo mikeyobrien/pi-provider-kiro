@@ -9,7 +9,7 @@ import { getKiroEndpoints, resolveApiRegion } from "./endpoints.js";
 import { getKiroCliCredentials, getKiroCliSocialToken } from "./kiro-cli.js";
 import { getKiroIdeCredentials } from "./kiro-ide.js";
 import { setExtensionContext } from "./login-ui.js";
-import { getCachedModels, isCacheStale, type KiroModel, kiroModels, updateKiroModelsCache } from "./models.js";
+import { getCachedModels, isCacheStale, type KiroModel, updateKiroModelsCache } from "./models.js";
 import type { KiroCredentials } from "./oauth.js";
 import { loginKiro, refreshKiroToken } from "./oauth.js";
 import { streamKiro } from "./stream.js";
@@ -130,6 +130,30 @@ function refreshKiroModels(context: KiroRefreshModelsContext): Promise<KiroModel
   return refreshCatalog(context.credential ?? resolveLocalCredential(), context);
 }
 
+/**
+ * Hosts that predate `pi.registerProvider` dispatch a chat through pi-ai's compat
+ * entry point, whose `streamSimple` looks `kiro-api` up in a process-global api
+ * registry and throws `No API provider registered for api: kiro-api` when it is
+ * missing. Registering there as well covers those hosts.
+ *
+ * Best effort by construction: the compat entry point may not resolve at all, and
+ * a host that bundles its own pi-ai copy dispatches through a module instance
+ * this import cannot reach, so it only helps a host resolving pi-ai from disk.
+ * Neither miss is worse than not trying, so both are swallowed, and it runs after
+ * registration because loading compat pulls in pi-ai's whole builtin API graph.
+ * `pi.registerProvider` above remains the load-bearing path.
+ */
+async function registerCompatApiProvider(): Promise<void> {
+  try {
+    const compat = (await import("@earendil-works/pi-ai/compat")) as {
+      registerApiProvider?: (provider: { api: string; stream: unknown; streamSimple: unknown }) => void;
+    };
+    compat.registerApiProvider?.({ api: "kiro-api", stream: streamKiro, streamSimple: streamKiro });
+  } catch {
+    // Host does not expose the compat registry; pi.registerProvider already covers it.
+  }
+}
+
 let startupCatalogRefresh: Promise<void> = Promise.resolve();
 
 /**
@@ -159,7 +183,8 @@ export default function (pi: ExtensionAPI) {
     baseUrl: getKiroEndpoints("us-east-1").runtime,
     api: "kiro-api",
     apiKey: "$KIRO_API_KEY",
-    models: kiroModels,
+    // Cache read only — no network, so registration cannot be delayed by discovery.
+    models: getCachedModels(credentialRegion(credential)),
     refreshModels: refreshKiroModels,
     oauth: {
       // Name reflects all supported auth methods: AWS Builder ID, Google, GitHub
@@ -171,9 +196,11 @@ export default function (pi: ExtensionAPI) {
       modifyModels: (models: Model<Api>[], cred: OAuthCredentials) => {
         const apiRegion = resolveApiRegion((cred as KiroCredentials).region);
         const cachedKiro = getCachedModels(apiRegion);
+        const kiroToModify =
+          cachedKiro.length > 0 ? cachedKiro : models.filter((model: Model<Api>) => model.provider === "kiro");
         const nonKiro = models.filter((m: Model<Api>) => m.provider !== "kiro");
         const credentialProfileArn = (cred as KiroCredentials).profileArn;
-        const modifiedKiro = cachedKiro.map((m: Model<Api>) => ({
+        const modifiedKiro = kiroToModify.map((m: Model<Api>) => ({
           ...m,
           baseUrl: getKiroEndpoints(apiRegion).runtime,
           kiroRegion: apiRegion,
@@ -188,7 +215,7 @@ export default function (pi: ExtensionAPI) {
     streamSimple: streamKiro,
   });
 
-  startupCatalogRefresh = refreshCatalog(credential, { allowNetwork: true })
+  startupCatalogRefresh = Promise.all([registerCompatApiProvider(), refreshCatalog(credential, { allowNetwork: true })])
     .then(() => {})
     .catch((error) => {
       console.warn(`[pi-provider-kiro] Kiro startup catalog discovery failed: ${formatSafeError(error)}`);
