@@ -8,6 +8,9 @@ import {
 
 const auth = { accessToken: "test-access-token", region: "us-east-1" };
 const profileArn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/test";
+// Structurally valid but fake: `ksk_` only selects the GetProfile path.
+const apiKeyAuth = { accessToken: "ksk_not-a-real-key", region: "us-east-1" };
+const apiKeyProfileArn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/api-key";
 
 afterEach(() => {
   resetKiroProfileArnCache();
@@ -32,6 +35,103 @@ describe("Kiro management control plane", () => {
     expect(request.headers["Content-Type"]).toBe("application/json");
     expect(request.headers["X-Amz-Target"]).toBeUndefined();
     expect(JSON.parse(request.body)).toEqual({});
+  });
+
+  // Live-probed 2026-08-31 with a real `ksk_` key: ListAvailableProfiles answers
+  // 403 "Unsupported token type" in both canonical regions, while GetProfile
+  // returns the key's own profile. Probing first would leave the catalog empty.
+  it("resolves an API key profile through GetProfile instead of probing ListAvailableProfiles", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ profile: { arn: apiKeyProfileArn } }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(resolveKiroProfileArn(apiKeyAuth)).resolves.toBe(apiKeyProfileArn);
+    await expect(resolveKiroProfileArn(apiKeyAuth)).resolves.toBe(apiKeyProfileArn);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, request] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://management.us-east-1.kiro.dev/");
+    expect(request.method).toBe("POST");
+    expect(request.headers["X-Amz-Target"]).toBe("AmazonCodeWhispererService.GetProfile");
+    expect(request.headers["Content-Type"]).toBe("application/x-amz-json-1.0");
+    expect(request.headers.tokentype).toBe("API_KEY");
+    expect(request.body).toBe("{}");
+  });
+
+  it("routes an API key catalog query to the GetProfile ARN in the key-issuing region", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ profile: { arn: apiKeyProfileArn } }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ models: [{ modelId: "claude-sonnet-4-5" }] }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const catalog = await fetchKiroModelCatalog({ accessToken: apiKeyAuth.accessToken, region: "eu-central-1" });
+
+    expect(catalog.models.map((model) => model.modelId)).toEqual(["claude-sonnet-4-5"]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const modelsUrl = new URL(fetchMock.mock.calls[1][0]);
+    expect(`${modelsUrl.origin}${modelsUrl.pathname}`).toBe(
+      "https://management.us-east-1.kiro.dev/List-Available-Models",
+    );
+    expect(Object.fromEntries(modelsUrl.searchParams)).toEqual({
+      origin: "KIRO_CLI",
+      profileArn: apiKeyProfileArn,
+    });
+  });
+
+  it("surfaces a rejected API key from GetProfile", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 403, statusText: "Forbidden" });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(resolveKiroProfileArn(apiKeyAuth)).rejects.toThrow(
+      "Kiro management GetProfile failed in us-east-1: 403 Forbidden",
+    );
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the KIRO_PROFILE_ARN override ahead of GetProfile for API keys (#110)", async () => {
+    const envArn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/pinned";
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ models: [{ modelId: "claude-sonnet-4-5" }] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const previous = process.env.KIRO_PROFILE_ARN;
+    process.env.KIRO_PROFILE_ARN = envArn;
+    try {
+      await expect(resolveKiroProfileArn(apiKeyAuth)).resolves.toBe(envArn);
+      await fetchKiroModelCatalog(apiKeyAuth);
+
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(String(fetchMock.mock.calls[0][0])).toContain("List-Available-Models");
+      expect(Object.fromEntries(new URL(fetchMock.mock.calls[0][0]).searchParams).profileArn).toBe(envArn);
+    } finally {
+      if (previous === undefined) delete process.env.KIRO_PROFILE_ARN;
+      else process.env.KIRO_PROFILE_ARN = previous;
+    }
+  });
+
+  it("still probes ListAvailableProfiles for non-API-key tokens", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ profiles: [{ arn: profileArn }] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(resolveKiroProfileArn(auth)).resolves.toBe(profileArn);
+
+    const [url, request] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
+    expect(request.headers["X-Amz-Target"]).toBeUndefined();
+    expect(request.headers.tokentype).toBeUndefined();
   });
 
   it("sends tokentype: EXTERNAL_IDP for external IdP tokens and omits it otherwise", async () => {

@@ -4,11 +4,19 @@
 import { createHash } from "node:crypto";
 import { debugLog, redactSensitiveText } from "./debug.js";
 import { getKiroEndpoints } from "./endpoints.js";
-import { kiroAuthHeaders } from "./oauth.js";
+import { isApiKey, kiroAuthHeaders, kiroUserAgent } from "./oauth.js";
 import { kiroTokenTypeHeaders } from "./token-type.js";
 
 const LIST_PROFILES_PATH = "List-Available-Profiles";
 const LIST_MODELS_PATH = "List-Available-Models";
+const GET_PROFILE_TARGET = "AmazonCodeWhispererService.GetProfile";
+
+/**
+ * Region Kiro issues API keys against. `ListAvailableProfiles` answers 403
+ * "Unsupported token type" for a `ksk_` key in every region, so an API key's
+ * profile — and therefore its model catalog — is only reachable here.
+ */
+const API_KEY_REGION = "us-east-1";
 
 export interface KiroManagementAuth {
   accessToken: string;
@@ -40,6 +48,10 @@ export interface KiroGetUsageLimitsRequest {
 
 interface KiroListAvailableProfilesResponse {
   profiles?: Array<{ arn?: string; [key: string]: unknown }>;
+}
+
+interface KiroGetProfileResponse {
+  profile?: { arn?: string; [key: string]: unknown };
 }
 
 const profileArnCache = new Map<string, string>();
@@ -131,6 +143,37 @@ function profileCacheKey(auth: KiroManagementAuth): string {
   return `${auth.region}:${tokenHash}`;
 }
 
+/**
+ * Resolve an API key's own profile through GetProfile, the same RPC the API-key
+ * login flow uses. This is the only profile-discovery call a `ksk_` key can
+ * make: the REST-style ListAvailableProfiles path rejects the key outright.
+ */
+async function getApiKeyProfileArn(accessToken: string): Promise<string> {
+  const operation = "GetProfile";
+  let response: Response;
+  try {
+    response = await fetch(getKiroEndpoints(API_KEY_REGION).management, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": GET_PROFILE_TARGET,
+        ...kiroAuthHeaders(accessToken),
+        ...kiroUserAgent("codewhispererruntime", "F,C"),
+      },
+      body: "{}",
+    });
+  } catch (error) {
+    throw new Error(`Kiro management ${operation} request failed in ${API_KEY_REGION}`, { cause: error });
+  }
+
+  const parsed = await parseManagementResponse<KiroGetProfileResponse>(response, operation, API_KEY_REGION);
+  const arn = parsed.profile?.arn;
+  if (!arn) {
+    throw new Error(`Kiro management ${operation} returned no profile in ${API_KEY_REGION}`);
+  }
+  return arn;
+}
+
 async function parseManagementResponse<TResponse>(
   response: Response,
   operation: string,
@@ -185,6 +228,16 @@ export async function resolveKiroProfileArn(auth: KiroManagementAuth, providedAr
   if (pending) return pending;
 
   const request = (async () => {
+    // A `ksk_` API key cannot use ListAvailableProfiles at all, so route it to
+    // GetProfile and pin the profile region to where API keys are issued.
+    if (isApiKey(auth.accessToken)) {
+      const arn = await getApiKeyProfileArn(auth.accessToken);
+      profileArnCache.set(key, arn);
+      profileRegionCache.set(key, API_KEY_REGION);
+      debugLog("profile.resolve", { source: "api-key", region: API_KEY_REGION, arn });
+      return arn;
+    }
+
     // ListAvailableProfiles is regional to where the profile actually lives, not
     // to the SSO-derived API region. Probe the primary region first, then the
     // remaining canonical management regions, so a region-mismatched token still
@@ -272,8 +325,12 @@ export async function fetchKiroModelCatalog(
   const profileArn = await resolveKiroProfileArn(auth, providedProfileArn);
   // Route the models query to the region where the profile actually lives — it
   // may differ from the SSO-derived region (#104), and ListAvailableModels is
-  // regional to the profile too, not to the login region.
-  const region = profileRegionCache.get(profileCacheKey(auth)) ?? auth.region;
+  // regional to the profile too, not to the login region. An API key's profile
+  // always lives in the key-issuing region, even when a pinned KIRO_PROFILE_ARN
+  // skipped discovery and left no cached region behind.
+  const region = isApiKey(auth.accessToken)
+    ? API_KEY_REGION
+    : (profileRegionCache.get(profileCacheKey(auth)) ?? auth.region);
   if (region !== auth.region) {
     return listAvailableModels({ ...auth, region }, profileArn);
   }
