@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Resolve `ksk_` API key profiles through GetProfile instead of ListAvailableProfiles, which returns 403 Unsupported token type. Catalog queries then use that ARN in us-east-1. `KIRO_PROFILE_ARN` still wins.
+
+### Changed
+
+- At startup (and when the host refreshModels hook has no credential), scan KIRO_API_KEY then kiro-cli then Kiro IDE and refresh the catalog without blocking registration.
+- Drop the hardcoded bootstrap catalog. Registration reads the on-disk cache (or an empty list) and kicks off discovery without blocking.
+
 ## [0.10.2] - 2026-08-31
 
 ### Added

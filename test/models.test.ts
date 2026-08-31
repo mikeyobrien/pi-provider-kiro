@@ -13,6 +13,7 @@ import {
   KIRO_MANAGEMENT_CACHE_SOURCE,
   KIRO_MANAGEMENT_CACHE_VERSION,
   KIRO_MODEL_IDS,
+  type KiroModel,
   kiroModels,
   mapKiroCatalogModels,
   resolveApiRegion,
@@ -20,7 +21,7 @@ import {
   updateKiroModelsCache,
 } from "../src/models.js";
 
-const LEGACY_CACHE_PATH = join(homedir(), ".kiro-models-cache.json");
+const OLD_Q_CACHE_PATH = join(homedir(), ".kiro-models-cache.json");
 const TEST_REGION = "test-region-1";
 const PROFILE_ARN = "arn:aws:codewhisperer:test-region-1:123456789012:profile/test";
 
@@ -74,40 +75,43 @@ const catalogFixture: KiroCatalogModel[] = [
     tokenLimits: { maxInputTokens: 1_000_000, maxOutputTokens: 128_000 },
     additionalModelRequestFieldsSchema: effortSchema("output_config", ["low", "medium", "high", "xhigh", "max"]),
   },
+  { modelId: "minimax-m2.5" },
 ];
 
 beforeEach(() => {
   rmSync(KIRO_MANAGEMENT_CACHE_PATH, { force: true });
-  rmSync(LEGACY_CACHE_PATH, { force: true });
+  rmSync(OLD_Q_CACHE_PATH, { force: true });
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
   rmSync(KIRO_MANAGEMENT_CACHE_PATH, { force: true });
-  rmSync(LEGACY_CACHE_PATH, { force: true });
+  rmSync(OLD_Q_CACHE_PATH, { force: true });
 });
 
 describe("Feature 2: Model Definitions", () => {
   describe("resolveKiroModel", () => {
-    it.each([
-      ["claude-opus-4-8", "claude-opus-4.8"],
-      ["claude-sonnet-5", "claude-sonnet-5"],
-      ["claude-haiku-4-5", "claude-haiku-4.5"],
-      ["claude-fable-5", "claude-fable-5"],
-      ["deepseek-3-2", "deepseek-3.2"],
-      ["minimax-m2-1", "minimax-m2.1"],
-      ["glm-5", "glm-5"],
-      ["qwen3-coder-next", "qwen3-coder-next"],
-    ])("maps bootstrap ID %s to exact service ID %s", (piId, kiroId) => {
-      expect(resolveKiroModel(piId)).toBe(kiroId);
-    });
-
-    it("throws on an unknown model ID", () => {
+    it("starts without hardcoded model IDs", () => {
+      expect(kiroModels).toEqual([]);
+      expect(KIRO_MODEL_IDS).toEqual(new Set());
       expect(() => resolveKiroModel("nonexistent")).toThrow("Unknown Kiro model ID");
     });
 
-    it("tracks exact service IDs from the bootstrap catalog", () => {
-      expect(KIRO_MODEL_IDS).toEqual(new Set(kiroModels.map((model) => model.kiroModelId)));
+    it("resolves exact service IDs from the management cache", () => {
+      const models = mapKiroCatalogModels(catalogFixture, TEST_REGION);
+      writeFileSync(
+        KIRO_MANAGEMENT_CACHE_PATH,
+        JSON.stringify({
+          version: KIRO_MANAGEMENT_CACHE_VERSION,
+          source: KIRO_MANAGEMENT_CACHE_SOURCE,
+          regions: { [TEST_REGION]: { region: TEST_REGION, fetchedAt: Date.now(), models } },
+        }),
+        "utf-8",
+      );
+
+      expect(resolveKiroModel("claude-opus-4-8")).toBe("claude-opus-4.8");
+      expect(resolveKiroModel("openai-gpt-5-6")).toBe("openai-gpt-5.6");
+      expect(KIRO_MODEL_IDS).toEqual(new Set(["claude-opus-4.8", "openai-gpt-5.6"]));
     });
   });
 
@@ -176,13 +180,13 @@ describe("Feature 2: Model Definitions", () => {
       expect(mapped.find((model) => model.id === "qwen3-coder-next")?.input).toEqual(["text"]);
     });
 
-    it("retains fresh schema and token metadata for a model also present in the bootstrap list", () => {
+    it("retains fresh schema and token metadata without bootstrap defaults", () => {
       const opus = mapped.find((model) => model.id === "claude-opus-4-8");
       expect(opus?.name).toBe("Catalog Opus 4.8");
       const catalogOpus = catalogFixture.find((model) => model.modelId === "claude-opus-4.8");
       expect(opus?.additionalModelRequestFieldsSchema).toEqual(catalogOpus?.additionalModelRequestFieldsSchema);
       expect(opus?.tokenLimits).toEqual(catalogOpus?.tokenLimits);
-      expect(opus?.contextWindow).not.toBe(kiroModels.find((model) => model.id === opus?.id)?.contextWindow);
+      expect(opus?.contextWindow).toBe(900_000);
     });
 
     it("disables text tool-call recovery only for Claude catalog models", () => {
@@ -272,15 +276,15 @@ describe("Feature 2: Model Definitions", () => {
       expect(readFileSync(KIRO_MANAGEMENT_CACHE_PATH, "utf-8")).toBe(serialized);
     });
 
-    it("ignores both the old Q cache path and an unversioned cache at the management path", () => {
-      const legacyModels = [{ ...kiroModels[0], id: "legacy-only", kiroModelId: "legacy-only" }];
-      const legacyCache = JSON.stringify({ [TEST_REGION]: legacyModels });
-      writeFileSync(LEGACY_CACHE_PATH, legacyCache, "utf-8");
+    it("ignores the old Q cache and unversioned formats", () => {
+      const ignoredModels = mapKiroCatalogModels([{ modelId: "ignored-only" }], TEST_REGION);
+      const unversionedCache = JSON.stringify({ [TEST_REGION]: ignoredModels });
+      writeFileSync(OLD_Q_CACHE_PATH, unversionedCache, "utf-8");
 
       expect(getCachedModels(TEST_REGION)).toBe(kiroModels);
-      expect(getCachedModels(TEST_REGION).some((model) => model.id === "legacy-only")).toBe(false);
+      expect(getCachedModels(TEST_REGION).some((model) => model.id === "ignored-only")).toBe(false);
 
-      writeFileSync(KIRO_MANAGEMENT_CACHE_PATH, legacyCache, "utf-8");
+      writeFileSync(KIRO_MANAGEMENT_CACHE_PATH, unversionedCache, "utf-8");
       expect(getCachedModels(TEST_REGION)).toBe(kiroModels);
       expect(isCacheStale(TEST_REGION)).toBe(true);
     });
@@ -313,52 +317,41 @@ describe("Feature 2: Model Definitions", () => {
   });
 
   describe("bootstrap model catalog", () => {
-    it("keeps conservative, zero-cost bootstrap metadata", () => {
-      expect(kiroModels).toHaveLength(15);
-      expect(kiroModels.every((model) => model.baseUrl === "https://runtime.us-east-1.kiro.dev/")).toBe(true);
-      expect(kiroModels.every((model) => model.cost.input === 0 && model.cost.output === 0)).toBe(true);
-      expect(kiroModels.find((model) => model.id === "claude-haiku-4-5")?.reasoning).toBe(false);
-      expect(kiroModels.find((model) => model.id === "minimax-m2-1")?.reasoning).toBe(false);
-    });
-
-    it("uses image input for Claude and text input for other concrete bootstrap models", () => {
-      const claudeModels = kiroModels.filter((model) => model.id.startsWith("claude-"));
-      const nonClaudeModels = kiroModels.filter((model) => !model.id.startsWith("claude-") && model.id !== "auto");
-      expect(claudeModels.every((model) => model.input.includes("text") && model.input.includes("image"))).toBe(true);
-      expect(nonClaudeModels.every((model) => model.input.length === 1 && model.input[0] === "text")).toBe(true);
-    });
-
-    it("disables text tool-call recovery only for Claude bootstrap models", () => {
-      const claudeModels = kiroModels.filter((model) => model.id.startsWith("claude-"));
-      const nonClaudeModels = kiroModels.filter((model) => !model.id.startsWith("claude-"));
-
-      expect(claudeModels.length).toBeGreaterThan(0);
-      expect(claudeModels.every((model) => model.recoverTextToolCalls === false)).toBe(true);
-      expect(nonClaudeModels.every((model) => model.recoverTextToolCalls === undefined)).toBe(true);
+    it("stays empty so only management discovery or cache can register models", () => {
+      expect(kiroModels).toEqual([]);
+      expect(getCachedModels(TEST_REGION)).toEqual([]);
     });
   });
 
   describe("thinkingLevelMap", () => {
+    const discoveredModels = mapKiroCatalogModels(catalogFixture, TEST_REGION);
     const THROUGH_HIGH = ["off", "minimal", "low", "medium", "high"] satisfies ModelThinkingLevel[];
     const THROUGH_XHIGH_AND_MAX = [...THROUGH_HIGH, "xhigh", "max"] satisfies ModelThinkingLevel[];
     const THROUGH_HIGH_AND_MAX = [...THROUGH_HIGH, "max"] satisfies ModelThinkingLevel[];
-    const XHIGH_AND_MAX_MODELS = ["claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-5", "claude-fable-5"];
+    const XHIGH_AND_MAX_MODELS = [
+      "openai-gpt-5-6",
+      "gpt-5-6-luna",
+      "claude-opus-4-8",
+      "claude-opus-4-7",
+      "claude-sonnet-5",
+      "claude-fable-5",
+    ];
     const MAX_WITHOUT_XHIGH_MODELS = ["claude-opus-4-6", "claude-sonnet-4-6"];
 
     it("advertises xhigh and max independently when both are supported", () => {
-      for (const model of kiroModels.filter((candidate) => XHIGH_AND_MAX_MODELS.includes(candidate.id))) {
+      for (const model of discoveredModels.filter((candidate) => XHIGH_AND_MAX_MODELS.includes(candidate.id))) {
         expect(getSupportedThinkingLevels(model), `${model.id} supported levels`).toEqual(THROUGH_XHIGH_AND_MAX);
       }
     });
 
     it("preserves a max-without-xhigh capability hole", () => {
-      for (const model of kiroModels.filter((candidate) => MAX_WITHOUT_XHIGH_MODELS.includes(candidate.id))) {
+      for (const model of discoveredModels.filter((candidate) => MAX_WITHOUT_XHIGH_MODELS.includes(candidate.id))) {
         expect(getSupportedThinkingLevels(model), `${model.id} supported levels`).toEqual(THROUGH_HIGH_AND_MAX);
       }
     });
 
     it("limits other reasoning models to standard levels", () => {
-      for (const model of kiroModels.filter(
+      for (const model of discoveredModels.filter(
         (candidate) =>
           candidate.reasoning &&
           !XHIGH_AND_MAX_MODELS.includes(candidate.id) &&
@@ -369,7 +362,7 @@ describe("Feature 2: Model Definitions", () => {
     });
 
     it("collapses non-reasoning models to off", () => {
-      for (const model of kiroModels.filter((candidate) => !candidate.reasoning)) {
+      for (const model of discoveredModels.filter((candidate) => !candidate.reasoning)) {
         expect(getSupportedThinkingLevels(model), `${model.id} supported levels`).toEqual(["off"]);
       }
     });
@@ -433,12 +426,13 @@ describe("Feature 2: Model Definitions", () => {
       expect(opus?.thinkingLevelMap).toEqual({ xhigh: "xhigh", max: "max" });
     });
 
-    it("declares a ladder for every bootstrap model that maps xhigh or max", () => {
-      const laddered = kiroModels.filter((model) => model.thinkingLevelMap !== undefined);
+    it("declares a ladder for every discovered model that maps xhigh or max", () => {
+      const discoveredModels = mapKiroCatalogModels(catalogFixture, TEST_REGION);
+      const laddered = discoveredModels.filter((model) => model.thinkingLevelMap !== undefined);
 
       expect(laddered.length).toBeGreaterThan(0);
       expect(laddered.every((model) => (model.thinking?.efforts.length ?? 0) > 0)).toBe(true);
-      expect(kiroModels.every((model) => model.reasoning || model.thinking === undefined)).toBe(true);
+      expect(discoveredModels.every((model) => model.reasoning || model.thinking === undefined)).toBe(true);
     });
 
     it("uses the request fallback only when catalog schema is absent", () => {
