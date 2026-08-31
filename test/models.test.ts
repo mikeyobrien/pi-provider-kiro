@@ -283,7 +283,6 @@ describe("Feature 2: Model Definitions", () => {
       expect(readFileSync(KIRO_MANAGEMENT_CACHE_PATH, "utf-8")).toBe(serialized);
     });
 
-
     it("reads the version 2 legacy home cache when the primary cache is absent", () => {
       const legacyModels = mapKiroCatalogModels([{ modelId: "legacy-only" }], TEST_REGION);
       writeFileSync(
