@@ -116,6 +116,7 @@ describe("Feature 2: Model Definitions", () => {
       ["us-east-2", "us-east-1"],
       ["eu-west-1", "eu-central-1"],
       ["ap-southeast-2", "us-east-1"],
+      ["ap-northeast-2", "us-east-1"],
       ["us-east-1", "us-east-1"],
       [undefined, "us-east-1"],
     ])("maps %s to %s", (ssoRegion, apiRegion) => {
