@@ -33,6 +33,7 @@ type TestKiroModel = Model<Api> & {
   kiroRegion?: string;
   kiroProfileArn?: string;
   additionalModelRequestFieldsSchema?: Record<string, unknown>;
+  recoverTextToolCalls?: boolean;
 };
 
 function makeModel(overrides?: Partial<TestKiroModel>): TestKiroModel {
@@ -3862,6 +3863,66 @@ describe("Feature 9: Streaming Integration", () => {
     expect(msg?.content.filter((b) => b.type === "toolCall")).toHaveLength(0);
     const textBlock = msg?.content.find((b) => b.type === "text");
     expect(textBlock?.type === "text" && textBlock.text).toBe(prose);
+    expect(done?.type === "done" && done.reason).toBe("stop");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("recovers bracket-dialect prose for a model the catalog leaves unmarked", async () => {
+    // The fallback's reason to exist. A model with no `recoverTextToolCalls`
+    // entry keeps it, so gating on the flag must not disturb this path.
+    const text = 'You would write [Called read with args: {"path":"/tmp/a"}] to do that.';
+    const mockFetch = mockFetchOk(`${JSON.stringify({ content: text })}{"contextUsagePercentage":10}`);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg?.content.filter((b) => b.type === "toolCall")).toHaveLength(1);
+    expect(done?.type === "done" && done.reason).toBe("toolUse");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("does not recover bracket-dialect prose a native-tool-call model merely quoted", async () => {
+    // `src/models.ts` sets `recoverTextToolCalls: false` on every Claude model,
+    // but the fallback never read it. A model explaining how a tool is called
+    // had that sentence lifted into a real call it never made — and the turn
+    // ended `toolUse`, so the agent loop went on to execute it.
+    const text = 'You would write [Called read with args: {"path":"/tmp/a"}] to do that.';
+    const mockFetch = mockFetchOk(`${JSON.stringify({ content: text })}{"contextUsagePercentage":10}`);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel({ reasoning: false, recoverTextToolCalls: false }), makeContext(), {
+      apiKey: "tok",
+    });
+    const events = await collect(stream);
+
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg?.content.filter((b) => b.type === "toolCall")).toHaveLength(0);
+    const textBlock = msg?.content.find((b) => b.type === "text");
+    expect(textBlock?.type === "text" && textBlock.text).toBe(text);
+    expect(done?.type === "done" && done.reason).toBe("stop");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("does not recover the XML dialect for a native-tool-call model", async () => {
+    // Same gate, the dialect that carries a shell command.
+    const mockFetch = mockFetchOk(`${JSON.stringify({ content: RECORD_279_TEXT })}{"contextUsagePercentage":10}`);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel({ reasoning: false, recoverTextToolCalls: false }), makeContext(), {
+      apiKey: "tok",
+    });
+    const events = await collect(stream);
+
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg?.content.filter((b) => b.type === "toolCall")).toHaveLength(0);
     expect(done?.type === "done" && done.reason).toBe("stop");
 
     vi.unstubAllGlobals();

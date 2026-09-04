@@ -262,6 +262,7 @@ export function streamKiro(
         kiroRegion?: string;
         kiroProfileArn?: string;
         additionalModelRequestFieldsSchema?: Record<string, unknown>;
+        recoverTextToolCalls?: boolean;
       };
       const region = modelMetadata.kiroRegion ?? getKiroRegionFromEndpoint(model.baseUrl) ?? "us-east-1";
       const endpoint = new URL("generateAssistantResponse", getKiroEndpoints(region).runtime).toString();
@@ -999,7 +1000,15 @@ export function streamKiro(
         // Without this, the turn ends `stopReason:"stop"` with zero tool calls —
         // the agent loop sees a finished answer and an unattended session stalls
         // indefinitely with no error recorded anywhere.
-        if (!sawAnyToolCalls && textBlockIndex !== null) {
+        //
+        // Models that emit native tool-use events opt out via
+        // `recoverTextToolCalls: false`, which `src/models.ts` already sets for
+        // every Claude model. For them this pass has nothing to rescue and one
+        // way to do harm: prose that merely *quotes* the syntax — a model
+        // explaining how a tool is called — is lifted into a real call the model
+        // never made. Absent still means recover, so a model the catalog says
+        // nothing about keeps the fallback.
+        if (modelMetadata.recoverTextToolCalls !== false && !sawAnyToolCalls && textBlockIndex !== null) {
           const textBlock = output.content[textBlockIndex] as TextContent;
           const recovered: Array<{ toolUseId: string; name: string; arguments: Record<string, unknown> }> = [];
           const bracketResult = parseBracketToolCalls(textBlock.text);
