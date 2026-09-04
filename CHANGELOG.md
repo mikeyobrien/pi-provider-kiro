@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Honour `recoverTextToolCalls` before rescuing tool calls from assistant prose. `src/models.ts` sets the flag to `false` on every Claude model, and `test/models.test.ts` asserts it, but `src/stream.ts` never read it — so the text-dialect fallback ran for every model. For a model that emits native tool-use events the pass has nothing to rescue and one way to do harm: prose that merely *quotes* the syntax, such as a model explaining how a tool is called, was lifted into a real call the model never made, and the turn ended `stopReason:"toolUse"` so the agent loop went on to execute it. Verified against `claude-sonnet-4-5`: the sentence `You would write [Called read with args: {"path":"/tmp/a"}] to do that.` produced a live `read` call. An absent flag still means recover, so a model the catalog leaves unmarked keeps the fallback and nothing outside the Claude family changes. The existing quoted-XML case passed only because it sits inside a code fence; the inline bracket form did not.
+
 ## [0.10.2] - 2026-08-31
 
 ### Added
