@@ -2132,13 +2132,11 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
-  // The observed failure: a host appended a reminder message carrying a role
-  // outside pi-ai's `Message` union ("developer") after a settled assistant
-  // turn. None of the current-message branches matched it, so `content` went
-  // out empty and Kiro answered 400 REQUEST_BODY_INVALID — which the provider
-  // then relabeled `context_length_exceeded`, sending the caller into a
-  // compaction loop against a request that was structurally invalid, not large.
-  it("sends placeholder content when the turn ends on an unrecognized role", async () => {
+  // Newer Pi-compatible hosts convert application-specific messages to the
+  // canonical `developer` role before provider dispatch. Kiro has no distinct
+  // developer wire role, so those messages must retain their content as user
+  // input rather than degrade to EMPTY_CONTENT_PLACEHOLDER.
+  it("preserves a current developer message as Kiro user input", async () => {
     const settledAssistant: AssistantMessage = {
       role: "assistant",
       content: [{ type: "text", text: "Done." }],
@@ -2170,9 +2168,48 @@ describe("Feature 9: Streaming Integration", () => {
     const events = await collect(streamKiro(makeModel(), context, { apiKey: "tok" }));
 
     const currentMsg = JSON.parse(mockFetch.mock.calls[0][1].body).conversationState.currentMessage.userInputMessage;
-    expect(currentMsg.content).not.toBe("");
+    expect(currentMsg.content).toBe("<system-reminder>2 incomplete todos</system-reminder>");
     expect(events.some((event) => event.type === "done")).toBe(true);
     expect(events.some((event) => event.type === "error")).toBe(false);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("preserves a historical developer message in Kiro history", async () => {
+    const advisory = {
+      role: "developer",
+      content: [{ type: "text", text: '<advisory severity="concern">STOP_AND_REPORT</advisory>' }],
+      attribution: "agent",
+      timestamp: ts,
+    };
+    const context: Context = {
+      systemPrompt: "You are helpful",
+      messages: [
+        { role: "user", content: "Investigate", timestamp: ts },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "Working." }],
+          api: "kiro-api",
+          provider: "kiro",
+          model: "claude-sonnet-4-5",
+          usage: zeroUsage,
+          stopReason: "stop",
+          timestamp: ts,
+        },
+        advisory as unknown as Context["messages"][number],
+        { role: "user", content: "Continue", timestamp: ts + 1 },
+      ],
+      tools: [],
+    };
+    const mockFetch = mockFetchOk('{"content":"Continuing."}{"contextUsagePercentage":4}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    await collect(streamKiro(makeModel(), context, { apiKey: "tok" }));
+
+    const sent = JSON.parse(mockFetch.mock.calls[0][1].body);
+    const historicalAdvisory = sent.conversationState.history.at(-1).userInputMessage;
+    expect(historicalAdvisory.content).toBe('<advisory severity="concern">STOP_AND_REPORT</advisory>');
+    expect(sent.conversationState.currentMessage.userInputMessage.content).toBe("Continue");
 
     vi.unstubAllGlobals();
   });

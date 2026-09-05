@@ -11,6 +11,7 @@ import type {
   Tool,
   ToolCall,
   ToolResultMessage,
+  UserMessage,
 } from "@earendil-works/pi-ai";
 
 export interface KiroImage {
@@ -45,6 +46,13 @@ export interface KiroHistoryEntry {
   userInputMessage?: KiroUserInputMessage;
   assistantResponseMessage?: KiroAssistantResponseMessage;
 }
+
+/** Canonical message shape emitted by newer Pi-compatible hosts after their
+ * application-level custom messages have passed through `convertToLlm`.
+ * Kiro has no developer wire role, so these are lowered to user messages at
+ * the transport boundary. Raw application roles remain the host's concern. */
+type DeveloperMessage = Omit<UserMessage, "role"> & { role: "developer" };
+type KiroInputMessage = Message | DeveloperMessage;
 
 export const TOOL_RESULT_LIMIT = 250000;
 
@@ -96,12 +104,14 @@ export function toKiroToolUseId(toolUseId: string): string {
   return `pi_${digest}`;
 }
 
-export function normalizeMessages(messages: Message[]): Message[] {
-  return messages.filter((msg) => {
-    if (msg.role !== "assistant") return true;
-    const am = msg as AssistantMessage;
-    return am.stopReason !== "error" && am.stopReason !== "aborted";
-  });
+export function normalizeMessages(messages: KiroInputMessage[]): Message[] {
+  return messages
+    .filter((msg) => {
+      if (msg.role !== "assistant") return true;
+      const am = msg as AssistantMessage;
+      return am.stopReason !== "error" && am.stopReason !== "aborted";
+    })
+    .map((msg) => (msg.role === "developer" ? { ...msg, role: "user" as const } : msg));
 }
 
 /**
