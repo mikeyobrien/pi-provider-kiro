@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Report a turn that silently produced less than the model sent. `streamKiro` now sets `AssistantMessage.errorMessage` when the empty-response or echo-loop retry budget is exhausted, and when a tool call is dropped because its arguments would not parse — the last of which is unrecoverable downstream, since the call is gone before the message is persisted. Dropped-call tool names use a terminal-safe A–P encoding in the diagnostic: complete sets that fit preserve every JavaScript UTF-16 code unit, while oversized sets become one fixed-size SHA-256 fingerprint rather than a misleading partial identity. Thus a model-chosen name such as `set_timeout` or `http500_probe` cannot make a terminal failure match a consumer's retry filter and disappear again. No `stopReason` changes: the value stays inside pi-ai's existing union, and the exhaustion warning now reports the reason actually assigned instead of promising `"stop"`. The diagnostics are deliberately worded as terminal so a consumer's retryable-error classifier cannot mistake them for a transient transport failure. Note the consequence for hosts that fail a run on any non-retryable trailing `errorMessage` without checking `stopReason`: a silent turn that previously completed quietly now surfaces as a failure. That is the point of the change, but it is a visible behaviour change, not only added observability. Hosts that cannot be reached by this field are unaffected: pi-ai's `isRetryableAssistantError` requires `stopReason === "error"`, and of `isContextOverflow`'s three branches only the first reads `errorMessage` behind that same gate — its silent-overflow and length-stop branches judge `usage` alone.
+
 ## [0.10.2] - 2026-08-31
 
 ### Added
