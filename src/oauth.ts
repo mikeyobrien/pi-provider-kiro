@@ -12,6 +12,7 @@ import { formatSafeError } from "./debug.js";
 import { resolveApiRegion } from "./endpoints.js";
 import { getKiroIdeCredentials, getKiroIdeCredentialsAllowExpired } from "./kiro-ide.js";
 import { interactiveLogin, loginViaKiroCli } from "./login.js";
+import { encodeKiroRefresh, kiroCredentialRegion, parseKiroRefresh } from "./refresh-token.js";
 
 export const SSO_OIDC_ENDPOINT = "https://oidc.us-east-1.amazonaws.com";
 export const BUILDER_ID_START_URL = "https://view.awsapps.com/start";
@@ -106,7 +107,7 @@ export async function loginKiroWithApiKey(callbacks: OAuthLoginCallbacks, apiKey
 
   const kiroCreds: KiroCredentials = {
     access: apiKey,
-    refresh: `${apiKey}|apikey`,
+    refresh: encodeKiroRefresh({ token: apiKey, fields: [], authMethod: "apikey" }),
     expires: Date.now() + 365 * 24 * 60 * 60 * 1000,
     clientId: "",
     clientSecret: "",
@@ -133,7 +134,7 @@ export async function loginKiro(
   if (!process.env.VITEST) {
     try {
       const { updateKiroModelsCache } = await import("./models.js");
-      const region = resolveApiRegion((creds as KiroCredentials).region);
+      const region = resolveApiRegion(kiroCredentialRegion(creds));
       updateKiroModelsCache(creds.access, region, (creds as KiroCredentials).profileArn).catch((error) => {
         console.warn(`[pi-provider-kiro] Failed to refresh Kiro model catalog in ${region}: ${formatSafeError(error)}`);
       });
@@ -258,7 +259,7 @@ export async function refreshKiroToken(credentials: OAuthCredentials): Promise<O
   if (!process.env.VITEST) {
     try {
       const { updateKiroModelsCache } = await import("./models.js");
-      const region = resolveApiRegion((refreshed as KiroCredentials).region);
+      const region = resolveApiRegion(kiroCredentialRegion(refreshed));
       updateKiroModelsCache(refreshed.access, region, (refreshed as KiroCredentials).profileArn).catch((error) => {
         console.warn(`[pi-provider-kiro] Failed to refresh Kiro model catalog in ${region}: ${formatSafeError(error)}`);
       });
@@ -278,8 +279,7 @@ async function refreshKiroTokenInternal(credentials: OAuthCredentials): Promise<
     getKiroCliSocialTokenAllowExpired,
   } = await import("./kiro-cli.js");
   const credentialAuthMethod =
-    (credentials as KiroCredentials).authMethod ??
-    (credentials.refresh.split("|").at(-1) === "desktop" ? "desktop" : "idc");
+    (credentials as KiroCredentials).authMethod ?? parseKiroRefresh(credentials.refresh).authMethod;
   const getValidCliCredentials = (): KiroCredentials | undefined => {
     if (credentialAuthMethod === "desktop") return getKiroCliSocialToken();
     const cliCreds = getKiroCliCredentials();
@@ -345,10 +345,8 @@ async function refreshKiroTokenInternal(credentials: OAuthCredentials): Promise<
 }
 
 async function refreshKiroTokenDirect(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-  const parts = credentials.refresh.split("|");
-  const refreshToken = parts[0] ?? "";
-  const authMethod = (parts[parts.length - 1] ?? "idc") as KiroAuthMethod;
-  const region = (credentials as KiroCredentials).region || "us-east-1";
+  const { token: refreshToken, fields, authMethod } = parseKiroRefresh(credentials.refresh);
+  const region = kiroCredentialRegion(credentials) ?? "us-east-1";
 
   if (authMethod === "apikey") {
     // API keys are long-lived bearer tokens — no refresh needed.
@@ -372,7 +370,12 @@ async function refreshKiroTokenDirect(credentials: OAuthCredentials): Promise<OA
     };
     if (!data.accessToken) throw new Error("Desktop token refresh: missing accessToken");
     return {
-      refresh: `${data.refreshToken || refreshToken}|desktop`,
+      refresh: encodeKiroRefresh({
+        token: data.refreshToken || refreshToken,
+        fields: [],
+        authMethod: "desktop",
+        region,
+      }),
       access: data.accessToken,
       expires: Date.now() + data.expiresIn * 1000 - 5 * 60 * 1000,
       clientId: "",
@@ -389,8 +392,8 @@ async function refreshKiroTokenDirect(credentials: OAuthCredentials): Promise<OA
   // form-encoded grant_type/client_id/refresh_token, snake_case response, and
   // no client secret because the OIDC app is a public PKCE client.
   if (authMethod === "external-idp") {
-    const idpClientId = parts[1] ?? "";
-    const tokenEndpoint = parts[2] ?? "";
+    const idpClientId = fields[0] ?? "";
+    const tokenEndpoint = fields[1] ?? "";
     if (!tokenEndpoint) throw new Error("External IdP token refresh: missing token endpoint");
     const response = await fetch(tokenEndpoint, {
       method: "POST",
@@ -414,7 +417,12 @@ async function refreshKiroTokenDirect(credentials: OAuthCredentials): Promise<OA
     if (!data.access_token) throw new Error("External IdP token refresh: missing access_token");
     const expiresIn = typeof data.expires_in === "number" ? data.expires_in : 3600;
     return {
-      refresh: `${data.refresh_token || refreshToken}|${idpClientId}|${tokenEndpoint}|external-idp`,
+      refresh: encodeKiroRefresh({
+        token: data.refresh_token || refreshToken,
+        fields: [idpClientId, tokenEndpoint],
+        authMethod: "external-idp",
+        region,
+      }),
       access: data.access_token,
       expires: Date.now() + expiresIn * 1000 - 5 * 60 * 1000,
       clientId: idpClientId,
@@ -426,8 +434,8 @@ async function refreshKiroTokenDirect(credentials: OAuthCredentials): Promise<OA
   }
 
   // IDC auth method — SSO OIDC refresh
-  const clientId = parts[1] ?? "";
-  const clientSecret = parts[2] ?? "";
+  const clientId = fields[0] ?? "";
+  const clientSecret = fields[1] ?? "";
   const ssoEndpoint = `https://oidc.${region}.amazonaws.com`;
   const response = await fetch(`${ssoEndpoint}/token`, {
     method: "POST",
@@ -440,7 +448,12 @@ async function refreshKiroTokenDirect(credentials: OAuthCredentials): Promise<OA
   if (!response.ok) throw new Error(`Token refresh failed: ${response.status}`);
   const data = (await response.json()) as { accessToken: string; refreshToken: string; expiresIn: number };
   return {
-    refresh: `${data.refreshToken}|${clientId}|${clientSecret}|idc`,
+    refresh: encodeKiroRefresh({
+      token: data.refreshToken,
+      fields: [clientId, clientSecret],
+      authMethod: "idc",
+      region,
+    }),
     access: data.accessToken,
     expires: Date.now() + data.expiresIn * 1000 - 5 * 60 * 1000,
     clientId: clientId,

@@ -10,6 +10,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { KiroCredentials } from "./oauth.js";
+import { encodeKiroRefresh } from "./refresh-token.js";
 
 // ~/.aws/sso/cache is the standard AWS SSO cache directory on all platforms.
 // Node's os.homedir() returns the correct home directory on Windows, macOS and Linux.
@@ -63,7 +64,12 @@ function readKiroIdeToken(allowExpired: boolean): KiroCredentials | undefined {
 
     return {
       // Pack into the same pipe-delimited format used by the rest of the refresh chain
-      refresh: `${tokenData.refreshToken}|${clientId}|${clientSecret}|idc`,
+      refresh: encodeKiroRefresh({
+        token: tokenData.refreshToken,
+        fields: [clientId, clientSecret],
+        authMethod: "idc",
+        region,
+      }),
       access: tokenData.accessToken,
       // Subtract 2-min buffer so we refresh before the actual AWS expiry
       expires: expiresAt - 2 * 60 * 1000,

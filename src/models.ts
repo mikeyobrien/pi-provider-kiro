@@ -7,7 +7,7 @@ import { join } from "node:path";
 import type { Model, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { getKiroEffortConfig, type KiroEffortConfig } from "./effort.js";
 import { getKiroEndpoints } from "./endpoints.js";
-import { fetchKiroModelCatalog, type KiroCatalogModel } from "./management.js";
+import { CANONICAL_MANAGEMENT_REGIONS, fetchKiroModelCatalog, type KiroCatalogModel } from "./management.js";
 
 export { resolveApiRegion } from "./endpoints.js";
 
@@ -55,7 +55,14 @@ export interface KiroModel extends Model<"kiro-api"> {
 }
 
 interface ManagementCacheRegion {
+  /** SSO-derived region this entry answers for. */
   region: string;
+  /**
+   * Region that actually served the catalog. Differs from `region` when the
+   * profile lives elsewhere (#104), and is the region runtime requests must
+   * address. Absent in entries written before this was recorded.
+   */
+  catalogRegion?: string;
   fetchedAt: number;
   models: KiroModel[];
 }
@@ -378,6 +385,7 @@ function parseManagementCache(raw: string): ManagementModelsCache | undefined {
     if (
       !isRecord(rawEntry) ||
       rawEntry.region !== region ||
+      (rawEntry.catalogRegion !== undefined && typeof rawEntry.catalogRegion !== "string") ||
       !isPositiveNumber(rawEntry.fetchedAt) ||
       !Array.isArray(rawEntry.models) ||
       rawEntry.models.length === 0 ||
@@ -563,11 +571,28 @@ export function loadCachedModelIds(): void {
   refreshKnownModelIds(readManagementCache());
 }
 
+/**
+ * Entry serving `region`: its own, or a canonical-region entry whose catalog was
+ * served for the same profile. A catalog is regional to the profile, not to the
+ * login region (#104), so the SSO-derived key can be absent while a usable
+ * catalog is already cached under the region that answered.
+ */
+function resolveCacheEntry(region: string): ManagementCacheRegion | undefined {
+  const cache = readManagementCache();
+  if (!cache) return undefined;
+  const own = cache.regions[region];
+  if (own) return own;
+  for (const candidate of CANONICAL_MANAGEMENT_REGIONS) {
+    const entry = cache.regions[candidate];
+    if (entry) return entry;
+  }
+  return undefined;
+}
+
 /** Return the authenticated regional catalog, or the static list only as a pre-discovery bootstrap. */
 export function getCachedModels(region: string): KiroModel[] {
-  const cache = readManagementCache();
-  refreshKnownModelIds(cache);
-  const models = cache?.regions[region]?.models ?? kiroModels;
+  refreshKnownModelIds(readManagementCache());
+  const models = resolveCacheEntry(region)?.models ?? kiroModels;
   let changed = false;
   const corrected = models.map((model) => {
     const result = applyVerifiedCapabilities(model);
@@ -578,13 +603,24 @@ export function getCachedModels(region: string): KiroModel[] {
 }
 
 export function isCacheStale(region: string): boolean {
-  const entry = readManagementCache()?.regions[region];
+  const entry = resolveCacheEntry(region);
   return !entry || Date.now() - entry.fetchedAt > CACHE_MAX_AGE_MS;
 }
 
+/**
+ * Region that served the catalog cached for `region` — where the profile
+ * actually lives, which is the region runtime requests have to address.
+ */
+export function getCachedCatalogRegion(region: string): string | undefined {
+  const entry = resolveCacheEntry(region);
+  return entry?.catalogRegion ?? entry?.region;
+}
+
 export async function updateKiroModelsCache(accessToken: string, region: string, profileArn?: string): Promise<void> {
-  const response = await fetchKiroModelCatalog({ accessToken, region }, profileArn);
-  const models = mapKiroCatalogModels(response.models, region);
+  const { response, region: catalogRegion } = await fetchKiroModelCatalog({ accessToken, region }, profileArn);
+  // Stamp the models with the region that served them, not the one we asked
+  // for: their baseUrl has to point where the profile can actually be used.
+  const models = mapKiroCatalogModels(response.models, catalogRegion);
   const existingCache = readManagementCache();
   const cache: ManagementModelsCache = existingCache ?? {
     version: KIRO_MANAGEMENT_CACHE_VERSION,
@@ -592,7 +628,7 @@ export async function updateKiroModelsCache(accessToken: string, region: string,
     regions: {},
   };
 
-  cache.regions[region] = { region, fetchedAt: Date.now(), models };
+  cache.regions[region] = { region, catalogRegion, fetchedAt: Date.now(), models };
   writeManagementCache(cache);
   refreshKnownModelIds(cache);
 }

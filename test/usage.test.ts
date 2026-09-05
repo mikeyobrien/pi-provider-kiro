@@ -134,6 +134,28 @@ describe("fetchKiroUsage", () => {
     expectUsageRequest(fetchMock.mock.calls[1][0], profileArn);
   });
 
+  it("requests usage from the region where the profile was found (#104)", async () => {
+    const fetchMock = vi
+      .fn()
+      // Profile discovery: nothing in the SSO-derived region, found in the other canonical one.
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ profiles: [] }) })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ profiles: [{ arn: profileArn }] }) })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(usageResponse()) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // No profileArn, and the region survives only inside the refresh string.
+    await fetchKiroUsage({
+      access: "access-token",
+      refresh: "refresh-token|client|secret|idc|eu-west-1",
+      expires: Date.now() + 60_000,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[0][0]).toBe("https://management.eu-central-1.kiro.dev/List-Available-Profiles");
+    expect(fetchMock.mock.calls[1][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
+    expectUsageRequest(fetchMock.mock.calls[2][0], profileArn);
+  });
+
   it("surfaces profile resolution failures before requesting usage", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,

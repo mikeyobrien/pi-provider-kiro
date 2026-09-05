@@ -77,8 +77,9 @@ describe("Kiro management control plane", () => {
 
     const catalog = await fetchKiroModelCatalog(auth, profileArn);
 
-    expect(catalog.models).toEqual([fable]);
-    expect(catalog.defaultModelId).toBe("claude-fable-5");
+    expect(catalog.response.models).toEqual([fable]);
+    expect(catalog.response.defaultModelId).toBe("claude-fable-5");
+    expect(catalog.region).toBe("us-east-1");
     const [rawUrl, request] = fetchMock.mock.calls[0];
     const url = new URL(rawUrl);
     expect(`${url.origin}${url.pathname}`).toBe("https://management.us-east-1.kiro.dev/List-Available-Models");
@@ -115,7 +116,7 @@ describe("Kiro management control plane", () => {
     try {
       await expect(resolveKiroProfileArn(auth)).resolves.toBe(envArn);
       const catalog = await fetchKiroModelCatalog(auth);
-      expect(catalog.models.map((m) => m.modelId)).toContain("claude-sonnet-4-5");
+      expect(catalog.response.models.map((m) => m.modelId)).toContain("claude-sonnet-4-5");
       // Exactly one network call: ListAvailableModels. No ListAvailableProfiles probe.
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(fetchMock.mock.calls[0][0]).toContain("List-Available-Models");
@@ -192,7 +193,10 @@ describe("Kiro management control plane", () => {
     const euAuth = { accessToken: "test-access-token", region: "eu-central-1" };
     const catalog = await fetchKiroModelCatalog(euAuth);
 
-    expect(catalog.models).toEqual(modelsBody.models);
+    expect(catalog.response.models).toEqual(modelsBody.models);
+    // The catalog reports where it was actually served so callers can address
+    // runtime there instead of the SSO-derived region.
+    expect(catalog.region).toBe("us-east-1");
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(fetchMock.mock.calls[0][0]).toBe("https://management.eu-central-1.kiro.dev/List-Available-Profiles");
     expect(fetchMock.mock.calls[1][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");

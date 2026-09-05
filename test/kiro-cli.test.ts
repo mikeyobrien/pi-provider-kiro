@@ -100,14 +100,14 @@ describe("external IdP tokens", () => {
     expect(result?.region).toBe("us-east-1");
   });
 
-  it("carries client_id and token_endpoint through the refresh string", () => {
+  it("carries client_id, token_endpoint and region through the refresh string", () => {
     const dbPath = makeExternalIdpDb({
       ...baseToken,
       expires_at: new Date(Date.now() + 3600000).toISOString(),
     });
     const result = tryKiroCliToken(dbPath, "kirocli:external-idp:token", "external-idp");
     expect(result?.refresh).toBe(
-      "idp-refresh|0oaEXAMPLE|https://example.okta.com/oauth2/default/v1/token|external-idp",
+      "idp-refresh|0oaEXAMPLE|https://example.okta.com/oauth2/default/v1/token|external-idp|us-east-1",
     );
   });
 

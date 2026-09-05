@@ -4,9 +4,10 @@ import { join } from "node:path";
 import { getSupportedThinkingLevels, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { deriveKiroEffort } from "../src/effort.js";
-import type { KiroCatalogModel } from "../src/management.js";
+import { type KiroCatalogModel, resetKiroProfileArnCache } from "../src/management.js";
 import {
   deriveThinkingConfig,
+  getCachedCatalogRegion,
   getCachedModels,
   isCacheStale,
   KIRO_MANAGEMENT_CACHE_PATH,
@@ -250,6 +251,32 @@ describe("Feature 2: Model Definitions", () => {
       expect(cachedModels.some((model) => model.id === "auto")).toBe(false);
       expect(resolveKiroModel("openai-gpt-5-6")).toBe("openai-gpt-5.6");
       expect(isCacheStale(TEST_REGION)).toBe(false);
+    });
+
+    it("addresses cached models at the region that served the catalog (#104)", async () => {
+      resetKiroProfileArnCache();
+      const fetchMock = vi
+        .fn()
+        // Profile discovery: nothing in the SSO-derived region, found in the other canonical one.
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ profiles: [] }) })
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ profiles: [{ arn: PROFILE_ARN }] }) })
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ models: catalogFixture }) });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await updateKiroModelsCache("secret-access-token", "eu-central-1");
+
+      // Still keyed by the region the caller derived, so the synchronous lookup
+      // every model consumer does keeps hitting...
+      expect(getCachedModels("eu-central-1").map((model) => model.id)).toEqual(
+        catalogFixture.map((model) => model.modelId.replace(/(\d)\.(\d)/g, "$1-$2")),
+      );
+      // ...but pointed at the region that actually answered, which is the only
+      // one where this profile can be used.
+      expect(getCachedCatalogRegion("eu-central-1")).toBe("us-east-1");
+      expect(getCachedModels("eu-central-1")[0]?.baseUrl).toBe("https://runtime.us-east-1.kiro.dev/");
+      expect(fetchMock.mock.calls[2][0]).toContain("https://management.us-east-1.kiro.dev/List-Available-Models");
+
+      resetKiroProfileArnCache();
     });
 
     it("repairs stale Luna image metadata in memory without rewriting the cache", () => {

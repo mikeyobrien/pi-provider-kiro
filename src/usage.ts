@@ -5,6 +5,7 @@ import type { OAuthCredentials } from "@earendil-works/pi-ai";
 import { resolveApiRegion } from "./endpoints.js";
 import { getUsageLimits, type KiroManagementAuth, resolveKiroProfileArn } from "./management.js";
 import type { KiroCredentials } from "./oauth.js";
+import { kiroCredentialRegion } from "./refresh-token.js";
 
 const MANAGE_USAGE_URL = "https://app.kiro.dev/account/usage";
 
@@ -151,7 +152,7 @@ async function fetchRawUsage(auth: KiroManagementAuth, profileArn?: string): Pro
 export async function fetchKiroUsage(credentials: OAuthCredentials): Promise<KiroProviderUsage> {
   const auth = {
     accessToken: credentials.access,
-    region: resolveApiRegion((credentials as KiroCredentials).region),
+    region: resolveApiRegion(kiroCredentialRegion(credentials)),
   };
   const raw = await fetchRawUsage(auth, (credentials as KiroCredentials).profileArn);
   const usageBuckets = raw.usageBreakdownList?.length

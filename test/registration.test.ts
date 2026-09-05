@@ -1,9 +1,15 @@
-import { rmSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import type { ProviderModelsStore } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getKiroCliCredentials } from "../src/kiro-cli.js";
-import { KIRO_MANAGEMENT_CACHE_PATH, kiroModels } from "../src/models.js";
+import {
+  KIRO_MANAGEMENT_CACHE_PATH,
+  KIRO_MANAGEMENT_CACHE_SOURCE,
+  KIRO_MANAGEMENT_CACHE_VERSION,
+  kiroModels,
+  mapKiroCatalogModels,
+} from "../src/models.js";
 
 const mockPi = () => {
   const registerProvider = vi.fn();
@@ -196,6 +202,63 @@ describe("Feature 1: Extension Registration", () => {
     const creds = { access: "x", refresh: "x", expires: 0, clientId: "", clientSecret: "", region: ssoRegion };
     const modified = config.oauth.modifyModels(models, creds);
     expect(modified[0].baseUrl).toBe(`https://runtime.${expectedApiRegion}.kiro.dev/`);
+  });
+
+  it("modifyModels reads the SSO region back out of a persisted credential", async () => {
+    const mod = await import("../src/index.js");
+    const { pi, registerProvider } = mockPi();
+    mod.default(pi);
+
+    const config = registerProvider.mock.calls[0][1];
+    const models = kiroModels.map((m) => ({ ...m, provider: "kiro", api: "kiro-api", baseUrl: "old" }));
+    // No `region` field: this is the shape pi hands back after persistence.
+    const modified = config.oauth.modifyModels(models, {
+      access: "x",
+      refresh: "rt|cid|csec|idc|eu-west-1",
+      expires: 0,
+    });
+
+    expect(modified[0].baseUrl).toBe("https://runtime.eu-central-1.kiro.dev/");
+  });
+
+  it("modifyModels addresses the region that served the catalog, not the derived one (#104)", async () => {
+    writeFileSync(
+      KIRO_MANAGEMENT_CACHE_PATH,
+      JSON.stringify({
+        version: KIRO_MANAGEMENT_CACHE_VERSION,
+        source: KIRO_MANAGEMENT_CACHE_SOURCE,
+        regions: {
+          "eu-central-1": {
+            region: "eu-central-1",
+            catalogRegion: "us-east-1",
+            fetchedAt: Date.now(),
+            models: mapKiroCatalogModels([{ modelId: "claude-opus-4.8" }], "us-east-1"),
+          },
+        },
+      }),
+      "utf-8",
+    );
+
+    try {
+      const mod = await import("../src/index.js");
+      const { pi, registerProvider } = mockPi();
+      mod.default(pi);
+
+      const config = registerProvider.mock.calls[0][1];
+      const models = kiroModels.map((m) => ({ ...m, provider: "kiro", api: "kiro-api", baseUrl: "old" }));
+      const modified = config.oauth.modifyModels(models, {
+        access: "x",
+        refresh: "rt|cid|csec|idc|eu-west-1",
+        expires: 0,
+      });
+
+      const kiro = modified.filter((m: { provider: string }) => m.provider === "kiro");
+      expect(kiro).toHaveLength(1);
+      expect(kiro[0].baseUrl).toBe("https://runtime.us-east-1.kiro.dev/");
+      expect(kiro[0].kiroRegion).toBe("us-east-1");
+    } finally {
+      rmSync(KIRO_MANAGEMENT_CACHE_PATH, { force: true });
+    }
   });
 
   it("modifyModels carries the OAuth profile ARN on Kiro models only", async () => {

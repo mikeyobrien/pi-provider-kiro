@@ -59,7 +59,7 @@ const profileRegionCache = new Map<string, string>();
  * ListAvailableProfiles is regional, so probe the canonical set when the primary
  * region comes back empty before giving up.
  */
-const CANONICAL_MANAGEMENT_REGIONS = ["us-east-1", "eu-central-1"] as const;
+export const CANONICAL_MANAGEMENT_REGIONS = ["us-east-1", "eu-central-1"] as const;
 
 function candidateManagementRegions(primary: string): string[] {
   const seen = new Set<string>([primary]);
@@ -71,6 +71,15 @@ function candidateManagementRegions(primary: string): string[] {
     }
   }
   return candidates;
+}
+
+/**
+ * The region a profile-dependent management call has to address: where the
+ * profile was actually found once discovery has run, and the requested region
+ * until then.
+ */
+export function kiroProfileRegion(auth: KiroManagementAuth): string {
+  return profileRegionCache.get(profileCacheKey(auth)) ?? auth.region;
 }
 
 /**
@@ -265,19 +274,27 @@ export async function listAvailableModels(
   return response;
 }
 
+/**
+ * Region that actually served a catalog, alongside the response. Equal to the
+ * requested region unless the profile lives in another canonical region (#104),
+ * in which case the models are only addressable on the region named here.
+ */
+export interface KiroModelCatalog {
+  response: KiroListAvailableModelsResponse;
+  region: string;
+}
+
 export async function fetchKiroModelCatalog(
   auth: KiroManagementAuth,
   providedProfileArn?: string,
-): Promise<KiroListAvailableModelsResponse> {
+): Promise<KiroModelCatalog> {
   const profileArn = await resolveKiroProfileArn(auth, providedProfileArn);
   // Route the models query to the region where the profile actually lives — it
   // may differ from the SSO-derived region (#104), and ListAvailableModels is
   // regional to the profile too, not to the login region.
-  const region = profileRegionCache.get(profileCacheKey(auth)) ?? auth.region;
-  if (region !== auth.region) {
-    return listAvailableModels({ ...auth, region }, profileArn);
-  }
-  return listAvailableModels(auth, profileArn);
+  const region = kiroProfileRegion(auth);
+  const response = await listAvailableModels(region === auth.region ? auth : { ...auth, region }, profileArn);
+  return { response, region };
 }
 
 export async function getUsageLimits<TResponse>(
@@ -285,7 +302,9 @@ export async function getUsageLimits<TResponse>(
   request: KiroGetUsageLimitsRequest,
 ): Promise<TResponse> {
   const operation = "GetUsageLimits";
-  const url = new URL("Get-Usage-Limits", getKiroEndpoints(auth.region).management);
+  // Regional to the profile, like every other profile-dependent call (#104).
+  const region = kiroProfileRegion(auth);
+  const url = new URL("Get-Usage-Limits", getKiroEndpoints(region).management);
   for (const [name, value] of Object.entries(request)) {
     if (value !== undefined) url.searchParams.set(name, String(value));
   }
@@ -302,8 +321,8 @@ export async function getUsageLimits<TResponse>(
       },
     });
   } catch (error) {
-    throw new Error(`Kiro management ${operation} request failed in ${auth.region}`, { cause: error });
+    throw new Error(`Kiro management ${operation} request failed in ${region}`, { cause: error });
   }
 
-  return parseManagementResponse<TResponse>(response, operation, auth.region);
+  return parseManagementResponse<TResponse>(response, operation, region);
 }
