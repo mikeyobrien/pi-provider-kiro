@@ -711,6 +711,116 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
+  it("falls back to the kiro-cli session's region when model metadata carries no region hint", async () => {
+    // A sub-agent-spawned call can receive a model object that never went
+    // through the `modifyModels` hook that stamps `kiroRegion`/`baseUrl` with
+    // the account's real region, so both are absent/unresolvable here. The
+    // active kiro-cli session's own region should be preferred over the
+    // "us-east-1" default, saving the extra probe round-trip resolveKiroProfileArn
+    // would otherwise need to find the profile.
+    resetProfileArnCache(false);
+    const testArn = "arn:aws:codewhisperer:eu-central-1:123:profile/TEST";
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ profiles: [{ arn: testArn }] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({
+                done: false,
+                value: encodeBody('{"content":"Hi"}{"contextUsagePercentage":5}'),
+              })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+            releaseLock: () => {},
+          }),
+        },
+      });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const kiroCliModule = await import("../src/kiro-cli.js");
+    const getCredsSpy = vi.spyOn(kiroCliModule, "getKiroCliCredentials").mockReturnValue({
+      refresh: "refresh|client|secret|idc",
+      access: "tok",
+      expires: Date.now() + 3_600_000,
+      clientId: "client",
+      clientSecret: "secret",
+      region: "eu-central-1",
+      authMethod: "idc" as const,
+    });
+
+    const events = await collect(
+      streamKiro(makeModel({ kiroRegion: undefined, baseUrl: "https://example.com/" }), makeContext(), {
+        apiKey: "tok",
+      }),
+    );
+
+    // No wasted us-east-1 probe: the cli session's region is tried first.
+    expect(mockFetch.mock.calls[0][0]).toBe("https://management.eu-central-1.kiro.dev/List-Available-Profiles");
+    expect(mockFetch.mock.calls[1][0]).toBe("https://runtime.eu-central-1.kiro.dev/generateAssistantResponse");
+    expect(events.find((event) => event.type === "done")).toBeDefined();
+
+    getCredsSpy.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
+  it("self-corrects the runtime endpoint when the resolved profile lives in a different region than the model's guess", async () => {
+    // Reproduces the sub-agent 400 bug: model metadata claims us-east-1 (the
+    // provider-registration default, exactly what an un-stamped model object
+    // carries), but the account's profile actually lives in eu-central-1.
+    // resolveKiroProfileArn's canonical-region probe (#104, #131) finds it
+    // there; the runtime endpoint must follow, or the profileArn gets sent to
+    // the wrong regional host and Kiro rejects it with an unclassified 400.
+    resetProfileArnCache(false);
+    const testArn = "arn:aws:codewhisperer:eu-central-1:123:profile/TEST";
+    const mockFetch = vi
+      .fn()
+      // Primary guess (us-east-1): no profile here, but not a 403 — the probe
+      // continues to the next canonical region without raising.
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ profiles: [] }),
+      })
+      // Fallback (eu-central-1): profile found.
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ profiles: [{ arn: testArn }] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({
+                done: false,
+                value: encodeBody('{"content":"Hi"}{"contextUsagePercentage":5}'),
+              })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+            releaseLock: () => {},
+          }),
+        },
+      });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+
+    expect(mockFetch.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
+    expect(mockFetch.mock.calls[1][0]).toBe("https://management.eu-central-1.kiro.dev/List-Available-Profiles");
+    // The runtime call must follow the region the profile actually resolved
+    // in, not the model's original us-east-1 guess.
+    expect(mockFetch.mock.calls[2][0]).toBe("https://runtime.eu-central-1.kiro.dev/generateAssistantResponse");
+    expect(JSON.parse(mockFetch.mock.calls[2][1].body).profileArn).toBe(testArn);
+    expect(events.find((event) => event.type === "done")).toBeDefined();
+
+    vi.unstubAllGlobals();
+  });
+
   it("sets stopReason to toolUse when tool calls are present", async () => {
     const toolPayload = '{"name":"bash","toolUseId":"tc1","input":"{\\"cmd\\":\\"ls\\"}","stop":true}';
     const mockFetch = mockFetchOk(`${toolPayload}{"contextUsagePercentage":20}`);
