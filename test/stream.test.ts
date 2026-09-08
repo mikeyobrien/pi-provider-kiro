@@ -6628,7 +6628,10 @@ describe("auth-plane diagnostics on the flattened error", () => {
     resetProfileArnCache(false);
     const mockFetch = vi
       .fn()
-      // ListAvailableProfiles rejects the host's token.
+      // ListAvailableProfiles rejects the host's token in every canonical
+      // management region (us-east-1, then eu-central-1) — a 403 is probed
+      // across regions before it is treated as an auth-plane failure.
+      .mockResolvedValueOnce({ ok: false, status: 403, statusText: "Forbidden" })
       .mockResolvedValueOnce({ ok: false, status: 403, statusText: "Forbidden" })
       // ListAvailableProfiles fails again on the refreshed credential.
       .mockResolvedValueOnce({ ok: false, status: 503, statusText: "Service Unavailable" });

@@ -541,8 +541,11 @@ describe("management-plane error typing", () => {
   });
 
   it("keeps the existing message text byte-identical", async () => {
+    // A 403 is probed across every canonical management region and the LAST
+    // region's error is rethrown, so the region named is the final candidate,
+    // not the caller's. The format itself is the contract under test.
     const withStatusText = (await managementFailure(403, "Forbidden").catch((e: unknown) => e)) as Error;
-    expect(withStatusText.message).toBe("Kiro management ListAvailableProfiles failed in us-east-1: 403 Forbidden");
+    expect(withStatusText.message).toBe("Kiro management ListAvailableProfiles failed in eu-central-1: 403 Forbidden");
     resetKiroProfileArnCache();
     vi.unstubAllGlobals();
 
@@ -558,7 +561,7 @@ describe("management-plane error typing", () => {
     expect(error.markRefreshAttempted()).toBe(error);
     expect(error.refreshAttempted).toBe(true);
     // Flagging must not disturb the message contract or the discriminator.
-    expect(error.message).toBe("Kiro management ListAvailableProfiles failed in us-east-1: 403 Forbidden");
+    expect(error.message).toBe("Kiro management ListAvailableProfiles failed in eu-central-1: 403 Forbidden");
     expect(error.plane).toBe("management");
   });
 });
