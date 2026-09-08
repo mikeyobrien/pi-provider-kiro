@@ -1,6 +1,6 @@
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { getSupportedThinkingLevels, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { deriveKiroEffort } from "../src/effort.js";
@@ -15,13 +15,14 @@ import {
   KIRO_MODEL_IDS,
   type KiroModel,
   kiroModels,
+  LEGACY_HOME_CACHE_PATH,
   mapKiroCatalogModels,
   resolveApiRegion,
   resolveKiroModel,
   updateKiroModelsCache,
 } from "../src/models.js";
 
-const OLD_Q_CACHE_PATH = join(homedir(), ".kiro-models-cache.json");
+const LEGACY_CACHE_PATH = join(homedir(), ".kiro-models-cache.json");
 const TEST_REGION = "test-region-1";
 const PROFILE_ARN = "arn:aws:codewhisperer:test-region-1:123456789012:profile/test";
 
@@ -79,14 +80,17 @@ const catalogFixture: KiroCatalogModel[] = [
 ];
 
 beforeEach(() => {
+  mkdirSync(dirname(KIRO_MANAGEMENT_CACHE_PATH), { recursive: true });
   rmSync(KIRO_MANAGEMENT_CACHE_PATH, { force: true });
-  rmSync(OLD_Q_CACHE_PATH, { force: true });
+  rmSync(LEGACY_HOME_CACHE_PATH, { force: true });
+  rmSync(LEGACY_CACHE_PATH, { force: true });
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
   rmSync(KIRO_MANAGEMENT_CACHE_PATH, { force: true });
-  rmSync(OLD_Q_CACHE_PATH, { force: true });
+  rmSync(LEGACY_HOME_CACHE_PATH, { force: true });
+  rmSync(LEGACY_CACHE_PATH, { force: true });
 });
 
 describe("Feature 2: Model Definitions", () => {
@@ -223,6 +227,12 @@ describe("Feature 2: Model Definitions", () => {
   });
 
   describe("management model cache", () => {
+    it("uses ~/.pi/agent as the primary version 2 cache location", () => {
+      expect(KIRO_MANAGEMENT_CACHE_PATH).toBe(join(homedir(), ".pi", "agent", "kiro-management-models-cache.json"));
+      expect(LEGACY_HOME_CACHE_PATH).toBe(join(homedir(), ".kiro-management-models-cache.json"));
+      expect(KIRO_MANAGEMENT_CACHE_VERSION).toBe(2);
+    });
+
     it("accepts the versioned cache and treats its regional catalog as authoritative", async () => {
       const fetchMock = vi.fn().mockResolvedValue({
         ok: true,
@@ -276,10 +286,46 @@ describe("Feature 2: Model Definitions", () => {
       expect(readFileSync(KIRO_MANAGEMENT_CACHE_PATH, "utf-8")).toBe(serialized);
     });
 
-    it("ignores the old Q cache and unversioned formats", () => {
+    it("reads the version 2 legacy home cache when the primary cache is absent", () => {
+      const legacyModels = mapKiroCatalogModels([{ modelId: "legacy-only" }], TEST_REGION);
+      writeFileSync(
+        LEGACY_HOME_CACHE_PATH,
+        JSON.stringify({
+          version: KIRO_MANAGEMENT_CACHE_VERSION,
+          source: KIRO_MANAGEMENT_CACHE_SOURCE,
+          regions: {
+            [TEST_REGION]: { region: TEST_REGION, fetchedAt: Date.now(), models: legacyModels },
+          },
+        }),
+        "utf-8",
+      );
+
+      expect(getCachedModels(TEST_REGION).map((model) => model.id)).toEqual(["legacy-only"]);
+      expect(resolveKiroModel("legacy-only")).toBe("legacy-only");
+      expect(isCacheStale(TEST_REGION)).toBe(false);
+    });
+
+    it("prefers the primary cache when both cache paths are valid", () => {
+      const legacyModels = mapKiroCatalogModels([{ modelId: "legacy-only" }], TEST_REGION);
+      const primaryModels = mapKiroCatalogModels([{ modelId: "primary-only" }], TEST_REGION);
+      const cacheWith = (models: KiroModel[]) =>
+        JSON.stringify({
+          version: KIRO_MANAGEMENT_CACHE_VERSION,
+          source: KIRO_MANAGEMENT_CACHE_SOURCE,
+          regions: {
+            [TEST_REGION]: { region: TEST_REGION, fetchedAt: Date.now(), models },
+          },
+        });
+      writeFileSync(LEGACY_HOME_CACHE_PATH, cacheWith(legacyModels), "utf-8");
+      writeFileSync(KIRO_MANAGEMENT_CACHE_PATH, cacheWith(primaryModels), "utf-8");
+
+      expect(getCachedModels(TEST_REGION).map((model) => model.id)).toEqual(["primary-only"]);
+    });
+
+        it("ignores the old Q cache and unversioned formats", () => {
       const ignoredModels = mapKiroCatalogModels([{ modelId: "ignored-only" }], TEST_REGION);
       const unversionedCache = JSON.stringify({ [TEST_REGION]: ignoredModels });
-      writeFileSync(OLD_Q_CACHE_PATH, unversionedCache, "utf-8");
+      writeFileSync(LEGACY_CACHE_PATH, unversionedCache, "utf-8");
 
       expect(getCachedModels(TEST_REGION)).toBe(kiroModels);
       expect(getCachedModels(TEST_REGION).some((model) => model.id === "ignored-only")).toBe(false);
