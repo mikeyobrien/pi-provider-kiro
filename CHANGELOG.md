@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add opt-in Kiro credit usage tracking for Pi cost dashboards. `usageTracking.enabled` converts the final successful attempt's exact credit count to an estimated USD-equivalent total, using the published `$0.04` add-on-credit rate by default or an optional `usdPerCredit` override. Tracking remains disabled by default; the estimate is not an invoice, and subscription-included credits may have no marginal cost.
+
 ### Fixed
 
 - Resolve `ksk_` API key profiles through GetProfile instead of ListAvailableProfiles, which returns 403 Unsupported token type. Catalog queries then use that ARN in us-east-1. `KIRO_PROFILE_ARN` still wins.

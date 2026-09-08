@@ -75,6 +75,35 @@ Or let Kiro pick automatically:
 
 Reasoning is automatically enabled for supported models. Use `/reasoning` to adjust the thinking budget.
 
+### Estimated usage cost
+
+Kiro reports an exact credit count for completed turns, but not a per-turn USD charge. In `~/.pi/agent/settings.json`, you can opt in to converting those credits into an estimated USD-equivalent value for Pi usage dashboards:
+
+```json
+{
+  "pi-provider-kiro": {
+    "usageTracking": {
+      "enabled": true
+    }
+  }
+}
+```
+
+When enabled, `usdPerCredit` defaults to Kiro's published add-on rate of `$0.04` per credit. Override it when a different equivalent rate is appropriate:
+
+```json
+{
+  "pi-provider-kiro": {
+    "usageTracking": {
+      "enabled": true,
+      "usdPerCredit": 0.025
+    }
+  }
+}
+```
+
+This value is an estimate, not an invoice or confirmed marginal charge. Credits included in a subscription may have no marginal cost. Tracking is disabled by default, and invalid settings fail closed to disabled. Pi's HTML session export currently recomputes component costs and may therefore show `$0`; cost dashboards and summaries that read `usage.cost.total` show the estimate.
+
 ## Retry Behavior
 
 Generic transient retries such as HTTP `429` and `5xx` are handled by `pi-coding-agent` at the session layer.

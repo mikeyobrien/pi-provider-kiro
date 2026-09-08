@@ -12,8 +12,9 @@ import { setExtensionContext } from "./login-ui.js";
 import { getCachedModels, isCacheStale, type KiroModel, kiroModels, updateKiroModelsCache } from "./models.js";
 import type { KiroCredentials } from "./oauth.js";
 import { loginKiro, refreshKiroToken } from "./oauth.js";
-import { streamKiro } from "./stream.js";
+import { createKiroStream } from "./stream.js";
 import { fetchKiroUsage } from "./usage.js";
+import { loadKiroUsageTracking } from "./usage-tracking.js";
 
 export { resolveApiRegion } from "./endpoints.js";
 export type { KiroProviderAttempts } from "./errors.js";
@@ -157,6 +158,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   const credential = resolveLocalCredential();
+  const streamSimple = createKiroStream(loadKiroUsageTracking());
   pi.registerProvider("kiro", {
     baseUrl: getKiroEndpoints("us-east-1").runtime,
     api: "kiro-api",
@@ -187,7 +189,7 @@ export default function (pi: ExtensionAPI) {
       fetchUsage: fetchKiroUsage,
       // biome-ignore lint/suspicious/noExplicitAny: ProviderConfig.oauth doesn't include getCliCredentials but OAuthProviderInterface does
     } as any,
-    streamSimple: streamKiro,
+    streamSimple,
   });
 
   startupCatalogRefresh = refreshCatalog(credential, { allowNetwork: true })
