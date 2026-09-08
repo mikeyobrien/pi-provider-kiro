@@ -63,6 +63,7 @@ import {
   resolveRequestRateRetryDelay,
   retryConfig,
 } from "./retry.js";
+import { mapModeledStopReason } from "./stop-reason.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
 import { kiroTokenTypeHeaders } from "./token-type.js";
 import { countTokens } from "./tokenizer.js";
@@ -1023,7 +1024,14 @@ export function streamKiro(
         let totalContent = "";
         let lastContentData = "";
         let usageEvent: KiroUsageData | null = null;
-        let receivedContextUsage = false;
+        // True once a frame arrived that says the turn reached a settled state
+        // rather than being cut off mid-flight: a contextUsageEvent or a
+        // metadataEvent. Distinct from the numbers those frames carry — this is
+        // purely the "the service got to the end of this turn" signal that the
+        // no-modeled-stop-reason fallback needs. It used to be spelled
+        // `receivedContextUsage`, which conflated the two and left every
+        // metadataEvent-only stream looking truncated.
+        let sawSettlingFrame = false;
         const thinkingParser = thinkingEnabled ? new ThinkingTagParser(output, stream) : null;
         let nativeThinkingBlockIndex: number | null = null;
         let nativeThinkingEnded = false;
@@ -1207,7 +1215,7 @@ export function streamKiro(
               const pct = event.data.contextUsagePercentage;
               output.usage.input = Math.round((pct / 100) * model.contextWindow);
               (output.usage as unknown as Record<string, unknown>).contextPercent = pct;
-              receivedContextUsage = true;
+              sawSettlingFrame = true;
               break;
             }
             case "thinkingText": {
@@ -1275,6 +1283,7 @@ export function streamKiro(
               // later partial frame cannot erase counts already received.
               const prev: KiroUsageData = usageEvent ?? {};
               usageEvent = { ...prev, ...event.data };
+              sawSettlingFrame = true;
               break;
             }
             case "metering": {
@@ -1478,12 +1487,38 @@ export function streamKiro(
         // stall waiting for tool results that will never arrive.
         //
         // Resolved BEFORE the retry-exhaustion warnings below so those warnings can
-        // report the value actually assigned. It reads only `receivedContextUsage`
-        // and `emittedToolCalls`, neither of which the exhaustion branch touches.
-        if (!receivedContextUsage && emittedToolCalls === 0) {
+        // report the value actually assigned. It reads only `emittedToolCalls`,
+        // `usageEvent` and `sawSettlingFrame`, none of which the exhaustion
+        // branch touches.
+        //
+        // Precedence: an emitted tool call outranks everything, because the
+        // deltas are already on the stream and cannot be retracted — the caller
+        // has to be told to run them. Then the service's own
+        // `MetadataEvent.stopReason`, when this peer has a member that means the
+        // same thing. Only then the local reconstruction.
+        const modeledStopReason = mapModeledStopReason(usageEvent?.rawStopReason);
+        if (emittedToolCalls > 0) {
+          output.stopReason = "toolUse";
+        } else if (modeledStopReason !== undefined) {
+          // `toolUse` IS reachable here: the service says TOOL_USE and every tool
+          // call it sent was dropped for empty or unparseable input, so
+          // `emittedToolCalls` is 0 while the modeled value still asks for tools.
+          // Emitting `"toolUse"` with no tool call on the message stalls pi's
+          // agent loop waiting for results that will never arrive, so the wire is
+          // overruled. `test/stream.test.ts` pins this case.
+          output.stopReason = modeledStopReason === "toolUse" ? "stop" : modeledStopReason;
+        } else if (!sawSettlingFrame) {
+          // No modeled stop reason and nothing to say the turn ever settled:
+          // treat it as cut off. `sawSettlingFrame` — not the old
+          // `receivedContextUsage` — because a metadataEvent settles the turn
+          // just as well, and reading only the contextUsage frame here fabricated
+          // `"length"` on any metadataEvent-only stream. That fabrication is not
+          // cosmetic: it makes wasPreviousResponseTruncated() prepend
+          // TRUNCATION_NOTICE to the next turn, asking the model to continue an
+          // answer it had finished.
           output.stopReason = "length";
         } else {
-          output.stopReason = emittedToolCalls > 0 ? "toolUse" : "stop";
+          output.stopReason = "stop";
         }
         if (degenerate) {
           if (!exhausted) {
@@ -1582,7 +1617,17 @@ export function streamKiro(
           // appends rather than silently overwriting an exhaustion diagnostic.
           output.errorMessage = output.errorMessage ? `${output.errorMessage}. ${dropDiagnostic}` : dropDiagnostic;
         }
-        stream.push({ type: "done", reason: output.stopReason as "stop" | "toolUse", message: output });
+        // `output.stopReason` is the full `StopReason` union; a done event takes
+        // only the three non-failure members, so `error`/`aborted` are excluded.
+        // `"length"` belongs in that set and is a first-class outcome here: a
+        // modeled MAX_TOKENS routes to it, so narrowing the cast to
+        // `"stop" | "toolUse"` would tell a reader this event can never report a
+        // truncation when it routinely does.
+        stream.push({
+          type: "done",
+          reason: output.stopReason as "stop" | "length" | "toolUse",
+          message: output,
+        });
         debugLog("response.done", {
           stopReason: output.stopReason,
           emittedToolCalls,

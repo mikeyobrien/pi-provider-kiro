@@ -50,6 +50,7 @@ export {
   NON_RETRYABLE_BODY_PATTERNS,
   TOO_BIG_PATTERNS,
 } from "./retry.js";
+export { mapModeledStopReason } from "./stop-reason.js";
 export { streamKiro } from "./stream.js";
 export {
   EMPTY_CONTENT_PLACEHOLDER,
