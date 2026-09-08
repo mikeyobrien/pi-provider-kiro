@@ -40,6 +40,7 @@ import { isKiroToolStructureRule, kiroConversationEntries, repairKiroConversatio
 import { parseInvokeToolCalls } from "./invoke-tool-parser.js";
 import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, refreshViaKiroCli } from "./kiro-cli.js";
 import {
+  getResolvedProfileRegion,
   invalidateKiroProfileArn,
   type KiroManagementAuth,
   KiroManagementHttpError,
@@ -263,14 +264,26 @@ export function streamKiro(
         kiroProfileArn?: string;
         additionalModelRequestFieldsSchema?: Record<string, unknown>;
       };
-      const region = modelMetadata.kiroRegion ?? getKiroRegionFromEndpoint(model.baseUrl) ?? "us-east-1";
-      const endpoint = new URL("generateAssistantResponse", getKiroEndpoints(region).runtime).toString();
+      const cliCreds = getKiroCliCredentials() ?? getKiroCliCredentialsAllowExpired();
+      // Model metadata is stamped with the account's real region by the
+      // `modifyModels` hook (see index.ts), but that hook only runs for models
+      // resolved through the top-level session's credential/model list. A
+      // sub-agent-spawned call can receive a model object that never went
+      // through `modifyModels`, leaving `kiroRegion`/`baseUrl` at their
+      // provider-registration defaults ("us-east-1"). Falling back to the
+      // active kiro-cli session's own region before the hardcoded default
+      // avoids guessing wrong for any account outside us-east-1.
+      let region =
+        modelMetadata.kiroRegion ??
+        getKiroRegionFromEndpoint(model.baseUrl) ??
+        (cliCreds?.access === accessToken ? cliCreds.region : undefined) ??
+        "us-east-1";
+      let endpoint = new URL("generateAssistantResponse", getKiroEndpoints(region).runtime).toString();
       let managementAuth: KiroManagementAuth = { accessToken, region };
 
       const optionProfileArn =
         (options as unknown as { credentials?: { profileArn?: string }; profileArn?: string })?.credentials
           ?.profileArn || (options as unknown as { profileArn?: string })?.profileArn;
-      const cliCreds = getKiroCliCredentials() ?? getKiroCliCredentialsAllowExpired();
       const cliProfileArn = cliCreds?.access === accessToken ? cliCreds.profileArn : undefined;
       const initialProfileArn = modelMetadata.kiroProfileArn || optionProfileArn || cliProfileArn;
       let profileArn: string;
@@ -295,6 +308,18 @@ export function streamKiro(
         profileArn =
           freshCreds.profileArn ||
           (skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth));
+      }
+
+      // `resolveKiroProfileArn` probes multiple canonical regions and may have
+      // found the profile somewhere other than our initial guess (#104, #131).
+      // Self-correct the runtime endpoint and management region here instead of
+      // sending a region-mismatched profileArn to the wrong host — that
+      // mismatch is what produces Kiro's generic, unclassified 400 response.
+      const resolvedProfileRegion = getResolvedProfileRegion(managementAuth);
+      if (resolvedProfileRegion && resolvedProfileRegion !== region) {
+        region = resolvedProfileRegion;
+        endpoint = new URL("generateAssistantResponse", getKiroEndpoints(region).runtime).toString();
+        managementAuth = { ...managementAuth, region };
       }
 
       // Trigger dynamic models cache update in the background if empty or stale

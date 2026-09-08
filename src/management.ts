@@ -206,6 +206,20 @@ export function invalidateKiroProfileArn(auth: KiroManagementAuth): void {
   pendingProfileRequests.delete(key);
 }
 
+/**
+ * Region where `resolveKiroProfileArn` actually found the profile, if it differs
+ * from the region the caller guessed. Callers that built a runtime endpoint from
+ * model metadata (see stream.ts) may have guessed wrong when that metadata was
+ * never stamped with the account's real region (e.g. sub-agent-spawned calls
+ * bypass the `modifyModels` hook that stamps `kiroRegion` on top-level model
+ * objects). Checking this cache after profile resolution lets the runtime
+ * endpoint self-correct instead of sending a region-mismatched profileArn to
+ * the wrong host, which the backend rejects with an unclassified 400.
+ */
+export function getResolvedProfileRegion(auth: KiroManagementAuth): string | undefined {
+  return profileRegionCache.get(profileCacheKey(auth));
+}
+
 export async function resolveKiroProfileArn(auth: KiroManagementAuth, providedArn?: string): Promise<string> {
   // Explicit user override (#110). Highest precedence: a user who pins
   // KIRO_PROFILE_ARN knows which profile they want, even if the token or the
