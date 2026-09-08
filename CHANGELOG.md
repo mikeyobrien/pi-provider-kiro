@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Write the catalog cache to ~/.pi/agent/kiro-management-models-cache.json, still reading the legacy ~/.kiro-management-models-cache.json path.
 
 - At startup (and when the host refreshModels hook has no credential), scan KIRO_API_KEY then kiro-cli then Kiro IDE and refresh the catalog without blocking registration.
+- Drop the hardcoded bootstrap catalog. Registration reads the on-disk cache (or an empty list) and kicks off discovery without blocking.
 
 ## [0.10.2] - 2026-08-31
 

@@ -6,11 +6,12 @@ import { capacityRetryConfig } from "../src/retry.js";
 import { resetProfileArnCache, streamKiro } from "../src/stream.js";
 import { concatMessages, encodeEventMessage } from "./helpers/event-stream.js";
 
-type TestKiroModel = Model<Api> & { kiroProfileArn?: string };
+type TestKiroModel = Model<Api> & { kiroModelId?: string; kiroProfileArn?: string };
 
 function makeModel(overrides?: Partial<TestKiroModel>): TestKiroModel {
   return {
     id: "claude-sonnet-4-5",
+    kiroModelId: "claude-sonnet-4.5",
     name: "Sonnet",
     api: "kiro-api",
     provider: "kiro",
