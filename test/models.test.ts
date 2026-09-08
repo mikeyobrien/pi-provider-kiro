@@ -322,7 +322,7 @@ describe("Feature 2: Model Definitions", () => {
       expect(getCachedModels(TEST_REGION).map((model) => model.id)).toEqual(["primary-only"]);
     });
 
-        it("ignores the old Q cache and unversioned formats", () => {
+    it("ignores the old Q cache and unversioned formats", () => {
       const ignoredModels = mapKiroCatalogModels([{ modelId: "ignored-only" }], TEST_REGION);
       const unversionedCache = JSON.stringify({ [TEST_REGION]: ignoredModels });
       writeFileSync(LEGACY_CACHE_PATH, unversionedCache, "utf-8");
