@@ -23,6 +23,7 @@ import { UniversalEventStreamMarshaller } from "@smithy/core/event-streams";
 import type { Message } from "@smithy/types";
 import { parseBracketToolCalls } from "./bracket-tool-parser.js";
 import { debugEnabled, debugLog, formatSafeError, redactSensitiveText } from "./debug.js";
+import { createKiroTurnProvenanceDiagnostic, type KiroUsageProvenance } from "./diagnostics.js";
 import {
   buildKiroAdditionalModelRequestFields,
   getKiroEffortConfig,
@@ -542,7 +543,17 @@ export function streamKiro(
       // echo-loop retry check. Clearing at the attempt boundary keeps the whole
       // usage block sourced from one attempt, matching how `usageEvent` itself
       // is scoped per attempt.
+      //
+      // `usageProvenance` records, per slot, which source wrote the figure now on
+      // `output.usage` — a slot the wire measured, one back-computed from another
+      // wire figure, or one invented locally. It is filled at the same sites that
+      // write the numbers so it cannot disagree with them, and cleared with them
+      // so a retried attempt never inherits the abandoned attempt's claims. It is
+      // NOT written onto `output.usage`: pi's `Usage` has no slot for it, and the
+      // provenance diagnostic appended after the turn settles is its channel out.
+      let usageProvenance: KiroUsageProvenance = {};
       const resetAttemptUsage = () => {
+        usageProvenance = {};
         output.usage.input = 0;
         output.usage.output = 0;
         output.usage.cacheRead = 0;
@@ -1206,6 +1217,10 @@ export function streamKiro(
             case "contextUsage": {
               const pct = event.data.contextUsagePercentage;
               output.usage.input = Math.round((pct / 100) * model.contextWindow);
+              // Back-computed from a percentage the service rounded, over the
+              // catalog's context window rather than the service's: a real wire
+              // figure underneath, but not the count itself.
+              usageProvenance.input = "derived";
               (output.usage as unknown as Record<string, unknown>).contextPercent = pct;
               receivedContextUsage = true;
               break;
@@ -1432,18 +1447,54 @@ export function streamKiro(
         // `calculateCost` prices all three separately. So the cache counts must
         // land whenever `input` is taken from the wire; otherwise a cached turn
         // reports a fraction of its real input and is priced far too low.
-        if (usageEvent?.inputTokens !== undefined) output.usage.input = usageEvent.inputTokens;
+        //
+        // Each write below also stamps `usageProvenance` for its slot. A measured
+        // count overwrites a derived one (the contextUsage-derived `input` yields
+        // to the wire's `uncachedInputTokens`); the reverse never happens because
+        // the derived write happened earlier in the stream.
+        if (usageEvent?.inputTokens !== undefined) {
+          output.usage.input = usageEvent.inputTokens;
+          usageProvenance.input = "measured";
+        }
+        // `cache` is one slot for both legs: the service reports them together,
+        // and a turn that omitted both is "never told", not "measured zero".
+        if (usageEvent?.cacheReadInputTokens !== undefined || usageEvent?.cacheWriteInputTokens !== undefined) {
+          usageProvenance.cache = "measured";
+        }
         if (usageEvent?.cacheReadInputTokens !== undefined) output.usage.cacheRead = usageEvent.cacheReadInputTokens;
         if (usageEvent?.cacheWriteInputTokens !== undefined) output.usage.cacheWrite = usageEvent.cacheWriteInputTokens;
-        output.usage.output = usageEvent?.outputTokens ?? countTokens(totalContent);
+        if (usageEvent?.outputTokens !== undefined) {
+          output.usage.output = usageEvent.outputTokens;
+          usageProvenance.output = "measured";
+        } else {
+          output.usage.output = countTokens(totalContent);
+          usageProvenance.output = "estimated";
+        }
         // `TokenUsage.totalTokens` is required on the wire while the cache counts
         // are optional, so the service's own total is the authoritative figure —
         // recomputing from components silently under-reports whenever a component
         // is omitted. Prefer it and fall back to the sum, matching how pi's
         // bedrock adapter treats the one other wire that supplies a total.
-        output.usage.totalTokens =
-          usageEvent?.totalTokens ??
-          output.usage.input + output.usage.cacheRead + output.usage.cacheWrite + output.usage.output;
+        if (usageEvent?.totalTokens !== undefined) {
+          output.usage.totalTokens = usageEvent.totalTokens;
+          usageProvenance.totalTokens = "measured";
+        } else {
+          output.usage.totalTokens =
+            output.usage.input + output.usage.cacheRead + output.usage.cacheWrite + output.usage.output;
+          // A sum is only as good as its weakest term: `derived` only when all
+          // four addends were reported, `estimated` once any was not — an
+          // estimated output, an input nothing reported, or a cache leg the
+          // service omitted and the attempt reset left at 0. The cache legs are
+          // checked individually: `cache: "measured"` means at least one arrived,
+          // and the other's 0 is an assumption, not a count.
+          usageProvenance.totalTokens =
+            usageProvenance.input === "measured" &&
+            usageProvenance.output === "measured" &&
+            usageEvent?.cacheReadInputTokens !== undefined &&
+            usageEvent?.cacheWriteInputTokens !== undefined
+              ? "derived"
+              : "estimated";
+        }
         try {
           PiAi.calculateCost(model, output.usage);
         } catch {
@@ -1581,6 +1632,34 @@ export function streamKiro(
           // requires `!sawAnyToolCalls`. Kept so that loosening either predicate
           // appends rather than silently overwriting an exhaustion diagnostic.
           output.errorMessage = output.errorMessage ? `${output.errorMessage}. ${dropDiagnostic}` : dropDiagnostic;
+        }
+        // Record where this turn's numbers came from. The usage provenance and
+        // the modeled stop reason are both invisible in the emitted message: the
+        // usage numbers are a flat bag with no room to say whether a figure was
+        // measured or invented, and `MetadataEvent.stopReason` has no slot in
+        // pi's `stopReason` vocabulary at this peer. diagnostics[] is the only
+        // structured channel out of here — streamKiro never rejects, it encodes
+        // outcomes into the stream.
+        //
+        // `stopReasonSource` is `inferred` because the branch above still
+        // reconstructs the emitted value from tool calls and contextUsage
+        // arrival. It becomes `modeled` when that branch consumes
+        // `rawStopReason`, which is a separate change.
+        try {
+          PiAi.appendAssistantMessageDiagnostic(
+            output,
+            createKiroTurnProvenanceDiagnostic({
+              usage: usageProvenance,
+              stopReason: output.stopReason,
+              stopReasonSource: "inferred",
+              rawStopReason: usageEvent?.rawStopReason,
+              stopDetails: usageEvent?.stopDetails,
+            }),
+          );
+        } catch (e) {
+          // Observational only. A malformed record must never cost the caller a
+          // turn that otherwise completed.
+          debugLog("diagnostics.failed", { error: formatSafeError(e) });
         }
         stream.push({ type: "done", reason: output.stopReason as "stop" | "toolUse", message: output });
         debugLog("response.done", {
