@@ -3938,6 +3938,199 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
+  it("waits the server-stated throttle window instead of the computed backoff", async () => {
+    // `ThrottlingException.retryAfterMilliseconds` states how long the throttle
+    // window is. The retry site used to compute `exponentialBackoff(0, 1000, ...)`
+    // = 1000ms regardless, so a stated window was discarded and the retry fired
+    // inside it. 1000ms appears at this site ONLY if the backoff was used, which
+    // makes it a clean discriminator for the pre-fix behavior.
+    const STATED_MS = 20;
+    const COMPUTED_BACKOFF_MS = 1000;
+    const realSetTimeout = globalThis.setTimeout;
+    const requestedDelays: number[] = [];
+    // Pass-through spy: records what was asked for without altering timing, so
+    // the assertion is on the requested delay, not on wall-clock measurement.
+    vi.stubGlobal("setTimeout", ((fn: () => void, ms?: number, ...rest: unknown[]) => {
+      if (typeof ms === "number") requestedDelays.push(ms);
+      return (realSetTimeout as unknown as (...a: unknown[]) => unknown)(fn, ms, ...rest);
+    }) as unknown as typeof globalThis.setTimeout);
+
+    let callCount = 0;
+    const mockFetch = vi.fn().mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return {
+          ok: true,
+          body: {
+            getReader: () => ({
+              read: vi
+                .fn()
+                .mockResolvedValueOnce({
+                  done: false,
+                  value: encodeExceptionMessage("throttlingError", {
+                    message: "Too many requests",
+                    retryAfterMilliseconds: STATED_MS,
+                  }),
+                })
+                .mockResolvedValueOnce({ done: true, value: undefined }),
+              cancel: vi.fn().mockResolvedValue(undefined),
+              releaseLock: () => {},
+            }),
+          },
+        };
+      }
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({ done: false, value: encodeBody('{"content":"recovered"}') })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+            cancel: vi.fn().mockResolvedValue(undefined),
+            releaseLock: () => {},
+          }),
+        },
+      };
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(requestedDelays).toContain(STATED_MS);
+    expect(requestedDelays).not.toContain(COMPUTED_BACKOFF_MS);
+    const done = events.find((e) => e.type === "done");
+    expect(done?.type === "done" && (done.message.content[0] as TextContent).text).toBe("recovered");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("falls back to the computed backoff when a typed error states no delay", async () => {
+    // Negative control for the test above: same exception-framed member with
+    // `retryAfterMilliseconds` omitted must still use exponential backoff.
+    const realSetTimeout = globalThis.setTimeout;
+    const requestedDelays: number[] = [];
+    vi.stubGlobal("setTimeout", ((fn: () => void, ms?: number, ...rest: unknown[]) => {
+      if (typeof ms === "number") requestedDelays.push(ms);
+      // Collapse only the 1000ms retry backoff so the negative control stays
+      // fast; every other timer (first-token, idle) keeps its real duration.
+      const effective = ms === 1000 ? 1 : ms;
+      return (realSetTimeout as unknown as (...a: unknown[]) => unknown)(fn, effective, ...rest);
+    }) as unknown as typeof globalThis.setTimeout);
+
+    let callCount = 0;
+    const mockFetch = vi.fn().mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return {
+          ok: true,
+          body: {
+            getReader: () => ({
+              read: vi
+                .fn()
+                .mockResolvedValueOnce({
+                  done: false,
+                  value: encodeExceptionMessage("throttlingError", { message: "Too many requests" }),
+                })
+                .mockResolvedValueOnce({ done: true, value: undefined }),
+              cancel: vi.fn().mockResolvedValue(undefined),
+              releaseLock: () => {},
+            }),
+          },
+        };
+      }
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({ done: false, value: encodeBody('{"content":"recovered"}') })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+            cancel: vi.fn().mockResolvedValue(undefined),
+            releaseLock: () => {},
+          }),
+        },
+      };
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(requestedDelays).toContain(1000);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("does not reuse a previous attempt's stated delay for a later untimed error", async () => {
+    // `streamErrorData` is declared per attempt, so a stated window cannot pin
+    // every later delay. Hoisting that declaration out of the retry loop would
+    // make attempt 2 sleep attempt 1's 20ms instead of its own 2000ms backoff,
+    // which is why this is pinned rather than left to structure.
+    const realSetTimeout = globalThis.setTimeout;
+    const requestedDelays: number[] = [];
+    vi.stubGlobal("setTimeout", ((fn: () => void, ms?: number, ...rest: unknown[]) => {
+      if (typeof ms === "number") requestedDelays.push(ms);
+      // Collapse only the second-attempt backoff so the test stays fast.
+      const effective = ms === 2000 ? 1 : ms;
+      return (realSetTimeout as unknown as (...a: unknown[]) => unknown)(fn, effective, ...rest);
+    }) as unknown as typeof globalThis.setTimeout);
+
+    let callCount = 0;
+    const mockFetch = vi.fn().mockImplementation(async () => {
+      callCount++;
+      // Attempt 1: throttle stating 20ms. Attempt 2: a validation error with no
+      // stated delay, so it must fall back to its own backoff.
+      if (callCount <= 2) {
+        const frame =
+          callCount === 1
+            ? encodeExceptionMessage("throttlingError", {
+                message: "Too many requests",
+                retryAfterMilliseconds: 20,
+              })
+            : encodeExceptionMessage("serviceUnavailableError", { message: "unavailable" });
+        return {
+          ok: true,
+          body: {
+            getReader: () => ({
+              read: vi
+                .fn()
+                .mockResolvedValueOnce({ done: false, value: frame })
+                .mockResolvedValueOnce({ done: true, value: undefined }),
+              cancel: vi.fn().mockResolvedValue(undefined),
+              releaseLock: () => {},
+            }),
+          },
+        };
+      }
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({ done: false, value: encodeBody('{"content":"recovered"}') })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+            cancel: vi.fn().mockResolvedValue(undefined),
+            releaseLock: () => {},
+          }),
+        },
+      };
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    // Attempt 1 honored the stated window; attempt 2 used its own backoff.
+    expect(requestedDelays).toContain(20);
+    expect(requestedDelays).toContain(2000);
+
+    vi.unstubAllGlobals();
+  });
+
   it("reports the modeled exception class when a typed error frame outlives every retry", async () => {
     // Exception-framed member: the marshaller throws whatever the deserializer
     // returns for the `:exception-type` key, so the class name only survives if

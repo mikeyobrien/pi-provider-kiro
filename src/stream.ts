@@ -61,6 +61,7 @@ import {
   KIRO_REASON_CODES,
   MAX_RETRY_DELAY,
   resolveRequestRateRetryDelay,
+  resolveStreamRetryDelay,
   retryConfig,
 } from "./retry.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
@@ -1306,9 +1307,21 @@ export function streamKiro(
           // Timed out or received error mid-stream: retry with backoff
           if (retryCount < maxRetries) {
             retryCount++;
-            const delayMs = exponentialBackoff(retryCount - 1, 1000, MAX_RETRY_DELAY);
+            const backoffMs = exponentialBackoff(retryCount - 1, 1000, MAX_RETRY_DELAY);
+            // A modeled throttle frame states its own window in
+            // `retryAfterMilliseconds`. Honor it over the computed backoff:
+            // retrying earlier than the server said just gets throttled again
+            // and burns a retry. Not gated on `kind === "throttling"` — the
+            // field is only modeled on ThrottlingException today, but any member
+            // that states a wait is stating a wait, and the unknown-member
+            // fallback preserves it too.
+            const delayMs = resolveStreamRetryDelay(
+              streamErrorData?.retryAfterMilliseconds,
+              backoffMs,
+              MAX_RETRY_DELAY,
+            );
             if (streamErrorData && debugEnabled()) {
-              debugLog("stream.error.typed", [streamErrorData]);
+              debugLog("stream.error.typed", [streamErrorData, { delayMs, backoffMs }]);
             }
             // `output` is created once outside the retry loop, so anything the
             // aborted attempt already appended survives into the next one. A
