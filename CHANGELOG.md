@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep version dots in generated display names for catalog models missing from the bootstrap list. The name was derived from the pi ID, where `toPiModelId` had already rewritten `5.1` as `5-1`, so `claude-fable-5.1` rendered as "Claude Fable 5 1"; it now reads "Claude Fable 5.1".
+
 - Resolve `ksk_` API key profiles through GetProfile instead of ListAvailableProfiles, which returns 403 Unsupported token type. Catalog queries then use that ARN in us-east-1. `KIRO_PROFILE_ARN` still wins.
 
 - Preserve canonical `developer` messages emitted by newer Pi-compatible hosts by lowering them to Kiro user input. Agent reminders and advisories previously degraded to the neutral `"Please proceed with the task."` placeholder when current, and disappeared from historical context entirely.
