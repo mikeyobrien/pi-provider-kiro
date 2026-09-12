@@ -71,6 +71,7 @@ const catalogFixture: KiroCatalogModel[] = [
     additionalModelRequestFieldsSchema: effortSchema("output_config", ["low", "medium", "high", "max"]),
   },
   { modelId: "qwen3-coder-next" },
+  { modelId: "claude-fable-5.1" },
   {
     modelId: "claude-fable-5",
     tokenLimits: { maxInputTokens: 1_000_000, maxOutputTokens: 128_000 },
@@ -180,6 +181,12 @@ describe("Feature 2: Model Definitions", () => {
       expect(mapped.find((model) => model.id === "gpt-5-6-luna")?.input).toEqual(["text", "image"]);
       expect(mapped.find((model) => model.id === "openai-gpt-5-6")?.input).toEqual(["text"]);
       expect(mapped.find((model) => model.id === "qwen3-coder-next")?.input).toEqual(["text"]);
+    });
+
+    it("keeps version dots when generating a name for a model outside the bootstrap list", () => {
+      const fable = mapped.find((model) => model.id === "claude-fable-5-1");
+      expect(fable?.kiroModelId).toBe("claude-fable-5.1");
+      expect(fable?.name).toBe("Claude Fable 5.1");
     });
 
     it("retains fresh schema and token metadata for a model also present in the bootstrap list", () => {

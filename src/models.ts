@@ -533,7 +533,7 @@ export function mapKiroCatalogModels(catalogModels: KiroCatalogModel[], region: 
     return {
       id,
       kiroModelId,
-      name: catalogName ?? existing?.name ?? humanizeModelId(id),
+      name: catalogName ?? existing?.name ?? humanizeModelId(kiroModelId),
       api: "kiro-api",
       provider: "kiro",
       baseUrl: getKiroEndpoints(region).runtime,
