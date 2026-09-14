@@ -48,6 +48,35 @@ const cliOauthCredential = {
   clientSecret: "",
 };
 
+const sampleKiroModels: KiroModel[] = [
+  {
+    id: "deepseek-3-2",
+    kiroModelId: "deepseek-3.2",
+    name: "DeepSeek 3.2",
+    provider: "kiro",
+    api: "kiro-api",
+    baseUrl: "old",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 164_000,
+    maxTokens: 8192,
+  },
+  {
+    id: "claude-sonnet-4-6",
+    kiroModelId: "claude-sonnet-4.6",
+    name: "Claude Sonnet 4.6",
+    provider: "kiro",
+    api: "kiro-api",
+    baseUrl: "old",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 1_000_000,
+    maxTokens: 65_536,
+  },
+];
+
 describe("Feature 1: Extension Registration", () => {
   beforeEach(() => {
     delete process.env.KIRO_API_KEY;
@@ -108,13 +137,14 @@ describe("Feature 1: Extension Registration", () => {
     expect(registerProvider.mock.calls[0][0]).toBe("kiro");
   });
 
-  it("registers 15 models", async () => {
+  it("registers an empty catalog when neither credentials nor a cache are available", async () => {
     const mod = await import("../src/index.js");
     const { pi, registerProvider } = mockPi();
-    mod.default(pi);
+    await mod.default(pi);
 
     const config = registerProvider.mock.calls[0][1];
-    expect(config.models).toHaveLength(15);
+    expect(kiroModels).toEqual([]);
+    expect(config.models).toEqual([]);
   });
 
   // Regression: the factory used to await catalog discovery before registering,
@@ -148,9 +178,23 @@ describe("Feature 1: Extension Registration", () => {
     warn.mockRestore();
   });
 
+  // The registration must be usable on its own: a host resolves the api and the
+  // stream function from it, and neither may depend on discovery having landed.
+  it("registers a usable kiro-api handler even with an empty catalog", async () => {
+    const mod = await import("../src/index.js");
+    const { pi, registerProvider } = mockPi();
+    mod.default(pi);
+
+    const config = registerProvider.mock.calls[0][1];
+    expect(config.api).toBe("kiro-api");
+    expect(typeof config.streamSimple).toBe("function");
+    expect(typeof config.refreshModels).toBe("function");
+    expect(config.models).toEqual([]);
+  });
+
   // A `ksk_` key must reach the catalog through GetProfile: ListAvailableProfiles
   // answers 403 "Unsupported token type" for API keys, which would otherwise
-  // skip startup discovery even though the bootstrap catalog is already present.
+  // leave the empty bootstrap catalog empty at startup.
   it("runs startup discovery after registering and gives KIRO_API_KEY precedence over local credentials", async () => {
     process.env.KIRO_API_KEY = "ksk_not-a-real-key";
     const fetchMock = vi
@@ -177,6 +221,29 @@ describe("Feature 1: Extension Registration", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls[0][1].headers["X-Amz-Target"]).toBe("AmazonCodeWhispererService.GetProfile");
     expect(getCachedModels("us-east-1").map((model: KiroModel) => model.id)).toEqual(["claude-sonnet-4-6"]);
+  });
+
+  // The picker must not come up empty for a user who already has a catalog on
+  // disk, which is the whole reason registration reads the cache synchronously.
+  it("registers the cached catalog without waiting for discovery", async () => {
+    credentialMocks.cli.mockReturnValue(cliOauthCredential);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ models: [{ modelId: "deepseek-3.2" }] }),
+      }),
+    );
+
+    const mod = await import("../src/index.js");
+    mod.default(mockPi().pi);
+    await mod.whenStartupCatalogSettled();
+
+    const { pi, registerProvider } = mockPi();
+    mod.default(pi);
+
+    expect(registerProvider.mock.calls[0][1].models.map((model: KiroModel) => model.id)).toEqual(["deepseek-3-2"]);
+    await mod.whenStartupCatalogSettled();
   });
 
   it("checks kiro-cli social credentials before the general kiro-cli credential scan", async () => {
@@ -276,7 +343,7 @@ describe("Feature 1: Extension Registration", () => {
       return registerProvider.mock.calls[0][1].refreshModels;
     };
 
-    it("serves the bootstrap catalog without a credential and never hits the network", async () => {
+    it("serves an empty catalog without a credential and never hits the network", async () => {
       const fetchMock = vi.fn();
       vi.stubGlobal("fetch", fetchMock);
 
@@ -348,9 +415,8 @@ describe("Feature 1: Extension Registration", () => {
     await mod.default(pi);
 
     const config = registerProvider.mock.calls[0][1];
-    const models = kiroModels.map((m) => ({ ...m, provider: "kiro", api: "kiro-api", baseUrl: "old" }));
     const creds = { access: "x", refresh: "x", expires: 0, clientId: "", clientSecret: "", region: ssoRegion };
-    const modified = config.oauth.modifyModels(models, creds);
+    const modified = config.oauth.modifyModels(sampleKiroModels, creds);
     expect(modified[0].baseUrl).toBe(`https://runtime.${expectedApiRegion}.kiro.dev/`);
   });
 
@@ -372,10 +438,9 @@ describe("Feature 1: Extension Registration", () => {
       profileArn,
     };
 
-    const models = kiroModels.map((model) => ({ ...model, baseUrl: "old" }));
-    const modified = config.oauth.modifyModels(models, creds);
+    const modified = config.oauth.modifyModels(sampleKiroModels, creds);
 
-    expect(modified).toHaveLength(models.length);
+    expect(modified).toHaveLength(sampleKiroModels.length);
     expect(modified.every((model: { kiroProfileArn?: string }) => model.kiroProfileArn === profileArn)).toBe(true);
   });
 
@@ -385,11 +450,10 @@ describe("Feature 1: Extension Registration", () => {
     await mod.default(pi);
 
     const config = registerProvider.mock.calls[0][1];
-    const models = kiroModels.map((m) => ({ ...m, provider: "kiro", api: "kiro-api", baseUrl: "old" }));
     const creds = { access: "x", refresh: "x", expires: 0, clientId: "", clientSecret: "", region: "eu-west-1" };
-    const modified = config.oauth.modifyModels(models, creds);
+    const modified = config.oauth.modifyModels(sampleKiroModels, creds);
     const ids = modified.map((m: { id: string }) => m.id);
-    expect(modified).toHaveLength(models.length);
+    expect(modified).toHaveLength(sampleKiroModels.length);
     expect(ids).toContain("deepseek-3-2");
     expect(ids).toContain("claude-sonnet-4-6");
   });
@@ -400,7 +464,6 @@ describe("Feature 1: Extension Registration", () => {
     await mod.default(pi);
 
     const config = registerProvider.mock.calls[0][1];
-    const kiro = kiroModels.map((m) => ({ ...m, provider: "kiro", api: "kiro-api", baseUrl: "old" }));
     const codex = [
       {
         id: "gpt-5.4",
@@ -411,7 +474,7 @@ describe("Feature 1: Extension Registration", () => {
       },
     ];
     const creds = { access: "x", refresh: "x", expires: 0, clientId: "", clientSecret: "", region: "eu-west-1" };
-    const modified = config.oauth.modifyModels([...kiro, ...codex], creds);
+    const modified = config.oauth.modifyModels([...sampleKiroModels, ...codex], creds);
 
     expect(modified).toEqual(
       expect.arrayContaining([
