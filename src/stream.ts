@@ -29,7 +29,7 @@ import {
   getKiroEffortConfig,
   type KiroAdditionalModelRequestFields,
 } from "./effort.js";
-import { getKiroEndpoints, getKiroRegionFromEndpoint } from "./endpoints.js";
+import { getKiroEndpoints, getKiroRegionFromEndpoint, getKiroRegionFromProfileArn } from "./endpoints.js";
 import { extractKiroReasonCode, KiroApiError, parseRetryAfterMs } from "./errors.js";
 import { type KiroErrorData, type KiroUsageData, parseKiroEvent, parseKiroExceptionFrame } from "./event-parser.js";
 import {
@@ -456,7 +456,6 @@ function streamKiroWithUsageTracking(
         additionalModelRequestFieldsSchema?: Record<string, unknown>;
       };
       const region = modelMetadata.kiroRegion ?? getKiroRegionFromEndpoint(model.baseUrl) ?? "us-east-1";
-      const endpoint = new URL("generateAssistantResponse", getKiroEndpoints(region).runtime).toString();
       let managementAuth: KiroManagementAuth = { accessToken, region };
 
       const optionProfileArn =
@@ -489,12 +488,20 @@ function streamKiroWithUsageTracking(
           (skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth));
       }
 
+      // ListAvailableProfiles probes across regions (#104, #131), so an SSO login
+      // in one region can legitimately resolve a profile owned by another. The
+      // runtime host and the catalog have to follow the profile: sending a
+      // cross-region profile ARN to the runtime API fails the whole request with
+      // a generic `Improperly formed request.`.
+      let runtimeRegion = getKiroRegionFromProfileArn(profileArn) ?? region;
+      let endpoint = new URL("generateAssistantResponse", getKiroEndpoints(runtimeRegion).runtime).toString();
+
       // Trigger dynamic models cache update in the background if empty or stale
       const { isCacheStale, updateKiroModelsCache } = await import("./models.js");
-      if (!process.env.VITEST && isCacheStale(region)) {
-        updateKiroModelsCache(accessToken, region, profileArn).catch((error) => {
+      if (!process.env.VITEST && isCacheStale(runtimeRegion)) {
+        updateKiroModelsCache(accessToken, runtimeRegion, profileArn).catch((error) => {
           console.warn(
-            `[pi-provider-kiro] Failed to refresh Kiro model catalog in ${region}: ${formatSafeError(error)}`,
+            `[pi-provider-kiro] Failed to refresh Kiro model catalog in ${runtimeRegion}: ${formatSafeError(error)}`,
           );
         });
       }
@@ -981,6 +988,10 @@ function streamKiroWithUsageTracking(
                 freshCreds?.profileArn ||
                 inheritedDesktopProfileArn ||
                 (skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth));
+              // A replacement credential can carry a profile in another region,
+              // so re-pin the runtime host before retrying.
+              runtimeRegion = getKiroRegionFromProfileArn(profileArn) ?? region;
+              endpoint = new URL("generateAssistantResponse", getKiroEndpoints(runtimeRegion).runtime).toString();
               const delayMs = exponentialBackoff(retryCount - 1, 500, MAX_RETRY_DELAY);
               await abortableDelay(delayMs, options?.signal);
               break; // break inner loop, continue outer loop

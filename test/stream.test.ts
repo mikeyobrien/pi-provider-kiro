@@ -752,6 +752,51 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
+  it("sends the runtime request to the resolved profile's region, not the SSO-derived region", async () => {
+    resetProfileArnCache(false);
+    // IAM Identity Center in us-east-1 with the Kiro profile in eu-central-1:
+    // ListAvailableProfiles is regional, so us-east-1 comes back empty and the
+    // profile is found in eu-central-1. The runtime call has to follow the
+    // profile, or Kiro rejects the cross-region ARN with "Improperly formed
+    // request.".
+    const testArn = "arn:aws:codewhisperer:eu-central-1:123:profile/TEST";
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ profiles: [] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ profiles: [{ arn: testArn }] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi
+              .fn()
+              .mockResolvedValueOnce({
+                done: false,
+                value: encodeBody('{"content":"Hi"}{"contextUsagePercentage":5}'),
+              })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+            releaseLock: () => {},
+          }),
+        },
+      });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+
+    expect(mockFetch.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
+    expect(mockFetch.mock.calls[1][0]).toBe("https://management.eu-central-1.kiro.dev/List-Available-Profiles");
+    expect(mockFetch.mock.calls[2][0]).toBe("https://runtime.eu-central-1.kiro.dev/generateAssistantResponse");
+    expect(events.find((event) => event.type === "done")).toBeDefined();
+
+    vi.unstubAllGlobals();
+  });
+
   it("sets stopReason to toolUse when tool calls are present", async () => {
     const toolPayload = '{"name":"bash","toolUseId":"tc1","input":"{\\"cmd\\":\\"ls\\"}","stop":true}';
     const mockFetch = mockFetchOk(`${toolPayload}{"contextUsagePercentage":20}`);
