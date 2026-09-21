@@ -51,8 +51,8 @@ function fencedRanges(text: string): Array<{ start: number; end: number }> {
  *   { "name": "...", "input": { ... } }
  *   { "name": "...", "arguments": { ... } }
  */
-function normalizeDescriptor(value: unknown): { name: string; arguments: Record<string, unknown> } | null {
-  if (typeof value !== "object" || value === null) return null;
+function normalizeOne(value: unknown): { name: string; arguments: Record<string, unknown> } | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
 
   const rawName = record.tool_name ?? record.name;
@@ -68,6 +68,32 @@ function normalizeDescriptor(value: unknown): { name: string; arguments: Record<
   if (typeof rawArgs !== "object" || rawArgs === null || Array.isArray(rawArgs)) return null;
 
   return { name: rawName, arguments: rawArgs as Record<string, unknown> };
+}
+
+/**
+ * Extracts every tool descriptor from a parsed `<tool_use>` JSON payload.
+ *
+ * Handles both a bare single descriptor and the array-wrapped forms some
+ * models emit, where the payload is `{ "tool_calls": [ {…}, {…} ] }` or
+ * `{ "calls": [ … ] }`. Returns an empty array when nothing well-formed is
+ * present, which the caller treats as "leave this block untouched".
+ */
+function extractDescriptors(value: unknown): Array<{ name: string; arguments: Record<string, unknown> }> {
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>;
+    const wrapped = record.tool_calls ?? record.calls;
+    if (Array.isArray(wrapped)) {
+      const out: Array<{ name: string; arguments: Record<string, unknown> }> = [];
+      for (const entry of wrapped) {
+        const one = normalizeOne(entry);
+        if (one === null) return []; // A malformed entry rejects the whole block.
+        out.push(one);
+      }
+      return out;
+    }
+  }
+  const single = normalizeOne(value);
+  return single ? [single] : [];
 }
 
 /**
@@ -118,22 +144,24 @@ export function parseToolUseCalls(text: string): ToolUseParseResult {
       continue;
     }
 
-    let descriptor: { name: string; arguments: Record<string, unknown> } | null = null;
+    let descriptors: Array<{ name: string; arguments: Record<string, unknown> }> = [];
     try {
-      descriptor = normalizeDescriptor(JSON.parse(text.substring(braceStart, braceEnd + 1)));
+      descriptors = extractDescriptors(JSON.parse(text.substring(braceStart, braceEnd + 1)));
     } catch {
-      descriptor = null;
+      descriptors = [];
     }
-    if (descriptor === null) {
+    if (descriptors.length === 0) {
       cursor = closeIdx + CLOSE_TAG.length;
       continue;
     }
 
-    toolCalls.push({
-      toolUseId: crypto.randomUUID(),
-      name: descriptor.name,
-      arguments: descriptor.arguments,
-    });
+    for (const descriptor of descriptors) {
+      toolCalls.push({
+        toolUseId: crypto.randomUUID(),
+        name: descriptor.name,
+        arguments: descriptor.arguments,
+      });
+    }
     removals.push({ start: openStart, end: closeIdx + CLOSE_TAG.length });
     cursor = closeIdx + CLOSE_TAG.length;
   }

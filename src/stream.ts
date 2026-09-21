@@ -69,6 +69,7 @@ import {
 import { ThinkingTagParser } from "./thinking-parser.js";
 import { kiroTokenTypeHeaders } from "./token-type.js";
 import { countTokens } from "./tokenizer.js";
+import { normalizeToolName } from "./tool-name-aliases.js";
 import { parseToolUseCalls } from "./tool-use-parser.js";
 import {
   buildHistory,
@@ -385,7 +386,12 @@ function emitToolCall(
   }
 
   const contentIndex = output.content.length;
-  const toolCall: ToolCall = { type: "toolCall", id: state.toolUseId, name: state.name, arguments: args };
+  const toolCall: ToolCall = {
+    type: "toolCall",
+    id: state.toolUseId,
+    name: normalizeToolName(state.name),
+    arguments: args,
+  };
   output.content.push(toolCall);
   stream.push({ type: "toolcall_start", contentIndex, partial: output });
   stream.push({ type: "toolcall_delta", contentIndex, delta: state.input, partial: output });

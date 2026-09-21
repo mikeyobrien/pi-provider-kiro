@@ -58,6 +58,32 @@ describe("parseToolUseCalls", () => {
     expect(result.toolCalls[0].arguments).toEqual({ cmd: 'echo "{}"' });
   });
 
+  it("unwraps a tool_calls array wrapper", () => {
+    const text =
+      '<tool_use>\n{"tool_calls": [{"tool_name": "read_file", "input": {"path": "/tmp/x.txt"}}]}\n</tool_use>';
+    const result = parseToolUseCalls(text);
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls[0].name).toBe("read_file");
+    expect(result.toolCalls[0].arguments).toEqual({ path: "/tmp/x.txt" });
+    expect(result.cleanedText).toBe("");
+  });
+
+  it("unwraps multiple entries in a tool_calls array", () => {
+    const text =
+      '<tool_use>{"tool_calls": [{"name": "read", "input": {"path": "a"}}, {"name": "write", "input": {"path": "b"}}]}</tool_use>';
+    const result = parseToolUseCalls(text);
+    expect(result.toolCalls).toHaveLength(2);
+    expect(result.toolCalls[0].name).toBe("read");
+    expect(result.toolCalls[1].name).toBe("write");
+  });
+
+  it("rejects a tool_calls array containing a malformed entry", () => {
+    const text = '<tool_use>{"tool_calls": [{"name": "read", "input": {}}, {"input": {}}]}</tool_use>';
+    const result = parseToolUseCalls(text);
+    expect(result.toolCalls).toHaveLength(0);
+    expect(result.cleanedText).toBe(text);
+  });
+
   it("returns untouched when no tool_use blocks are present", () => {
     const text = "Just regular prose with no tool calls.";
     const result = parseToolUseCalls(text);
