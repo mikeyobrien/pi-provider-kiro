@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Replay pi 0.86 transcript system messages into Kiro's system prompt and active tools, including prompt-section changes and tool additions/removals. Previously these were silently omitted because the provider only read the legacy top-level context fields. Older pi contexts remain supported ([#161](https://github.com/mikeyobrien/pi-provider-kiro/issues/161)).
 - Clear the first-token timeout timer once the race is decided. The losing `setTimeout` of the first-token `Promise.race` was never cleared, so every completed request kept a ref'd 90 s timer pending that held the Node event loop open — `pi -p` and SDK embeds sat idle for up to 90 s after the answer printed ([#154](https://github.com/mikeyobrien/pi-provider-kiro/issues/154)).
 - Keep version dots in generated display names for catalog models missing from the bootstrap list. The name was derived from the pi ID, where `toPiModelId` had already rewritten `5.1` as `5-1`, so `claude-fable-5.1` rendered as "Claude Fable 5 1"; it now reads "Claude Fable 5.1".
 

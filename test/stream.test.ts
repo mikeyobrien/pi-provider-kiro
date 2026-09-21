@@ -15,7 +15,7 @@ import { resetCacheEstimatorForTests } from "../src/cache-estimator.js";
 import { validateKiroConversation, validateKiroToolStructure } from "../src/history-validator.js";
 import { capacityRetryConfig, retryConfig } from "../src/retry.js";
 import { createKiroStream, resetProfileArnCache, streamKiro } from "../src/stream.js";
-import { EMPTY_CONTENT_PLACEHOLDER, type KiroHistoryEntry } from "../src/transform.js";
+import { EMPTY_CONTENT_PLACEHOLDER, type KiroHistoryEntry, type KiroInputContext } from "../src/transform.js";
 import type { KiroUsageTracking } from "../src/usage-tracking.js";
 import {
   concatMessages,
@@ -254,6 +254,31 @@ describe("Feature 9: Streaming Integration", () => {
     const error = events.find((e) => e.type === "error");
     expect(error).toBeDefined();
     expect(error?.type === "error" && error.error.stopReason).toBe("aborted");
+  });
+
+  it("sends Pi 0.86 transcript prompt sections and active tools to Kiro", async () => {
+    const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":10}');
+    vi.stubGlobal("fetch", mockFetch);
+    const context: KiroInputContext = {
+      messages: [
+        {
+          role: "system",
+          content: "",
+          sections: { preamble: "SYSTEM_SENTINEL_161" },
+          toolsAdded: [{ name: "read", description: "Read", parameters: { type: "object", properties: {} } }],
+          timestamp: 0,
+        },
+        { role: "user", content: "hello", timestamp: 1 },
+      ],
+    };
+    // The dev dependency predates SystemMessage; this is the newer host's runtime input.
+    const events = await collect(streamKiro(makeModel(), context as Context, { apiKey: "test-token" }));
+    expect(events.some((event) => event.type === "done")).toBe(true);
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(JSON.stringify(body)).toContain("SYSTEM_SENTINEL_161");
+    expect(body.conversationState.currentMessage.userInputMessage.userInputMessageContext.tools).toEqual([
+      expect.objectContaining({ toolSpecification: expect.objectContaining({ name: "read" }) }),
+    ]);
   });
 
   it("makes POST to correct endpoint with auth header", async () => {

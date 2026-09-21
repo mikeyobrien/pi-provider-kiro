@@ -79,6 +79,7 @@ import {
   type KiroToolResult,
   type KiroToolSpec,
   type KiroUserInputMessage,
+  normalizeKiroContext,
   normalizeMessages,
   relocateDisplacedToolResults,
   sanitizeSurrogates,
@@ -420,6 +421,7 @@ function streamKiroWithUsageTracking(
   context: Context,
   options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
+  context = normalizeKiroContext(context);
   // pi-ai's barrel re-exports the class as type-only before the runtime class re-export, so
   // a named import of AssistantMessageEventStream resolves to a type. Read it from the
   // namespace import to get the actual constructor. Replaces the removed

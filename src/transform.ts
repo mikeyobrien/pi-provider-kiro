@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 
 import type {
   AssistantMessage,
+  Context,
   ImageContent,
   Message,
   TextContent,
@@ -53,6 +54,49 @@ export interface KiroHistoryEntry {
  * the transport boundary. Raw application roles remain the host's concern. */
 type DeveloperMessage = Omit<UserMessage, "role"> & { role: "developer" };
 type KiroInputMessage = Message | DeveloperMessage;
+
+// Pi 0.86 moves prompt sections and tool deltas into system messages. Keep this
+// structural type local so the provider still builds/runs with Pi 0.80.10, whose
+// pi-ai package has neither SystemMessage nor the transcript replay helpers.
+interface KiroSystemMessage {
+  role: "system";
+  content: string | TextContent[];
+  sections?: Record<string, string | null>;
+  toolsAdded?: Tool[];
+  toolsRemoved?: { name: string }[];
+  timestamp: number;
+}
+
+export type KiroInputContext = Omit<Context, "messages"> & {
+  messages: (Message | KiroSystemMessage)[];
+};
+
+/** Replay Pi's system/tool updates into Kiro's single prompt and active tool set. */
+export function normalizeKiroContext(context: KiroInputContext): Context {
+  const prompt = context.systemPrompt ? [context.systemPrompt] : [];
+  const sections = new Map<string, string>();
+  const tools = new Map((context.tools ?? []).map((tool) => [tool.name, tool]));
+  const messages: Message[] = [];
+  for (const message of context.messages) {
+    if (message.role !== "system") {
+      messages.push(message);
+      continue;
+    }
+    const text = typeof message.content === "string" ? message.content : message.content.map((b) => b.text).join("\n");
+    if (text) prompt.push(text);
+    for (const [name, value] of Object.entries(message.sections ?? {})) {
+      if (value === null) sections.delete(name);
+      else sections.set(name, value);
+    }
+    for (const tool of message.toolsRemoved ?? []) tools.delete(tool.name);
+    for (const tool of message.toolsAdded ?? []) tools.set(tool.name, tool);
+  }
+  return {
+    systemPrompt: [...prompt, ...sections.values()].filter(Boolean).join("\n\n"),
+    tools: [...tools.values()],
+    messages,
+  };
+}
 
 export const TOOL_RESULT_LIMIT = 250000;
 
