@@ -14,9 +14,34 @@ export interface ToolUseParseResult {
   cleanedText: string;
 }
 
-const OPEN_TAG = "<tool_use>";
-const CLOSE_TAG = "</tool_use>";
+// Known wrapper tags models emit around a JSON tool descriptor. Order does not
+// matter; the parser scans for whichever opens earliest at each position.
+const TAG_NAMES = ["tool_use", "tool_call", "function_call", "tool"] as const;
 const FENCE = "```";
+
+interface TagHit {
+  openStart: number;
+  bodyStart: number;
+  closeIdx: number;
+  closeEnd: number;
+}
+
+/** Finds the earliest wrapper-tag block at or after `from`, or null. */
+function nextTagBlock(text: string, from: number): TagHit | null {
+  let best: TagHit | null = null;
+  for (const name of TAG_NAMES) {
+    const open = `<${name}>`;
+    const close = `</${name}>`;
+    const openStart = text.indexOf(open, from);
+    if (openStart < 0) continue;
+    if (best && openStart >= best.openStart) continue;
+    const bodyStart = openStart + open.length;
+    const closeIdx = text.indexOf(close, bodyStart);
+    if (closeIdx < 0) continue;
+    best = { openStart, bodyStart, closeIdx, closeEnd: closeIdx + close.length };
+  }
+  return best;
+}
 
 /**
  * Byte ranges covered by an *opened* fenced code block. Mirrors the guard in
@@ -110,8 +135,9 @@ export function parseToolUseCalls(text: string): ToolUseParseResult {
 
   let cursor = 0;
   while (cursor < text.length) {
-    const openStart = text.indexOf(OPEN_TAG, cursor);
-    if (openStart < 0) break;
+    const hit = nextTagBlock(text, cursor);
+    if (hit === null) break;
+    const { openStart, bodyStart, closeIdx, closeEnd } = hit;
 
     const containingFence = fences.find((range) => openStart >= range.start && openStart < range.end);
     if (containingFence) {
@@ -119,20 +145,16 @@ export function parseToolUseCalls(text: string): ToolUseParseResult {
       continue;
     }
 
-    const bodyStart = openStart + OPEN_TAG.length;
-    const closeIdx = text.indexOf(CLOSE_TAG, bodyStart);
-    if (closeIdx < 0) break; // No closing tag: nothing well-formed remains.
-
     // Locate the JSON object inside the block by balanced braces, so a `}`
     // inside a string value does not prematurely end extraction.
     const braceStart = text.indexOf("{", bodyStart);
     if (braceStart < 0 || braceStart > closeIdx) {
-      cursor = closeIdx + CLOSE_TAG.length;
+      cursor = closeEnd;
       continue;
     }
     const braceEnd = findJsonEnd(text, braceStart);
     if (braceEnd < 0 || braceEnd > closeIdx) {
-      cursor = closeIdx + CLOSE_TAG.length;
+      cursor = closeEnd;
       continue;
     }
 
@@ -140,7 +162,7 @@ export function parseToolUseCalls(text: string): ToolUseParseResult {
     const beforeJson = text.substring(bodyStart, braceStart).trim();
     const afterJson = text.substring(braceEnd + 1, closeIdx).trim();
     if (beforeJson.length > 0 || afterJson.length > 0) {
-      cursor = closeIdx + CLOSE_TAG.length;
+      cursor = closeEnd;
       continue;
     }
 
@@ -151,7 +173,7 @@ export function parseToolUseCalls(text: string): ToolUseParseResult {
       descriptors = [];
     }
     if (descriptors.length === 0) {
-      cursor = closeIdx + CLOSE_TAG.length;
+      cursor = closeEnd;
       continue;
     }
 
@@ -162,8 +184,8 @@ export function parseToolUseCalls(text: string): ToolUseParseResult {
         arguments: descriptor.arguments,
       });
     }
-    removals.push({ start: openStart, end: closeIdx + CLOSE_TAG.length });
-    cursor = closeIdx + CLOSE_TAG.length;
+    removals.push({ start: openStart, end: closeEnd });
+    cursor = closeEnd;
   }
 
   // Splice out consumed spans in reverse order so earlier indices stay valid.

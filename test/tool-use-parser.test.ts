@@ -132,6 +132,36 @@ describe("parseToolUseCalls", () => {
     expect(result.cleanedText).toBe("");
   });
 
+  it("recovers the <tool_call> tag with name/arguments (opus variant)", () => {
+    const text =
+      '<tool_call>\n{"name": "write_file", "arguments": {"file_path": "/tmp/abc.txt", "content": "test123\\n"}}\n</tool_call>';
+    const result = parseToolUseCalls(text);
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls[0].name).toBe("write_file");
+    expect(result.toolCalls[0].arguments).toEqual({ file_path: "/tmp/abc.txt", content: "test123\n" });
+    expect(result.cleanedText).toBe("");
+  });
+
+  it("recovers <function_call> and <tool> tags", () => {
+    const fc = parseToolUseCalls('<function_call>{"name": "read", "arguments": {"path": "a"}}</function_call>');
+    expect(fc.toolCalls).toHaveLength(1);
+    expect(fc.toolCalls[0].name).toBe("read");
+    const t = parseToolUseCalls('<tool>{"name": "bash", "input": {"cmd": "ls"}}</tool>');
+    expect(t.toolCalls).toHaveLength(1);
+    expect(t.toolCalls[0].name).toBe("bash");
+  });
+
+  it("recovers mixed tag dialects in one text", () => {
+    const text =
+      '<tool_use>{"name": "read", "input": {"path": "a"}}</tool_use> and ' +
+      '<tool_call>{"name": "write", "arguments": {"path": "b"}}</tool_call>';
+    const result = parseToolUseCalls(text);
+    expect(result.toolCalls).toHaveLength(2);
+    expect(result.toolCalls[0].name).toBe("read");
+    expect(result.toolCalls[1].name).toBe("write");
+    expect(result.cleanedText).toBe(" and ");
+  });
+
   it("assigns unique toolUseIds to each call", () => {
     const text = '<tool_use>{"name": "a", "input": {}}</tool_use><tool_use>{"name": "b", "input": {}}</tool_use>';
     const result = parseToolUseCalls(text);
