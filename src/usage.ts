@@ -70,6 +70,9 @@ export interface KiroProviderUsageBucket {
   resourceType?: string;
   usedDisplay: string;
   limitDisplay?: string;
+  /** Raw numeric used/limit, retained so consumers can compute a percentage without parsing display strings. */
+  used?: number;
+  limit?: number;
   unit?: string;
   overagesDisplay?: string;
   overageChargesDisplay?: string;
@@ -122,6 +125,8 @@ function mapBucket(bucket: KiroUsageBreakdown, index: number): KiroProviderUsage
     resourceType: bucket.resourceType,
     usedDisplay: formatCount(used) || "0",
     limitDisplay: formatCount(limit),
+    used: typeof used === "number" && Number.isFinite(used) ? used : undefined,
+    limit: typeof limit === "number" && Number.isFinite(limit) ? limit : undefined,
     unit: bucket.unit,
     overagesDisplay: overages && overages > 0 ? formatCount(overages) : undefined,
     overageChargesDisplay: formatMoney(bucket.overageCharges, bucket.currency),

@@ -6,12 +6,15 @@ import type { Api, Model, OAuthCredentials, RefreshModelsContext } from "@earend
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { formatSafeError } from "./debug.js";
 import { getKiroEndpoints, resolveApiRegion } from "./endpoints.js";
+import { loadKiroFooterConfig } from "./footer.js";
+import { registerKiroUsageFooter } from "./footer-lifecycle.js";
 import { getKiroCliCredentials, getKiroCliSocialToken } from "./kiro-cli.js";
 import { getKiroIdeCredentials } from "./kiro-ide.js";
 import { setExtensionContext } from "./login-ui.js";
 import { getCachedModels, isCacheStale, type KiroModel, kiroModels, updateKiroModelsCache } from "./models.js";
 import type { KiroCredentials } from "./oauth.js";
 import { loginKiro, refreshKiroToken } from "./oauth.js";
+import { getPiHostKiroCredentials } from "./pi-auth-store.js";
 import { createKiroStream } from "./stream.js";
 import { fetchKiroUsage } from "./usage.js";
 import { loadKiroUsageTracking } from "./usage-tracking.js";
@@ -80,6 +83,21 @@ function resolveLocalCredential(): KiroRefreshCredential {
     console.warn(`[pi-provider-kiro] Failed to read local Kiro credentials: ${formatSafeError(error)}`);
     return undefined;
   }
+}
+
+/**
+ * Resolve local credentials in OAuth form for footer usage lookups. Usage limits
+ * require an access token + region + profile ARN, so a bare API-key credential
+ * (which has no profile ARN to query) yields undefined and the footer stays hidden.
+ *
+ * Prefers pi's own persisted credential (~/.pi/agent/auth.json) since that is the
+ * one pi hands the provider at runtime; a kiro-cli/IDE credential may not exist.
+ */
+function resolveOAuthCredential(): OAuthCredentials | undefined {
+  const hostCredential = getPiHostKiroCredentials();
+  if (hostCredential) return hostCredential as OAuthCredentials;
+  const credential = resolveLocalCredential();
+  return credential && "access" in credential ? (credential as OAuthCredentials) : undefined;
 }
 
 function credentialRegion(credential: KiroRefreshCredential): string {
@@ -155,6 +173,15 @@ export default function (pi: ExtensionAPI) {
   // Capture ctx for the custom TUI login component
   pi.on("session_start", async (_event, ctx) => {
     setExtensionContext(ctx);
+  });
+
+  // Opt-in footer that shows Kiro allowance used. Kept behind a settings flag and
+  // wired through injectable seams so a usage hiccup can never disrupt a session.
+  registerKiroUsageFooter(pi, {
+    statusKey: "kiro-usage",
+    loadConfig: loadKiroFooterConfig,
+    resolveCredential: resolveOAuthCredential,
+    fetchUsage: fetchKiroUsage,
   });
 
   const credential = resolveLocalCredential();

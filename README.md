@@ -97,6 +97,20 @@ Kiro reports an exact credit count for completed turns, but not a per-turn USD c
 
 These values are estimates, not wire truth, invoices, or confirmed marginal charges. Credits included in a subscription may have no marginal cost, and estimated cache usage does not prove that Kiro served a backend cache hit. Tracking is disabled by default, and invalid settings fail closed for the affected estimate. Pi's HTML session export currently recomputes component costs and may therefore show `$0`; cost dashboards and summaries that read `usage.cost.total` show the dollar-value estimate.
 
+### Usage in the footer
+
+Opt in to a compact allowance indicator in Pi's footer while a Kiro model is active:
+
+```json
+{
+  "pi-provider-kiro": {
+    "showUsageInFooter": true
+  }
+}
+```
+
+The badge shows the percent of your allowance **used** (e.g. `◆ Kiro 1%`), colored by consumption — comfortable below 70%, warning at 70%, and critical at 90%. It refreshes on session start, model switches, and after completed Kiro turns, throttled to avoid extra requests. It stays hidden for non-Kiro models, when no local Kiro credential is available, or if a usage lookup fails, and is disabled by default.
+
 ## Retry Behavior
 
 Generic transient retries such as HTTP `429` and `5xx` are handled by `pi-coding-agent` at the session layer.
