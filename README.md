@@ -181,3 +181,17 @@ See [AGENTS.md](AGENTS.md) for detailed development guidance and [.agents/summar
 ## License
 
 MIT
+
+### Optional request pacing
+
+Set `KIRO_REQUEST_PACING=on` to space request starts after an exact
+`USER_REQUEST_RATE_EXCEEDED` response. Pacing is disabled by default. It does not
+change the provider retry budget, the 10-second retry fallback/cap, supported wait
+headers, or handling of generic 429 and 5xx responses.
+
+Opted-in processes share approximate pacing hints in `~/.pi/logs/kiro-pacing.json`.
+This is best-effort coordination across the local user's sessions, not an atomic
+account-wide rate limiter. Set `KIRO_PACING_SHARED=off` for process-local pacing.
+Spacing starts at 200 ms, grows to at most 4 seconds per rejection burst, and
+relaxes after 30 seconds without a rejection. Corrupt or unwritable state falls
+back to process-local pacing. Long-running streams do not hold a concurrency slot.

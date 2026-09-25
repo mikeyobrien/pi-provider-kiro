@@ -13,6 +13,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { findJsonEnd } from "../src/bracket-tool-parser.js";
 import { resetCacheEstimatorForTests } from "../src/cache-estimator.js";
 import { validateKiroConversation, validateKiroToolStructure } from "../src/history-validator.js";
+import { requestPacer } from "../src/pacing.js";
 import { capacityRetryConfig, retryConfig } from "../src/retry.js";
 import { createKiroStream, resetProfileArnCache, streamKiro } from "../src/stream.js";
 import { EMPTY_CONTENT_PLACEHOLDER, type KiroHistoryEntry } from "../src/transform.js";
@@ -6294,4 +6295,38 @@ describe("Feature 9: Streaming Integration", () => {
       vi.unstubAllGlobals();
     });
   }
+  it("paces request starts and penalizes only an exact request-rate rejection", async () => {
+    const acquire = vi.spyOn(requestPacer, "acquire").mockResolvedValue();
+    const penalize = vi.spyOn(requestPacer, "penalize").mockImplementation(() => {});
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce(makeRequestRateResponse({ "retry-after-ms": "0" }))
+      .mockResolvedValueOnce(makeOkResponse('{"content":"ok"}{"contextUsagePercentage":5}'));
+    vi.stubGlobal("fetch", mockFetch);
+    try {
+      const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+      expect(acquire).toHaveBeenCalledTimes(2);
+      expect(penalize).toHaveBeenCalledOnce();
+      expect(events.find((event) => event.type === "done")).toBeDefined();
+    } finally {
+      acquire.mockRestore();
+      penalize.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("leaves generic 429 responses to the caller without widening pacing", async () => {
+    const penalize = vi.spyOn(requestPacer, "penalize").mockImplementation(() => {});
+    const mockFetch = vi.fn().mockResolvedValue(new Response('{"message":"Too many requests"}', { status: 429 }));
+    vi.stubGlobal("fetch", mockFetch);
+    try {
+      const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+      expect(mockFetch).toHaveBeenCalledOnce();
+      expect(penalize).not.toHaveBeenCalled();
+      expect(events.find((event) => event.type === "error")).toBeDefined();
+    } finally {
+      penalize.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
 });

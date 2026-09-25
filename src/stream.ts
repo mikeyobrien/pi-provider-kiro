@@ -53,6 +53,7 @@ import {
 } from "./management.js";
 import { resolveKiroModel } from "./models.js";
 import { kiroAuthHeaders } from "./oauth.js";
+import { requestPacer } from "./pacing.js";
 import {
   capacityRetryConfig,
   exponentialBackoff,
@@ -930,6 +931,7 @@ function streamKiroWithUsageTracking(
             toolResultCount: wireUimc?.toolResults?.length ?? 0,
             request,
           });
+          await requestPacer.acquire(options?.signal);
           const responseHeaderDeadline = createResponseHeaderDeadline(
             options?.signal,
             retryConfig.requestHeaderTimeoutMs,
@@ -1003,6 +1005,7 @@ function streamKiroWithUsageTracking(
               );
             }
             if (isRequestRateExceeded) {
+              requestPacer.penalize();
               if (retryCount >= maxRetries) {
                 throw new Error(
                   `Kiro API error: request window retry budget exhausted (${KIRO_REASON_CODES.USER_REQUEST_RATE_EXCEEDED})`,

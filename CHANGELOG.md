@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in adaptive request pacing via `KIRO_REQUEST_PACING=on`, preserving existing retry classification and wait limits ([#141](https://github.com/mikeyobrien/pi-provider-kiro/pull/141)).
+
 ### Fixed
 
 - Route IAM Identity Center sessions from `sa-east-1` to Kiro's `us-east-1` API region, avoiding catalog refresh requests to the unsupported `management.sa-east-1.kiro.dev` endpoint.
