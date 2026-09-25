@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-09-24
+
 ### Fixed
 
-- Route IAM Identity Center sessions from `sa-east-1` to Kiro's `us-east-1` API region, avoiding catalog refresh requests to the unsupported `management.sa-east-1.kiro.dev` endpoint.
+- Route IAM Identity Center sessions from `sa-east-1` to Kiro's `us-east-1` API region, avoiding catalog refresh requests to the unsupported `management.sa-east-1.kiro.dev` endpoint ([#128](https://github.com/mikeyobrien/pi-provider-kiro/pull/128)).
 
 ## [0.12.0] - 2026-09-22
 
@@ -280,7 +282,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release: 17 models across 7 families, OAuth device code flow, kiro-cli SQLite credential fallback, streaming pipeline with thinking tag parser
 
-[Unreleased]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.10.1...v0.10.2
