@@ -69,6 +69,8 @@ import {
 import { ThinkingTagParser } from "./thinking-parser.js";
 import { kiroTokenTypeHeaders } from "./token-type.js";
 import { countTokens } from "./tokenizer.js";
+import { normalizeToolName } from "./tool-name-aliases.js";
+import { parseToolUseCalls } from "./tool-use-parser.js";
 import {
   buildHistory,
   convertImagesToKiro,
@@ -384,7 +386,12 @@ function emitToolCall(
   }
 
   const contentIndex = output.content.length;
-  const toolCall: ToolCall = { type: "toolCall", id: state.toolUseId, name: state.name, arguments: args };
+  const toolCall: ToolCall = {
+    type: "toolCall",
+    id: state.toolUseId,
+    name: normalizeToolName(state.name),
+    arguments: args,
+  };
   output.content.push(toolCall);
   stream.push({ type: "toolcall_start", contentIndex, partial: output });
   stream.push({ type: "toolcall_delta", contentIndex, delta: state.input, partial: output });
@@ -1458,10 +1465,13 @@ function streamKiroWithUsageTracking(
           textBlockIndex = thinkingParser.getTextBlockIndex();
         }
         // Fallback: extract text-dialect tool calls from content if no native
-        // tool calls arrived. Two dialects are recovered at this seam:
+        // tool calls arrived. Three dialects are recovered at this seam:
         //   1. Kiro's own `[Called name with args: {...}]` bracket form.
         //   2. Anthropic's `<invoke name="..."><parameter .../></invoke>` XML
         //      form, which opus-class models emit as plain text at high context.
+        //   3. The `<tool_use>{JSON}</tool_use>` form, another shape opus-class
+        //      models fall back to (JSON descriptor with tool_name/tool_input,
+        //      name/input, or name/arguments field spellings).
         // Without this, the turn ends `stopReason:"stop"` with zero tool calls —
         // the agent loop sees a finished answer and an unattended session stalls
         // indefinitely with no error recorded anywhere.
@@ -1484,6 +1494,11 @@ function streamKiroWithUsageTracking(
           if (invokeResult.toolCalls.length > 0) {
             textBlock.text = invokeResult.cleanedText;
             recovered.push(...invokeResult.toolCalls);
+          }
+          const toolUseResult = parseToolUseCalls(textBlock.text);
+          if (toolUseResult.toolCalls.length > 0) {
+            textBlock.text = toolUseResult.cleanedText;
+            recovered.push(...toolUseResult.toolCalls);
           }
           if (recovered.length > 0) {
             sawAnyToolCalls = true;
