@@ -27,6 +27,11 @@ import { parseBracketToolCalls } from "./bracket-tool-parser.js";
 import { applyCacheEstimate } from "./cache-estimator.js";
 import { debugEnabled, debugLog, formatSafeError, redactSensitiveText } from "./debug.js";
 import {
+  createKiroTurnProvenanceDiagnostic,
+  type KiroStopReasonSource,
+  type KiroUsageProvenance,
+} from "./diagnostics.js";
+import {
   buildKiroAdditionalModelRequestFields,
   getKiroEffortConfig,
   type KiroAdditionalModelRequestFields,
@@ -66,6 +71,7 @@ import {
   resolveRequestRateRetryDelay,
   retryConfig,
 } from "./retry.js";
+import { mapModeledStopReason } from "./stop-reason.js";
 import { ThinkingTagParser } from "./thinking-parser.js";
 import { kiroTokenTypeHeaders } from "./token-type.js";
 import { countTokens } from "./tokenizer.js";
@@ -641,7 +647,17 @@ function streamKiroWithUsageTracking(
       // echo-loop retry check. Clearing at the attempt boundary keeps the whole
       // usage block sourced from one attempt, matching how `usageEvent` itself
       // is scoped per attempt.
+      //
+      // `usageProvenance` records, per slot, which source wrote the figure now on
+      // `output.usage` — a slot the wire measured, one back-computed from another
+      // wire figure, or one invented locally. It is filled at the same sites that
+      // write the numbers so it cannot disagree with them, and cleared with them
+      // so a retried attempt never inherits the abandoned attempt's claims. It is
+      // NOT written onto `output.usage`: pi's `Usage` has no slot for it, and the
+      // provenance diagnostic appended after the turn settles is its channel out.
+      let usageProvenance: KiroUsageProvenance = {};
       const resetAttemptUsage = () => {
+        usageProvenance = {};
         output.usage.input = 0;
         output.usage.output = 0;
         output.usage.cacheRead = 0;
@@ -1127,7 +1143,14 @@ function streamKiroWithUsageTracking(
         let lastContentData = "";
         let usageEvent: KiroUsageData | null = null;
         let meteringEvent: { credits?: number; unit?: string } | null = null;
-        let receivedContextUsage = false;
+        // True once a frame arrived that says the turn reached a settled state
+        // rather than being cut off mid-flight: a contextUsageEvent or a
+        // metadataEvent. Distinct from the numbers those frames carry — this is
+        // purely the "the service got to the end of this turn" signal that the
+        // no-modeled-stop-reason fallback needs. It used to be spelled
+        // `receivedContextUsage`, which conflated the two and left every
+        // metadataEvent-only stream looking truncated.
+        let sawSettlingFrame = false;
         const thinkingParser = thinkingEnabled ? new ThinkingTagParser(output, stream) : null;
         let nativeThinkingBlockIndex: number | null = null;
         let nativeThinkingEnded = false;
@@ -1322,8 +1345,12 @@ function streamKiroWithUsageTracking(
             case "contextUsage": {
               const pct = event.data.contextUsagePercentage;
               output.usage.input = Math.round((pct / 100) * model.contextWindow);
+              // Back-computed from a percentage the service rounded, over the
+              // catalog's context window rather than the service's: a real wire
+              // figure underneath, but not the count itself.
+              usageProvenance.input = "derived";
               (output.usage as unknown as Record<string, unknown>).contextPercent = pct;
-              receivedContextUsage = true;
+              sawSettlingFrame = true;
               break;
             }
             case "thinkingText": {
@@ -1391,6 +1418,7 @@ function streamKiroWithUsageTracking(
               // later partial frame cannot erase counts already received.
               const prev: KiroUsageData = usageEvent ?? {};
               usageEvent = { ...prev, ...event.data };
+              sawSettlingFrame = true;
               break;
             }
             case "metering": {
@@ -1547,18 +1575,54 @@ function streamKiroWithUsageTracking(
         // `calculateCost` prices all three separately. So the cache counts must
         // land whenever `input` is taken from the wire; otherwise a cached turn
         // reports a fraction of its real input and is priced far too low.
-        if (usageEvent?.inputTokens !== undefined) output.usage.input = usageEvent.inputTokens;
+        //
+        // Each write below also stamps `usageProvenance` for its slot. A measured
+        // count overwrites a derived one (the contextUsage-derived `input` yields
+        // to the wire's `uncachedInputTokens`); the reverse never happens because
+        // the derived write happened earlier in the stream.
+        if (usageEvent?.inputTokens !== undefined) {
+          output.usage.input = usageEvent.inputTokens;
+          usageProvenance.input = "measured";
+        }
+        // `cache` is one slot for both legs: the service reports them together,
+        // and a turn that omitted both is "never told", not "measured zero".
+        if (usageEvent?.cacheReadInputTokens !== undefined || usageEvent?.cacheWriteInputTokens !== undefined) {
+          usageProvenance.cache = "measured";
+        }
         if (usageEvent?.cacheReadInputTokens !== undefined) output.usage.cacheRead = usageEvent.cacheReadInputTokens;
         if (usageEvent?.cacheWriteInputTokens !== undefined) output.usage.cacheWrite = usageEvent.cacheWriteInputTokens;
-        output.usage.output = usageEvent?.outputTokens ?? countTokens(totalContent);
+        if (usageEvent?.outputTokens !== undefined) {
+          output.usage.output = usageEvent.outputTokens;
+          usageProvenance.output = "measured";
+        } else {
+          output.usage.output = countTokens(totalContent);
+          usageProvenance.output = "estimated";
+        }
         // `TokenUsage.totalTokens` is required on the wire while the cache counts
         // are optional, so the service's own total is the authoritative figure —
         // recomputing from components silently under-reports whenever a component
         // is omitted. Prefer it and fall back to the sum, matching how pi's
         // bedrock adapter treats the one other wire that supplies a total.
-        output.usage.totalTokens =
-          usageEvent?.totalTokens ??
-          output.usage.input + output.usage.cacheRead + output.usage.cacheWrite + output.usage.output;
+        if (usageEvent?.totalTokens !== undefined) {
+          output.usage.totalTokens = usageEvent.totalTokens;
+          usageProvenance.totalTokens = "measured";
+        } else {
+          output.usage.totalTokens =
+            output.usage.input + output.usage.cacheRead + output.usage.cacheWrite + output.usage.output;
+          // A sum is only as good as its weakest term: `derived` only when all
+          // four addends were reported, `estimated` once any was not — an
+          // estimated output, an input nothing reported, or a cache leg the
+          // service omitted and the attempt reset left at 0. The cache legs are
+          // checked individually: `cache: "measured"` means at least one arrived,
+          // and the other's 0 is an assumption, not a count.
+          usageProvenance.totalTokens =
+            usageProvenance.input === "measured" &&
+            usageProvenance.output === "measured" &&
+            usageEvent?.cacheReadInputTokens !== undefined &&
+            usageEvent?.cacheWriteInputTokens !== undefined
+              ? "derived"
+              : "estimated";
+        }
         try {
           PiAi.calculateCost(model, output.usage);
         } catch {
@@ -1593,12 +1657,46 @@ function streamKiroWithUsageTracking(
         // stall waiting for tool results that will never arrive.
         //
         // Resolved BEFORE the retry-exhaustion warnings below so those warnings can
-        // report the value actually assigned. It reads only `receivedContextUsage`
-        // and `emittedToolCalls`, neither of which the exhaustion branch touches.
-        if (!receivedContextUsage && emittedToolCalls === 0) {
+        // report the value actually assigned. It reads only `emittedToolCalls`,
+        // `usageEvent` and `sawSettlingFrame`, none of which the exhaustion
+        // branch touches.
+        //
+        // Precedence: an emitted tool call outranks everything, because the
+        // deltas are already on the stream and cannot be retracted — the caller
+        // has to be told to run them. Then the service's own
+        // `MetadataEvent.stopReason`, when this peer has a member that means the
+        // same thing. Only then the local reconstruction.
+        const modeledStopReason = mapModeledStopReason(usageEvent?.rawStopReason);
+        // `modeled` only when the emitted value IS the service's statement;
+        // every other path is this provider's own decision and says so.
+        let stopReasonSource: KiroStopReasonSource = "inferred";
+        if (emittedToolCalls > 0) {
+          output.stopReason = "toolUse";
+          // Agrees with the wire only if the service also said TOOL_USE; when it
+          // said something else, the emitted value is this provider's decision.
+          if (modeledStopReason === "toolUse") stopReasonSource = "modeled";
+        } else if (modeledStopReason !== undefined) {
+          // `toolUse` IS reachable here: the service says TOOL_USE and every tool
+          // call it sent was dropped for empty or unparseable input, so
+          // `emittedToolCalls` is 0 while the modeled value still asks for tools.
+          // Emitting `"toolUse"` with no tool call on the message stalls pi's
+          // agent loop waiting for results that will never arrive, so the wire is
+          // overruled. `test/stream.test.ts` pins this case.
+          output.stopReason = modeledStopReason === "toolUse" ? "stop" : modeledStopReason;
+          // The overruled TOOL_USE case emits a value the wire did not say.
+          stopReasonSource = modeledStopReason === "toolUse" ? "inferred" : "modeled";
+        } else if (!sawSettlingFrame) {
+          // No modeled stop reason and nothing to say the turn ever settled:
+          // treat it as cut off. `sawSettlingFrame` — not the old
+          // `receivedContextUsage` — because a metadataEvent settles the turn
+          // just as well, and reading only the contextUsage frame here fabricated
+          // `"length"` on any metadataEvent-only stream. That fabrication is not
+          // cosmetic: it makes wasPreviousResponseTruncated() prepend
+          // TRUNCATION_NOTICE to the next turn, asking the model to continue an
+          // answer it had finished.
           output.stopReason = "length";
         } else {
-          output.stopReason = emittedToolCalls > 0 ? "toolUse" : "stop";
+          output.stopReason = "stop";
         }
         if (degenerate) {
           if (!exhausted) {
@@ -1706,6 +1804,14 @@ function streamKiroWithUsageTracking(
             output.timestamp,
           );
           if (estimatedRead > 0) {
+            // The estimate moved `estimatedRead` tokens out of `input` and into
+            // `cacheRead` with no wire basis (it only runs when the service
+            // reported neither cache leg). Both slots now carry an invented
+            // figure, so the provenance record below must not describe `input`
+            // as measured/derived or leave `cache` absent beside a non-zero
+            // `cacheRead`.
+            usageProvenance.input = "estimated";
+            usageProvenance.cache = "estimated";
             debugLog("usage.estimate", {
               conversationId,
               estimatedRead,
@@ -1716,7 +1822,41 @@ function streamKiroWithUsageTracking(
           const estimatedCost = estimateKiroCreditCost(usageTracking, meteringEvent);
           if (estimatedCost !== undefined) output.usage.cost.total = estimatedCost;
         }
-        stream.push({ type: "done", reason: output.stopReason as "stop" | "toolUse", message: output });
+        // Record where this turn's numbers came from. The usage provenance and
+        // the modeled stop reason are both invisible in the emitted message: the
+        // usage numbers are a flat bag with no room to say whether a figure was
+        // measured or invented, and several `MetadataEvent.stopReason` members
+        // have no slot in pi's `stopReason` vocabulary at this peer (refusals,
+        // PAUSE_TURN, context overflow — see mapModeledStopReason). diagnostics[]
+        // is the only structured channel out of here — streamKiro never rejects,
+        // it encodes outcomes into the stream.
+        try {
+          PiAi.appendAssistantMessageDiagnostic(
+            output,
+            createKiroTurnProvenanceDiagnostic({
+              usage: usageProvenance,
+              stopReason: output.stopReason,
+              stopReasonSource,
+              rawStopReason: usageEvent?.rawStopReason,
+              stopDetails: usageEvent?.stopDetails,
+            }),
+          );
+        } catch (e) {
+          // Observational only. A malformed record must never cost the caller a
+          // turn that otherwise completed.
+          debugLog("diagnostics.failed", { error: formatSafeError(e) });
+        }
+        // `output.stopReason` is the full `StopReason` union; a done event takes
+        // only the three non-failure members, so `error`/`aborted` are excluded.
+        // `"length"` belongs in that set and is a first-class outcome here: a
+        // modeled MAX_TOKENS routes to it, so narrowing the cast to
+        // `"stop" | "toolUse"` would tell a reader this event can never report a
+        // truncation when it routinely does.
+        stream.push({
+          type: "done",
+          reason: output.stopReason as "stop" | "length" | "toolUse",
+          message: output,
+        });
         debugLog("response.done", {
           stopReason: output.stopReason,
           emittedToolCalls,
