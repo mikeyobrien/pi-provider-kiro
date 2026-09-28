@@ -93,7 +93,7 @@ npm run test:watch # vitest (watch mode)
 
 1. Add the Kiro model ID to `KIRO_MODEL_IDS` Set in `src/models.ts`
 2. Add a model definition object to the `kiroModels` array with: id (dash format), name, reasoning, input modalities, contextWindow, maxTokens
-3. Update test counts in `test/models.test.ts` and `test/registration.test.ts`
+3. Update test counts in `test/models.test.ts`
 4. Run `npm test` to verify
 
 ## Common Gotchas
