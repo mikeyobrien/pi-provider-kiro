@@ -57,4 +57,34 @@ describe("host without pi-ai diagnostic helpers (Oh My Pi)", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  // An API key resolves its profile through the management plane before the
+  // runtime call; a failure there must carry its status too.
+  it("sets errorStatus when the management-plane profile lookup fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        statusText: "Bad Request",
+        text: () => Promise.resolve(""),
+        json: () => Promise.reject(new Error("no body")),
+      }),
+    );
+    resetProfileArnCache(false);
+    try {
+      const events = [];
+      for await (const event of streamKiro(model, context, { apiKey: "ksk_invalid" })) events.push(event);
+
+      const errors = events.filter((event) => event.type === "error");
+      expect(errors).toHaveLength(1);
+      const message = (errors[0].type === "error" ? errors[0].error : undefined) as
+        | (AssistantMessage & { errorStatus?: number })
+        | undefined;
+      expect(message?.errorMessage).toContain("Kiro management");
+      expect(message?.errorStatus).toBe(400);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
