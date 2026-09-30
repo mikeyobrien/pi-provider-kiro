@@ -2,6 +2,7 @@ import { rmSync } from "node:fs";
 import type { ProviderModelsStore } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getKiroCliCredentials } from "../src/kiro-cli.js";
 import { getCachedModels, KIRO_MANAGEMENT_CACHE_PATH, type KiroModel, kiroModels } from "../src/models.js";
 
 const credentialMocks = vi.hoisted(() => ({
@@ -70,6 +71,27 @@ describe("Feature 1: Extension Registration", () => {
     rmSync(KIRO_MANAGEMENT_CACHE_PATH, { force: true });
   });
 
+  it("exports a default function", async () => {
+    const mod = await import("../src/index.js");
+    expect(typeof mod.default).toBe("function");
+  });
+
+  // Consumers that classify a reason code without an error instance in hand
+  // (a persisted log line, say) need the vocabulary through the package entry
+  // point, not a deep import into src/retry.js.
+  it("exposes Kiro's reason codes and classification predicates from the entry point", async () => {
+    const mod = await import("../src/index.js");
+    const retry = await import("../src/retry.js");
+
+    expect(mod.KIRO_REASON_CODES).toBe(retry.KIRO_REASON_CODES);
+    expect(mod.TOO_BIG_PATTERNS).toBe(retry.TOO_BIG_PATTERNS);
+    expect(mod.NON_RETRYABLE_BODY_PATTERNS).toBe(retry.NON_RETRYABLE_BODY_PATTERNS);
+    expect(mod.CAPACITY_PATTERN).toBe(retry.CAPACITY_PATTERN);
+    expect(mod.isTooBigError).toBe(retry.isTooBigError);
+    expect(mod.isNonRetryableBodyError).toBe(retry.isNonRetryableBodyError);
+    expect(mod.isCapacityError).toBe(retry.isCapacityError);
+  });
+
   it("keeps predicate behaviour unchanged through the entry point", async () => {
     const { KIRO_REASON_CODES, isCapacityError, isNonRetryableBodyError, isTooBigError } = await import(
       "../src/index.js"
@@ -82,6 +104,25 @@ describe("Feature 1: Extension Registration", () => {
     expect(isNonRetryableBodyError(KIRO_REASON_CODES.INSUFFICIENT_MODEL_CAPACITY)).toBe(false);
     expect(isCapacityError(KIRO_REASON_CODES.INSUFFICIENT_MODEL_CAPACITY)).toBe(true);
     expect(isCapacityError(KIRO_REASON_CODES.MONTHLY_REQUEST_COUNT)).toBe(false);
+  });
+
+  it("calls registerProvider with 'kiro'", async () => {
+    const mod = await import("../src/index.js");
+    const { pi, registerProvider } = mockPi();
+
+    await mod.default(pi);
+
+    expect(registerProvider).toHaveBeenCalledOnce();
+    expect(registerProvider.mock.calls[0][0]).toBe("kiro");
+  });
+
+  it("registers 15 models", async () => {
+    const mod = await import("../src/index.js");
+    const { pi, registerProvider } = mockPi();
+    mod.default(pi);
+
+    const config = registerProvider.mock.calls[0][1];
+    expect(config.models).toHaveLength(15);
   });
 
   // Regression: the factory used to await catalog discovery before registering,
@@ -193,6 +234,37 @@ describe("Feature 1: Extension Registration", () => {
     expect(credentialMocks.social).toHaveBeenCalledOnce();
     expect(credentialMocks.cli).toHaveBeenCalledOnce();
     expect(credentialMocks.ide).toHaveBeenCalledOnce();
+  });
+
+  it("preserves the existing OAuth and kiro-cli credential contract", async () => {
+    const mod = await import("../src/index.js");
+    const { pi, registerProvider } = mockPi();
+    await mod.default(pi);
+
+    const config = registerProvider.mock.calls[0][1];
+    expect(config.oauth.name).toBe("Kiro (Builder ID / Google / GitHub)");
+    expect(typeof config.oauth.login).toBe("function");
+    expect(typeof config.oauth.refreshToken).toBe("function");
+    expect(config.oauth.getCliCredentials).toBe(getKiroCliCredentials);
+    expect(config.oauth.getApiKey({ access: "existing-access-token" })).toBe("existing-access-token");
+    expect(typeof config.oauth.fetchUsage).toBe("function");
+  });
+
+  it("registers a streamSimple handler", async () => {
+    const mod = await import("../src/index.js");
+    const { pi, registerProvider } = mockPi();
+    await mod.default(pi);
+
+    const config = registerProvider.mock.calls[0][1];
+    expect(typeof config.streamSimple).toBe("function");
+  });
+
+  it("uses kiro-api as the api type", async () => {
+    const mod = await import("../src/index.js");
+    const { pi, registerProvider } = mockPi();
+    await mod.default(pi);
+
+    expect(registerProvider.mock.calls[0][1].api).toBe("kiro-api");
   });
 
   describe("refreshModels", () => {
@@ -454,5 +526,47 @@ describe("Feature 1: Extension Registration", () => {
         }),
       ]),
     );
+  });
+
+  // Extension **entry module** surface — not an npm package entry point.
+  //
+  // `pi.extensions: ["./dist/index.js"]` tells the pi host which module to load.
+  // It is not a bare-specifier entry: `package.json` declares no `main`,
+  // `exports`, or `types`, and the build emits no declarations, so
+  // `import { validateKiroConversation } from "pi-provider-kiro"` does not
+  // resolve from the published tarball (verified 2026-08-11 by packing and
+  // importing in an isolated consumer: `ERR_MODULE_NOT_FOUND`). This pins that
+  // the symbols leave this module; giving them a resolvable package entry is a
+  // packaging change owned separately.
+  it("re-exports the history validator surface from the entry module", async () => {
+    const mod = await import("../src/index.js");
+    for (const name of [
+      "validateKiroConversation",
+      "validateKiroToolStructure",
+      "repairKiroConversation",
+      "kiroConversationEntries",
+      "isKiroToolStructureRule",
+    ] as const) {
+      expect(typeof mod[name], name).toBe("function");
+    }
+    expect(mod.KiroValidationRule.NON_EMPTY_USER_MESSAGE).toBe("NON_EMPTY_USER_MESSAGE");
+    expect(mod.KIRO_TOOL_STRUCTURE_RULES).toHaveLength(3);
+    expect(mod.KIRO_VALIDATION_MESSAGES.NON_EMPTY_USER_MESSAGE).toBe(
+      "User messages must have either content or tool results",
+    );
+    expect(mod.SYNTHETIC_FAILED_TOOL_RESULT_TEXT).toBe("Tool use was interrupted and did not produce a result.");
+    expect(mod.EMPTY_CONTENT_PLACEHOLDER).toBe("Please proceed with the task.");
+  });
+
+  // Same entry-module caveat as above: this pins that the symbol leaves this
+  // module, so a consumer can `instanceof` the error the provider already
+  // throws from every management-plane request that returns a non-OK status.
+  // There is no per-module alternative — the build bundles everything into one
+  // `dist/index.js`, so what this module re-exports is the whole reachable
+  // surface and the fallback was string-matching `error.name` or the message.
+  it("re-exports KiroManagementHttpError from the entry module", async () => {
+    const mod = await import("../src/index.js");
+    const { KiroManagementHttpError } = await import("../src/management.js");
+    expect(mod.KiroManagementHttpError).toBe(KiroManagementHttpError);
   });
 });

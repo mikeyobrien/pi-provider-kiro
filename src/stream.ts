@@ -1842,9 +1842,12 @@ function streamKiroWithUsageTracking(
       // has to regex the class back out of prose. Diagnostics are the sanctioned
       // structured channel for exactly this ("provider/runtime diagnostics for
       // failures and recoveries"). Oh My Pi's pi-ai shim lacks the diagnostic
-      // helpers and reads the HTTP status from `errorStatus` instead.
-      if (error instanceof KiroApiError) {
+      // helpers and reads the HTTP status from `errorStatus` instead — including
+      // for a management-plane failure (e.g. GetProfile) before the runtime call.
+      if (error instanceof KiroApiError || error instanceof KiroManagementHttpError) {
         (output as AssistantMessage & { errorStatus?: number }).errorStatus = error.status;
+      }
+      if (error instanceof KiroApiError) {
         if (
           typeof PiAi.appendAssistantMessageDiagnostic === "function" &&
           typeof PiAi.createAssistantMessageDiagnostic === "function"
