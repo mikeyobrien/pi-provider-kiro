@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Report Kiro credit usage in Oh My Pi's `omp usage` and `/usage`.
+  The provider registers an OMP usage provider backed by `GetUsageLimits`, mapping each credit bucket to a monthly limit and free-trial bonus credits to a separate limit with its own expiry.
+  OAuth and `ksk_` API keys both resolve their profile before the lookup. A failed lookup throws, so OMP keeps serving the last good report instead of an empty one. Pi registration is unchanged.
+
 ### Changed
 
 - esbuild is now a devDependency (build-only); bumped to 0.28.2. It only produces `dist/index.js` and nothing in the published bundle imports it, yet as a runtime dependency every consumer installed esbuild 0.25.12 and its platform binary. Pinned exactly to match pi 0.87.1 (`@earendil-works/chord`). Both lockfiles now resolve a single esbuild (vite is deduped onto 0.28.2 too). `test/packaging.test.ts` pins esbuild's absence from `dependencies`.

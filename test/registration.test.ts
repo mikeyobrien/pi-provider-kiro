@@ -378,6 +378,18 @@ describe("Feature 1: Extension Registration", () => {
       expect((await ompConfig()).config.apiKey).toBe("KIRO_API_KEY");
     });
 
+    // Pi has no `usage` slot on registerProvider; only OMP's `omp usage` and
+    // `/usage` consume it, so Pi's registration must stay unchanged.
+    it("registers the usage provider on OMP only", async () => {
+      const { config } = await ompConfig();
+      expect(config.usage?.id).toBe("kiro");
+
+      const mod = await import("../src/index.js");
+      const { pi, registerProvider } = mockPi();
+      mod.default(pi);
+      expect(registerProvider.mock.calls[0][1]).not.toHaveProperty("usage");
+    });
+
     it.each([
       "getApiKey",
       "modifyModels",

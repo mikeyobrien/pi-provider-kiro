@@ -14,6 +14,7 @@ import { setExtensionContext } from "./login-ui.js";
 import { getCachedModels, isCacheStale, type KiroModel, kiroModels, updateKiroModelsCache } from "./models.js";
 import type { KiroCredentials } from "./oauth.js";
 import { loginKiro, refreshKiroToken } from "./oauth.js";
+import { kiroOmpUsageProvider } from "./omp-usage.js";
 import { getPiHostKiroCredentials } from "./pi-auth-store.js";
 import { createKiroStream } from "./stream.js";
 import { fetchKiroUsage } from "./usage.js";
@@ -210,7 +211,7 @@ export default function (pi: ExtensionAPI) {
     baseUrl: getKiroEndpoints("us-east-1").runtime,
     api: "kiro-api",
     ...(omp
-      ? { ...(ompApiKeyEnv ? { apiKey: ompApiKeyEnv } : {}), fetchDynamicModels }
+      ? { ...(ompApiKeyEnv ? { apiKey: ompApiKeyEnv } : {}), fetchDynamicModels, usage: kiroOmpUsageProvider }
       : { apiKey: "$KIRO_API_KEY", refreshModels: refreshKiroModels }),
     models: kiroModels,
     oauth: {

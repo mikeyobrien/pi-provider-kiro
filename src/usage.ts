@@ -1,10 +1,13 @@
 // ABOUTME: Fetches Kiro account usage through the current Kiro management control plane.
 // ABOUTME: Maps the response into pi's generic OAuth provider usage shape for /settings.
 
-import type { OAuthCredentials } from "@earendil-works/pi-ai";
 import { resolveApiRegion } from "./endpoints.js";
 import { getUsageLimits, type KiroManagementAuth, resolveKiroProfileArn } from "./management.js";
 import type { KiroCredentials } from "./oauth.js";
+
+/** Fields usage lookup reads; any OAuth credential (Pi's or OMP's projection) satisfies it. */
+export type KiroUsageCredential = Pick<KiroCredentials, "access"> &
+  Partial<Pick<KiroCredentials, "region" | "profileArn">>;
 
 const MANAGE_USAGE_URL = "https://app.kiro.dev/account/usage";
 
@@ -61,6 +64,9 @@ export interface KiroProviderUsageBonus {
   label: string;
   usedDisplay?: string;
   limitDisplay?: string;
+  /** Raw numeric used/limit, mirroring {@link KiroProviderUsageBucket}. */
+  used?: number;
+  limit?: number;
   expiresAt?: string;
 }
 
@@ -137,6 +143,8 @@ function mapBucket(bucket: KiroUsageBreakdown, index: number): KiroProviderUsage
             label: "Bonus credits",
             usedDisplay: formatCount(freeTrialUsed),
             limitDisplay: formatCount(freeTrialLimit),
+            used: typeof freeTrialUsed === "number" && Number.isFinite(freeTrialUsed) ? freeTrialUsed : undefined,
+            limit: typeof freeTrialLimit === "number" && Number.isFinite(freeTrialLimit) ? freeTrialLimit : undefined,
             expiresAt: toIsoDate(bucket.freeTrialInfo?.freeTrialExpiry),
           }
         : undefined,
@@ -153,12 +161,12 @@ async function fetchRawUsage(auth: KiroManagementAuth, profileArn?: string): Pro
   });
 }
 
-export async function fetchKiroUsage(credentials: OAuthCredentials): Promise<KiroProviderUsage> {
+export async function fetchKiroUsage(credentials: KiroUsageCredential): Promise<KiroProviderUsage> {
   const auth = {
     accessToken: credentials.access,
-    region: resolveApiRegion((credentials as KiroCredentials).region),
+    region: resolveApiRegion(credentials.region),
   };
-  const raw = await fetchRawUsage(auth, (credentials as KiroCredentials).profileArn);
+  const raw = await fetchRawUsage(auth, credentials.profileArn);
   const usageBuckets = raw.usageBreakdownList?.length
     ? raw.usageBreakdownList.map(mapBucket)
     : raw.usageBreakdown

@@ -56,6 +56,8 @@ omp plugin install github:mikeyobrien/pi-provider-kiro
 
 OMP loads `src/index.ts` directly (its `omp.extensions` entry), so a git install needs no build step. OMP discovers the live Kiro catalog itself for the logged-in OAuth credential's region and profile. `KIRO_API_KEY` works as on Pi; `OMP_KIRO_PROVIDER_KEY` is accepted as a fallback name when `KIRO_API_KEY` is unset. With neither set, OAuth is used. Kiro HTTP errors carry the status in `errorStatus`; Pi additionally receives the structured `kiro_api_error` diagnostic.
 
+`omp usage` and `/usage` show the account's monthly Kiro credits (used, limit, reset date), plus free-trial bonus credits when the account has them.
+
 ## Models
 
 | Family | Models | Context | Reasoning |
