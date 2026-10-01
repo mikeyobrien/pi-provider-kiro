@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getKiroCliCredentials, getKiroCliDbPath, refreshViaKiroCli, tryKiroCliToken } from "../src/kiro-cli.js";
+import { BUILDER_ID_PROFILE_ARN, BUILDER_ID_START_URL } from "../src/oauth.js";
 
 let tempDir: string | undefined;
 afterEach(() => {
@@ -59,6 +60,37 @@ describe("tryKiroCliToken (#110)", () => {
     const dbPath = makeTokenDb(undefined, "idc");
     const result = tryKiroCliToken(dbPath, "kirocli:odic:token", "idc");
     expect(result?.profileArn).toBeUndefined();
+  });
+});
+
+describe("Builder ID profileArn fallback (#169)", () => {
+  function makeBuilderIdDb(): string {
+    tempDir = mkdtempSync(join(tmpdir(), "kiro-cli-test-"));
+    const dbPath = join(tempDir, "data.sqlite3");
+    const db = new DatabaseSync(dbPath);
+    db.exec(`CREATE TABLE auth_kv (key TEXT PRIMARY KEY, value TEXT)`);
+    // kiro-cli's Builder ID (AWS IAM Identity Center) flow stores no
+    // profile_arn/profileArn in the token row; the only marker is the Builder
+    // ID portal start_url. The desktop branch must fall back to the fixed
+    // BUILDER_ID_PROFILE_ARN constant for such a token.
+    const token = JSON.stringify({
+      access_token: "test-access",
+      refresh_token: "test-refresh",
+      region: "us-east-1",
+      expires_at: new Date(Date.now() + 3600000).toISOString(),
+      start_url: BUILDER_ID_START_URL,
+    });
+    db.prepare(`INSERT INTO auth_kv (key, value) VALUES (?, ?)`).run("kirocli:social:token", token);
+    db.close();
+    return dbPath;
+  }
+
+  it("falls back to the BUILDER_ID_PROFILE_ARN constant when the Builder ID row has no stored profile", () => {
+    const dbPath = makeBuilderIdDb();
+    const result = tryKiroCliToken(dbPath, "kirocli:social:token", "desktop");
+    expect(result?.authMethod).toBe("desktop");
+    expect(result?.profileArn).toBe(BUILDER_ID_PROFILE_ARN);
+    expect(result?.startUrl).toBe(BUILDER_ID_START_URL);
   });
 });
 
