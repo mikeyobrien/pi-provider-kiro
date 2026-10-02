@@ -42,6 +42,20 @@ If your organization uses an external identity provider (e.g. Okta) through Kiro
 
 If you already use [kiro-cli](https://kiro.dev), the provider can reuse those credentials instead of forcing a second login.
 
+A Kiro API key (`ksk_...`) in `KIRO_API_KEY` takes precedence over OAuth and local credentials.
+
+### Oh My Pi
+
+The same package loads in [Oh My Pi](https://github.com/can1357/oh-my-pi) (OMP):
+
+```bash
+omp plugin install pi-provider-kiro
+# or from source
+omp plugin install github:mikeyobrien/pi-provider-kiro
+```
+
+OMP loads `src/index.ts` directly (its `omp.extensions` entry), so a git install needs no build step. OMP discovers the live Kiro catalog itself for the logged-in OAuth credential's region and profile. `KIRO_API_KEY` works as on Pi; `OMP_KIRO_PROVIDER_KEY` is accepted as a fallback name when `KIRO_API_KEY` is unset. With neither set, OAuth is used. Kiro HTTP errors carry the status in `errorStatus`; Pi additionally receives the structured `kiro_api_error` diagnostic.
+
 ## Models
 
 | Family | Models | Context | Reasoning |

@@ -1861,17 +1861,27 @@ function streamKiroWithUsageTracking(
       // `errorMessage` is a flat string by contract, so without this a consumer
       // has to regex the class back out of prose. Diagnostics are the sanctioned
       // structured channel for exactly this ("provider/runtime diagnostics for
-      // failures and recoveries").
+      // failures and recoveries"). Oh My Pi's pi-ai shim lacks the diagnostic
+      // helpers and reads the HTTP status from `errorStatus` instead — including
+      // for a management-plane failure (e.g. GetProfile) before the runtime call.
+      if (error instanceof KiroApiError || error instanceof KiroManagementHttpError) {
+        (output as AssistantMessage & { errorStatus?: number }).errorStatus = error.status;
+      }
       if (error instanceof KiroApiError) {
-        PiAi.appendAssistantMessageDiagnostic(
-          output,
-          PiAi.createAssistantMessageDiagnostic("kiro_api_error", error, {
-            status: error.status,
-            ...(error.reasonCode !== undefined ? { reasonCode: error.reasonCode } : {}),
-            ...(error.retryAfterMs !== undefined ? { retryAfterMs: error.retryAfterMs } : {}),
-            ...(error.providerAttempts !== undefined ? { providerAttempts: error.providerAttempts } : {}),
-          }),
-        );
+        if (
+          typeof PiAi.appendAssistantMessageDiagnostic === "function" &&
+          typeof PiAi.createAssistantMessageDiagnostic === "function"
+        ) {
+          PiAi.appendAssistantMessageDiagnostic(
+            output,
+            PiAi.createAssistantMessageDiagnostic("kiro_api_error", error, {
+              status: error.status,
+              ...(error.reasonCode !== undefined ? { reasonCode: error.reasonCode } : {}),
+              ...(error.retryAfterMs !== undefined ? { retryAfterMs: error.retryAfterMs } : {}),
+              ...(error.providerAttempts !== undefined ? { providerAttempts: error.providerAttempts } : {}),
+            }),
+          );
+        }
       }
       // For a host that owns credentials (it passed an accessor), surface this
       // call's refresh decisions/outcomes onto the terminal error so an auth

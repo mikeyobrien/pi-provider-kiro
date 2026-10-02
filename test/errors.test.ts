@@ -272,6 +272,13 @@ describe("typed classification per reason code", () => {
     expect(message.errorMessage).toContain("context_length_exceeded");
   });
 
+  it("also exposes the HTTP status as errorStatus next to the diagnostic", async () => {
+    const message = await failedRequest({ status: 403, statusText: "Forbidden", body: "denied" });
+
+    expect((message as AssistantMessage & { errorStatus?: number }).errorStatus).toBe(403);
+    expect(kiroDiagnostic(message)?.details).toMatchObject({ status: 403 });
+  });
+
   it("classifies a plain 413 as too-big with no reason code", async () => {
     const message = await failedRequest({ status: 413, statusText: "Payload Too Large", body: "" });
 
