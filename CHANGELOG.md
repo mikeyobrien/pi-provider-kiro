@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - esbuild is now a devDependency (build-only); bumped to 0.28.2. It only produces `dist/index.js` and nothing in the published bundle imports it, yet as a runtime dependency every consumer installed esbuild 0.25.12 and its platform binary. Pinned exactly to match pi 0.87.1 (`@earendil-works/chord`). Both lockfiles now resolve a single esbuild (vite is deduped onto 0.28.2 too). `test/packaging.test.ts` pins esbuild's absence from `dependencies`.
 
+### Fixed
+
+- Stop corrupting kiro-cli's IAM Identity Center session on refresh write-back. `saveKiroCliCredentials` wrote any refreshed IDC token into `kirocli:odic:token`, but kiro-cli pairs that slot with its own `kirocli:odic:device-registration` client. A token from a pi login that registered its own client became an unrefreshable pair: it worked for the hour its access token lived, then every refresh got `400 invalid_grant` and the host reported "No API key found for kiro". The write-back now skips a slot whose registered client did not issue the token.
+- Token-endpoint refresh failures now carry the OAuth `error` code (`Token refresh failed: 400 invalid_grant`) instead of the bare status. Hosts classify a refresh failure as permanent by that code; without it a revoked or mismatched refresh token looked transient and was retried forever instead of being retired.
+
 ## [0.12.1] - 2026-09-24
 
 ### Fixed

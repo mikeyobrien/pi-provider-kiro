@@ -1,9 +1,23 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import type * as NodeOs from "node:os";
+import { homedir, platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getKiroCliCredentials, getKiroCliDbPath, refreshViaKiroCli, tryKiroCliToken } from "../src/kiro-cli.js";
+import {
+  getKiroCliCredentials,
+  getKiroCliDbPath,
+  refreshViaKiroCli,
+  saveKiroCliCredentials,
+  tryKiroCliToken,
+} from "../src/kiro-cli.js";
+import type { KiroCredentials } from "../src/oauth.js";
+
+// Real by default; the write-back tests point the kiro-cli DB lookup at a temp home.
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeOs>();
+  return { ...actual, homedir: vi.fn(actual.homedir), platform: vi.fn(actual.platform) };
+});
 
 let tempDir: string | undefined;
 afterEach(() => {
@@ -59,6 +73,62 @@ describe("tryKiroCliToken (#110)", () => {
     const dbPath = makeTokenDb(undefined, "idc");
     const result = tryKiroCliToken(dbPath, "kirocli:odic:token", "idc");
     expect(result?.profileArn).toBeUndefined();
+  });
+});
+
+describe("saveKiroCliCredentials", () => {
+  function makeHomeWithKiroCliDb(): string {
+    tempDir = mkdtempSync(join(tmpdir(), "kiro-cli-test-"));
+    vi.mocked(homedir).mockReturnValue(tempDir);
+    vi.mocked(platform).mockReturnValue("linux");
+    const dataDir = join(tempDir, ".local", "share", "kiro-cli");
+    mkdirSync(dataDir, { recursive: true });
+    const dbPath = join(dataDir, "data.sqlite3");
+    const db = new DatabaseSync(dbPath);
+    db.exec(`CREATE TABLE auth_kv (key TEXT PRIMARY KEY, value TEXT)`);
+    db.prepare(`INSERT INTO auth_kv (key, value) VALUES (?, ?)`).run(
+      "kirocli:odic:token",
+      JSON.stringify({
+        access_token: "cli-access",
+        refresh_token: "cli-refresh",
+        region: "ap-southeast-1",
+        expires_at: new Date(Date.now() - 1000).toISOString(),
+      }),
+    );
+    db.prepare(`INSERT INTO auth_kv (key, value) VALUES (?, ?)`).run(
+      "kirocli:odic:device-registration",
+      JSON.stringify({ client_id: "cli-client", client_secret: "cli-secret" }),
+    );
+    db.close();
+    return dbPath;
+  }
+
+  const cliClientCreds: KiroCredentials = {
+    refresh: "new-refresh|cli-client|secret|idc",
+    access: "new-access",
+    expires: Date.now() + 3600000,
+    clientId: "cli-client",
+    clientSecret: "secret",
+    region: "ap-southeast-1",
+    authMethod: "idc",
+  };
+
+  it("writes a refreshed IDC token issued to kiro-cli's own client", () => {
+    const dbPath = makeHomeWithKiroCliDb();
+    saveKiroCliCredentials(cliClientCreds);
+    const stored = tryKiroCliToken(dbPath, "kirocli:odic:token", "idc");
+    expect(stored?.access).toBe("new-access");
+    expect(stored?.refresh).toBe("new-refresh|cli-client|cli-secret|idc");
+  });
+
+  it("leaves kiro-cli's IDC token alone when the refresh token belongs to another client", () => {
+    // Writing it would pair the foreign refresh token with kiro-cli's client,
+    // which AWS rejects with invalid_grant at the next refresh.
+    const dbPath = makeHomeWithKiroCliDb();
+    saveKiroCliCredentials({ ...cliClientCreds, refresh: "new-refresh|pi-client|secret|idc", clientId: "pi-client" });
+    const stored = tryKiroCliToken(dbPath, "kirocli:odic:token", "idc", true);
+    expect(stored?.access).toBe("cli-access");
+    expect(stored?.refresh).toBe("cli-refresh|cli-client|cli-secret|idc");
   });
 });
 

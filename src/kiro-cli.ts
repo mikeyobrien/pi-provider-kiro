@@ -190,21 +190,7 @@ function tryKiroCliToken(
   }
 
   // IDC — need device registration credentials for refresh
-  let clientId = "";
-  let clientSecret = "";
-  // Match the device-registration key to the same prefix as the token key
-  const keyPrefix = tokenKey.split(":")[0]; // "kirocli" or "codewhisperer"
-  const deviceResult = queryKiroCliDb(
-    dbPath,
-    `SELECT value FROM auth_kv WHERE key = '${keyPrefix}:odic:device-registration'`,
-  );
-  if (deviceResult) {
-    try {
-      const d = JSON.parse(JSON.parse(deviceResult)[0]?.value);
-      clientId = d.client_id || d.clientId || "";
-      clientSecret = d.client_secret || d.clientSecret || "";
-    } catch {}
-  }
+  const { clientId, clientSecret } = readDeviceRegistration(dbPath, tokenKey) ?? { clientId: "", clientSecret: "" };
   return {
     refresh: `${tokenData.refresh_token}|${clientId}|${clientSecret}|idc`,
     access: tokenData.access_token,
@@ -215,6 +201,29 @@ function tryKiroCliToken(
     authMethod: "idc",
     profileArn: tokenData.profile_arn || tokenData.profileArn,
   };
+}
+
+/**
+ * The OIDC client kiro-cli registered for the token stored under `tokenKey`.
+ * The device-registration key shares the token key's prefix ("kirocli" or
+ * "codewhisperer"). An IDC refresh token is bound to the client that issued it.
+ */
+function readDeviceRegistration(
+  dbPath: string,
+  tokenKey: string,
+): { clientId: string; clientSecret: string } | undefined {
+  const keyPrefix = tokenKey.split(":")[0];
+  const deviceResult = queryKiroCliDb(
+    dbPath,
+    `SELECT value FROM auth_kv WHERE key = '${keyPrefix}:odic:device-registration'`,
+  );
+  if (!deviceResult) return undefined;
+  try {
+    const d = JSON.parse(JSON.parse(deviceResult)[0]?.value);
+    return { clientId: d.client_id || d.clientId || "", clientSecret: d.client_secret || d.clientSecret || "" };
+  } catch {
+    return undefined;
+  }
 }
 
 // Re-export the internal function for use by getKiroCliSocialToken
@@ -266,6 +275,13 @@ export function saveKiroCliCredentials(creds: KiroCredentials): void {
   const tokenKeys = TOKEN_KEY_BY_AUTH_METHOD[creds.authMethod] ?? [];
 
   for (const key of tokenKeys) {
+    // kiro-cli pairs whatever refresh token sits under the IDC key with its own
+    // device registration. Writing a token issued to a different client (a pi
+    // login that registered its own) yields a pair AWS rejects with
+    // invalid_grant once the access token expires.
+    if (creds.authMethod === "idc" && readDeviceRegistration(dbPath, key)?.clientId !== creds.refresh.split("|")[1]) {
+      continue;
+    }
     const existing = queryKiroCliDb(dbPath, `SELECT value FROM auth_kv WHERE key = '${key}'`);
     if (!existing) continue;
 

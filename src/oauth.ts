@@ -405,7 +405,7 @@ async function refreshKiroTokenDirect(credentials: OAuthCredentials): Promise<OA
         refresh_token: refreshToken,
       }).toString(),
     });
-    if (!response.ok) throw new Error(`External IdP token refresh failed: ${response.status}`);
+    if (!response.ok) throw new Error(`External IdP token refresh failed: ${await refreshFailureDetail(response)}`);
     const data = (await response.json()) as {
       access_token?: string;
       refresh_token?: string;
@@ -437,7 +437,7 @@ async function refreshKiroTokenDirect(credentials: OAuthCredentials): Promise<OA
     },
     body: JSON.stringify({ clientId, clientSecret, refreshToken, grantType: "refresh_token" }),
   });
-  if (!response.ok) throw new Error(`Token refresh failed: ${response.status}`);
+  if (!response.ok) throw new Error(`Token refresh failed: ${await refreshFailureDetail(response)}`);
   const data = (await response.json()) as { accessToken: string; refreshToken: string; expiresIn: number };
   return {
     refresh: `${data.refreshToken}|${clientId}|${clientSecret}|idc`,
@@ -451,4 +451,20 @@ async function refreshKiroTokenDirect(credentials: OAuthCredentials): Promise<OA
     startUrl: (credentials as KiroCredentials).startUrl,
     isEnterprise: (credentials as KiroCredentials).isEnterprise,
   };
+}
+
+/**
+ * Status plus the RFC 6749 §5.2 `error` code of a failed token-endpoint call,
+ * e.g. `400 invalid_grant`. Hosts decide whether a refresh failure is permanent
+ * (and stop retrying a dead credential) by matching that code, so it must
+ * survive into the message. `error_description` is left out: it is free text.
+ */
+async function refreshFailureDetail(response: Response): Promise<string> {
+  try {
+    const { error } = (await response.json()) as { error?: unknown };
+    if (typeof error === "string" && /^[\w.-]+$/.test(error)) return `${response.status} ${error}`;
+  } catch {
+    // Non-JSON body — the status alone is all there is
+  }
+  return String(response.status);
 }

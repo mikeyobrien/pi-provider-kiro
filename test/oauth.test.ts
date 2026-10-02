@@ -58,6 +58,21 @@ describe("Feature 3: OAuth — Token Refresh", () => {
       vi.unstubAllGlobals();
     });
 
+    it("carries the OAuth error code so hosts can retire a dead refresh token", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValueOnce({
+          ok: false,
+          status: 400,
+          json: () => Promise.resolve({ error: "invalid_grant", error_description: "Invalid refresh token provided" }),
+        }),
+      );
+      await expect(refreshKiroToken({ refresh: "rt|c|s|idc", access: "x", expires: 0 })).rejects.toThrow(
+        "Token refresh failed: 400 invalid_grant",
+      );
+      vi.unstubAllGlobals();
+    });
+
     it("refreshes desktop tokens via Kiro auth service", async () => {
       const mockFetch = vi.fn().mockResolvedValueOnce({
         ok: true,
