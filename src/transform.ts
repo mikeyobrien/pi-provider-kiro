@@ -1,6 +1,7 @@
 // Feature 5: Message Transformation
 
 import { createHash } from "node:crypto";
+import { type KiroReasoning, reasoningForHistory } from "./reasoning.js";
 
 import type {
   AssistantMessage,
@@ -41,6 +42,7 @@ export interface KiroUserInputMessage {
 export interface KiroAssistantResponseMessage {
   content: string;
   toolUses?: KiroToolUse[];
+  reasoningContent?: KiroReasoning;
 }
 export interface KiroHistoryEntry {
   userInputMessage?: KiroUserInputMessage;
@@ -202,6 +204,7 @@ export function buildHistory(
   messages: Message[],
   modelId: string,
   systemPrompt?: string,
+  requestDigest?: string,
 ): { history: KiroHistoryEntry[]; systemPrepended: boolean; currentMsgStartIdx: number } {
   const history: KiroHistoryEntry[] = [];
   let systemPrepended = false;
@@ -291,7 +294,11 @@ export function buildHistory(
       // shape — `extractTextContent` returns `''` and the entry is still emitted.
       if (!armContent && armToolUses.length === 0 && !armHadBlocks) continue;
       history.push({
-        assistantResponseMessage: { content: armContent, ...(armToolUses.length > 0 ? { toolUses: armToolUses } : {}) },
+        assistantResponseMessage: {
+          content: armContent,
+          ...(armToolUses.length > 0 ? { toolUses: armToolUses } : {}),
+          reasoningContent: reasoningForHistory(msg as AssistantMessage, modelId, requestDigest),
+        },
       });
     } else if (msg.role === "toolResult") {
       const trMsg = msg as ToolResultMessage;

@@ -238,6 +238,27 @@ describe("Feature 9: Streaming Integration", () => {
     resetProfileArnCache(true);
   });
 
+  it("keeps interleaved native reasoning in separate balanced blocks", async () => {
+    const frames = concatMessages(
+      encodeEventMessage({ text: "first" }, "reasoningContentEvent"),
+      encodeEventMessage({ signature: "sig-one" }, "reasoningContentEvent"),
+      encodeEventMessage({ name: "read", toolUseId: "t1", input: "{}", stop: true }),
+      encodeEventMessage({ text: "second" }, "reasoningContentEvent"),
+      encodeEventMessage({ signature: "sig-two" }, "reasoningContentEvent"),
+      encodeEventMessage({ contextUsagePercentage: 5 }),
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(new Uint8Array(frames).buffer)));
+    const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "synthetic-token" }));
+    const done = events.find((event) => event.type === "done");
+    expect(
+      done?.type === "done" &&
+        done.message.content.filter((block) => block.type === "thinking").map((block) => block.thinking),
+    ).toEqual(["first", "second"]);
+    expect(events.filter((event) => event.type === "thinking_start")).toHaveLength(2);
+    expect(events.filter((event) => event.type === "thinking_end")).toHaveLength(2);
+    vi.unstubAllGlobals();
+  });
+
   it("emits error when no credentials provided", async () => {
     const stream = streamKiro(makeModel(), makeContext(), {});
     const events = await collect(stream);
