@@ -30,6 +30,12 @@ const mockPi = () => {
   return { pi: { registerProvider, on: vi.fn() } as unknown as ExtensionAPI, registerProvider };
 };
 
+/** Oh My Pi's ExtensionAPI additionally injects its schema modules, e.g. `typebox`. */
+const mockOmpPi = () => {
+  const registerProvider = vi.fn();
+  return { pi: { registerProvider, on: vi.fn(), typebox: {} } as unknown as ExtensionAPI, registerProvider };
+};
+
 /** Minimal host store fixture — refreshKiroModels intentionally uses the Kiro file cache instead. */
 const mockProviderModelsStore = (): ProviderModelsStore => ({
   read: vi.fn(async () => undefined),
@@ -51,6 +57,7 @@ const cliOauthCredential = {
 describe("Feature 1: Extension Registration", () => {
   beforeEach(() => {
     delete process.env.KIRO_API_KEY;
+    delete process.env.OMP_KIRO_PROVIDER_KEY;
     credentialMocks.cli.mockReset();
     credentialMocks.social.mockReset();
     credentialMocks.ide.mockReset();
@@ -59,6 +66,7 @@ describe("Feature 1: Extension Registration", () => {
 
   afterEach(() => {
     delete process.env.KIRO_API_KEY;
+    delete process.env.OMP_KIRO_PROVIDER_KEY;
     vi.unstubAllGlobals();
     rmSync(KIRO_MANAGEMENT_CACHE_PATH, { force: true });
   });
@@ -326,6 +334,114 @@ describe("Feature 1: Extension Registration", () => {
         store: mockProviderModelsStore(),
         credential: { type: "oauth", access: "a", refresh: "r", expires: 0, region: "us-east-1", profileArn: "arn:p" },
       });
+
+      expect(models).toEqual(kiroModels);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("Failed to refresh Kiro model catalog"));
+      warn.mockRestore();
+    });
+  });
+
+  describe("Oh My Pi host", () => {
+    const ompConfig = async () => {
+      const mod = await import("../src/index.js");
+      const { pi, registerProvider } = mockOmpPi();
+      mod.default(pi);
+      return { mod, config: registerProvider.mock.calls[0][1] };
+    };
+
+    const catalogFetch = (modelId: string) =>
+      vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ models: [{ modelId }] }) });
+
+    it("does not start catalog discovery on OMP", async () => {
+      credentialMocks.cli.mockReturnValue(cliOauthCredential);
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+
+      const { mod } = await ompConfig();
+      await mod.whenStartupCatalogSettled();
+
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    // OMP resolves `apiKey` as a bare env var name and keeps an unset name as a
+    // literal key that would outrank OAuth, so it is only pinned when set.
+    it("pins no apiKey when neither key variable is set, preserving OAuth", async () => {
+      const { config } = await ompConfig();
+      expect(config).not.toHaveProperty("apiKey");
+    });
+
+    it("names KIRO_API_KEY bare, ahead of the OMP_KIRO_PROVIDER_KEY alias", async () => {
+      process.env.OMP_KIRO_PROVIDER_KEY = "ksk_alias";
+      expect((await ompConfig()).config.apiKey).toBe("OMP_KIRO_PROVIDER_KEY");
+
+      process.env.KIRO_API_KEY = "ksk_primary";
+      expect((await ompConfig()).config.apiKey).toBe("KIRO_API_KEY");
+    });
+
+    // Pi has no `usage` slot on registerProvider; only OMP's `omp usage` and
+    // `/usage` consume it, so Pi's registration must stay unchanged.
+    it("registers the usage provider on OMP only", async () => {
+      const { config } = await ompConfig();
+      expect(config.usage?.id).toBe("kiro");
+
+      const mod = await import("../src/index.js");
+      const { pi, registerProvider } = mockPi();
+      mod.default(pi);
+      expect(registerProvider.mock.calls[0][1]).not.toHaveProperty("usage");
+    });
+
+    it.each([
+      "getApiKey",
+      "modifyModels",
+    ] as const)("discovers the regional catalog with the full OAuth credential seen by %s", async (hook) => {
+      const oauth = {
+        access: "omp-eu-token",
+        refresh: "refresh",
+        expires: Date.now() + 60_000,
+        region: "eu-west-1",
+        profileArn: "arn:aws:codewhisperer:eu-central-1:123:profile/eu",
+        clientId: "",
+        clientSecret: "",
+        authMethod: "idc",
+      };
+      const fetchMock = catalogFetch("claude-opus-5.5");
+      vi.stubGlobal("fetch", fetchMock);
+
+      const { config } = await ompConfig();
+      if (hook === "getApiKey") config.oauth.getApiKey(oauth);
+      else config.oauth.modifyModels(kiroModels, oauth);
+      const discovered = await config.fetchDynamicModels(oauth.access);
+
+      expect(discovered.map((model: { id: string }) => model.id)).toEqual(["claude-opus-5-5"]);
+      const requestUrl = new URL(fetchMock.mock.calls[0][0]);
+      expect(requestUrl.host).toBe("management.eu-central-1.kiro.dev");
+      expect(requestUrl.searchParams.get("profileArn")).toBe(oauth.profileArn);
+      expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe(`Bearer ${oauth.access}`);
+      const projected = config.oauth.modifyModels(kiroModels, oauth);
+      expect(projected.map((model: { id: string }) => model.id)).toEqual(["claude-opus-5-5"]);
+      expect(projected[0].kiroProfileArn).toBe(oauth.profileArn);
+    });
+
+    it("keeps a local credential's region when its access token is the one OMP passes", async () => {
+      credentialMocks.cli.mockReturnValue({ ...cliOauthCredential, region: "eu-west-1" });
+      const fetchMock = catalogFetch("claude-opus-5.5");
+      vi.stubGlobal("fetch", fetchMock);
+
+      const { config } = await ompConfig();
+      const models = await config.fetchDynamicModels(cliOauthCredential.access);
+
+      const requestUrl = new URL(fetchMock.mock.calls[0][0]);
+      expect(requestUrl.host).toBe("management.eu-central-1.kiro.dev");
+      expect(requestUrl.searchParams.get("profileArn")).toBe(cliOauthCredential.profileArn);
+      expect(models.map((model: { id: string }) => model.id)).toEqual(["claude-opus-5-5"]);
+    });
+
+    it("keeps cached models when discovery fails", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+
+      const { config } = await ompConfig();
+      const models = await config.fetchDynamicModels("ksk_failed-key");
 
       expect(models).toEqual(kiroModels);
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("Failed to refresh Kiro model catalog"));

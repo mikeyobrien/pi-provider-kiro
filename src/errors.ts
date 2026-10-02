@@ -48,6 +48,8 @@ export interface KiroProviderAttempts {
  * consumers through the terminal `error` event's
  * `AssistantMessage.diagnostics` entry of type `kiro_api_error`, whose
  * `details` mirror `status` / `reasonCode` / `retryAfterMs` / `providerAttempts`.
+ * The HTTP status is also set as `AssistantMessage.errorStatus`, the field Oh My
+ * Pi reads; on a host without pi-ai's diagnostic helpers it is the only one.
  */
 export class KiroApiError extends Error {
   constructor(
