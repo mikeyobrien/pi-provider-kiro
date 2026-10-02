@@ -589,6 +589,7 @@ function streamKiroWithUsageTracking(
         kiroRegion?: string;
         kiroProfileArn?: string;
         additionalModelRequestFieldsSchema?: Record<string, unknown>;
+        recoverTextToolCalls?: boolean;
       };
       const region = modelMetadata.kiroRegion ?? getKiroRegionFromEndpoint(model.baseUrl) ?? "us-east-1";
       let managementAuth: KiroManagementAuth = { accessToken, region };
@@ -1567,13 +1568,9 @@ function streamKiroWithUsageTracking(
         // the agent loop sees a finished answer and an unattended session stalls
         // indefinitely with no error recorded anywhere.
         //
-        // Deliberately still gated on `sawAnyToolCalls`, so it does NOT run when a
-        // native call arrived and was dropped for unparseable arguments. Widening it
-        // to `emittedToolCalls === 0` would enable text recovery on exactly the path
-        // where `KiroModel.recoverTextToolCalls === false` says not to (Claude), and
-        // that flag is not consumed here yet — so the widening cannot be made
-        // model-aware without first wiring it. The drop is reported instead.
-        if (!sawAnyToolCalls && textBlockIndex !== null) {
+        // Never reinterpret text for models that opt out, including Claude.
+        // Native malformed tool calls remain errors rather than triggering recovery.
+        if (modelMetadata.recoverTextToolCalls !== false && !sawAnyToolCalls && textBlockIndex !== null) {
           const textBlock = output.content[textBlockIndex] as TextContent;
           const recovered: Array<{ toolUseId: string; name: string; arguments: Record<string, unknown> }> = [];
           const bracketResult = parseBracketToolCalls(textBlock.text);

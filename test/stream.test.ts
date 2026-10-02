@@ -238,6 +238,17 @@ describe("Feature 9: Streaming Integration", () => {
     resetProfileArnCache(true);
   });
 
+  it("does not turn tool-shaped prose into calls when recovery is disabled", async () => {
+    const prose = '[Called read with args: {"path":"example.txt"}]';
+    vi.stubGlobal("fetch", mockFetchOk(JSON.stringify({ content: prose }) + '{"contextUsagePercentage":5}'));
+    const model = { ...makeModel({ reasoning: false }), recoverTextToolCalls: false };
+    const events = await collect(streamKiro(model, makeContext(), { apiKey: "synthetic-token" }));
+    const done = events.find((event) => event.type === "done");
+    expect(done?.type === "done" && done.message.content).toEqual([{ type: "text", text: prose }]);
+    expect(events.some((event) => event.type === "toolcall_end")).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
   it("emits error when no credentials provided", async () => {
     const stream = streamKiro(makeModel(), makeContext(), {});
     const events = await collect(stream);
