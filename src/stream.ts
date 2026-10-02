@@ -1027,6 +1027,8 @@ function streamKiroWithUsageTracking(
             toolResultCount: wireUimc?.toolResults?.length ?? 0,
             request,
           });
+          const replacementPayload = await options?.onPayload?.(request, model);
+          const requestBody = JSON.stringify(replacementPayload === undefined ? request : replacementPayload);
           const responseHeaderDeadline = createResponseHeaderDeadline(
             options?.signal,
             retryConfig.requestHeaderTimeoutMs,
@@ -1047,7 +1049,7 @@ function streamKiroWithUsageTracking(
                 "x-amz-user-agent": ua,
                 "user-agent": ua,
               },
-              body: JSON.stringify(request),
+              body: requestBody,
               signal: responseHeaderDeadline.signal,
             });
           } catch (error) {
@@ -1055,6 +1057,12 @@ function streamKiroWithUsageTracking(
             responseHeadersTimedOut = true;
           } finally {
             responseHeaderDeadline.cleanup();
+          }
+          if (!responseHeadersTimedOut) {
+            await options?.onResponse?.(
+              { status: response.status, headers: Object.fromEntries(response.headers?.entries() ?? []) },
+              model,
+            );
           }
           if (responseHeadersTimedOut) {
             if (retryCount >= maxRetries) {
