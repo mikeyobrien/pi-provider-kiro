@@ -121,6 +121,7 @@ export type KiroStreamEvent =
   | { type: "content"; data: string }
   | { type: "thinkingText"; data: string }
   | { type: "thinkingSignature"; data: string }
+  | { type: "thinkingRedacted"; data: string }
   | { type: "toolUse"; data: { name: string; toolUseId: string; input: string; stop?: boolean } }
   | { type: "toolUseInput"; data: { input: string } }
   | { type: "toolUseStop"; data: { stop: boolean } }
@@ -237,6 +238,8 @@ export function parseKiroEvent(key: string, parsed: Record<string, unknown>): Ki
       if (text !== undefined) return { type: "thinkingText", data: text };
       const signature = str(parsed.signature);
       if (signature !== undefined) return { type: "thinkingSignature", data: signature };
+      const redacted = str(parsed.redactedContent);
+      if (redacted !== undefined) return { type: "thinkingRedacted", data: redacted };
       return { type: "ignored", data: { key } };
     }
     case "toolUseEvent":
