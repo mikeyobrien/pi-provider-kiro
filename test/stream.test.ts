@@ -6004,6 +6004,7 @@ describe("Feature 9: Streaming Integration", () => {
   }, 30000);
 
   it("does not attribute an empty attempt to the echo count", async () => {
+    vi.useFakeTimers();
     const echo = '{"content":"Continue"}{"contextUsagePercentage":10}';
     const empty = '{"contextUsagePercentage":50}';
     const mockFetch = mockFetchSequence([empty, empty, empty, echo]);
@@ -6011,7 +6012,10 @@ describe("Feature 9: Streaming Integration", () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
-    const events = await collect(stream);
+    const pendingEvents = collect(stream);
+    await vi.advanceTimersByTimeAsync(15_000);
+    const events = await pendingEvents;
+    vi.useRealTimers();
 
     expect(mockFetch).toHaveBeenCalledTimes(4);
     const done = events.find((e) => e.type === "done");
