@@ -8,6 +8,7 @@ import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { formatSafeError } from "./debug.js";
 import type { KiroAuthMethod, KiroCredentials } from "./oauth.js";
+import { BUILDER_ID_PROFILE_ARN, BUILDER_ID_START_URL } from "./oauth.js";
 
 const require = createRequire(import.meta.url);
 
@@ -155,6 +156,13 @@ function tryKiroCliToken(
   const region = tokenData.region || "us-east-1";
 
   if (authMethod === "desktop") {
+    // Builder ID tokens carry no profile ARN in the DB; the default profile
+    // is fixed for Builder ID, so apply it only when the token carries the
+    // Builder ID start_url — a real SSO account's profileArn must not be
+    // clobbered by the default (issue #169).
+    const isBuilderId =
+      tokenData.start_url === BUILDER_ID_START_URL ||
+      (typeof tokenData.start_url === "string" && tokenData.start_url.includes("view.awsapps.com"));
     return {
       refresh: `${tokenData.refresh_token}|desktop`,
       access: tokenData.access_token,
@@ -163,7 +171,8 @@ function tryKiroCliToken(
       clientSecret: "",
       region,
       authMethod: "desktop",
-      profileArn: tokenData.profile_arn || tokenData.profileArn,
+      profileArn: tokenData.profile_arn || tokenData.profileArn || (isBuilderId ? BUILDER_ID_PROFILE_ARN : undefined),
+      ...(isBuilderId && tokenData.start_url ? { startUrl: tokenData.start_url } : {}),
     };
   }
 
