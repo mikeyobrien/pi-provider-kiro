@@ -1222,7 +1222,6 @@ function streamKiroWithUsageTracking(
         if (callerSignal?.aborted) onCallerStreamAbort();
         else callerSignal?.addEventListener("abort", onCallerStreamAbort, { once: true });
         let totalContent = "";
-        let lastContentData = "";
         let usageEvent: KiroUsageData | null = null;
         let meteringEvent: { credits?: number; unit?: string } | null = null;
         let receivedContextUsage = false;
@@ -1445,9 +1444,8 @@ function streamKiroWithUsageTracking(
               break;
             }
             case "content": {
+              if (event.data === "") break;
               endNativeThinking();
-              if (event.data === lastContentData) continue;
-              lastContentData = event.data;
               totalContent += event.data;
               if (thinkingParser) {
                 thinkingParser.processChunk(event.data);
@@ -1489,6 +1487,10 @@ function streamKiroWithUsageTracking(
               // later partial frame cannot erase counts already received.
               const prev: KiroUsageData = usageEvent ?? {};
               usageEvent = { ...prev, ...event.data };
+              if (event.data.contextUsagePercentage !== undefined) {
+                (output.usage as unknown as Record<string, unknown>).contextPercent = event.data.contextUsagePercentage;
+                receivedContextUsage = true;
+              }
               break;
             }
             case "metering": {
@@ -1689,8 +1691,10 @@ function streamKiroWithUsageTracking(
         const hasText = textBlockIndex !== null && (output.content[textBlockIndex] as TextContent).text.length > 0;
         const responseText = hasText ? (output.content[textBlockIndex as number] as TextContent).text : "";
         const isEchoLoop = hasText && !sawAnyToolCalls && /^\s*(continue|\.+)\s*$/i.test(responseText);
-        const degenerate = (!hasText && !sawAnyToolCalls) || isEchoLoop;
-        if (isEchoLoop) echoAttempts++;
+        // Explicit completion/refusal metadata is authoritative, including empty turns.
+        const explicitStop = usageEvent?.rawStopReason;
+        const degenerate = !explicitStop && ((!hasText && !sawAnyToolCalls) || isEchoLoop);
+        if (degenerate && isEchoLoop) echoAttempts++;
         else if (degenerate) emptyAttempts++;
         const exhausted = degenerate && retryCount >= maxRetries;
         // Use emittedToolCalls (not toolCalls.length) to avoid stopReason:"toolUse"
@@ -1701,10 +1705,26 @@ function streamKiroWithUsageTracking(
         // Resolved BEFORE the retry-exhaustion warnings below so those warnings can
         // report the value actually assigned. It reads only `receivedContextUsage`
         // and `emittedToolCalls`, neither of which the exhaustion branch touches.
-        if (!receivedContextUsage && emittedToolCalls === 0) {
-          output.stopReason = "length";
-        } else {
-          output.stopReason = emittedToolCalls > 0 ? "toolUse" : "stop";
+        switch (explicitStop) {
+          case "MAX_TOKENS":
+            output.stopReason = "length";
+            break;
+          case "MODEL_CONTEXT_WINDOW_EXCEEDED":
+            throw new Error("Kiro API error: context_length_exceeded");
+          case "CONTENT_FILTERED":
+            // Do not retry a refusal or execute any accompanying tool calls.
+            output.content = output.content.filter((block) => block.type !== "toolCall");
+            throw new Error(`Kiro content filtered: ${JSON.stringify(usageEvent?.stopDetails ?? {})}`);
+          case "PAUSE_TURN":
+            throw new Error("Kiro paused the turn; automatic continuation is not supported");
+          case "END_TURN":
+            output.stopReason = "stop";
+            break;
+          case "TOOL_USE":
+            output.stopReason = emittedToolCalls > 0 ? "toolUse" : "stop";
+            break;
+          default:
+            output.stopReason = emittedToolCalls > 0 ? "toolUse" : receivedContextUsage ? "stop" : "length";
         }
         if (degenerate) {
           if (!exhausted) {

@@ -3791,7 +3791,7 @@ describe("Feature 9: Streaming Integration", () => {
   // Content deduplication (Task 2.2)
   // =========================================================================
 
-  it("deduplicates consecutive identical content events", async () => {
+  it("preserves consecutive identical content events", async () => {
     const mockFetch = mockFetchChunked([
       '{"content":"Hello"}',
       '{"content":"Hello"}',
@@ -3804,12 +3804,12 @@ describe("Feature 9: Streaming Integration", () => {
     const events = await collect(stream);
 
     const deltas = events.filter((e) => e.type === "text_delta").map((e) => (e as { delta: string }).delta);
-    // Second "Hello" should be deduplicated
-    expect(deltas).toEqual(["Hello", " world"]);
+    // Text deltas have no identity: equal content can be intentional.
+    expect(deltas).toEqual(["Hello", "Hello", " world"]);
 
     const done = events.find((e) => e.type === "done");
     const msg = done?.type === "done" ? done.message : undefined;
-    expect(msg?.content[0].type === "text" && msg.content[0].text).toBe("Hello world");
+    expect(msg?.content[0].type === "text" && msg.content[0].text).toBe("HelloHello world");
 
     vi.unstubAllGlobals();
   });
