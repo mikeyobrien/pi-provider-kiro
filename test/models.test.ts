@@ -125,6 +125,9 @@ describe("Feature 2: Model Definitions", () => {
       ["sa-east-1", "us-east-1"],
       ["ap-northeast-2", "us-east-1"],
       ["us-east-1", "us-east-1"],
+      ["Ap-southeast-1", "us-east-1"],
+      [" EU-WEST-1 ", "eu-central-1"],
+      ["", "us-east-1"],
       [undefined, "us-east-1"],
     ])("maps %s to %s", (ssoRegion, apiRegion) => {
       expect(resolveApiRegion(ssoRegion)).toBe(apiRegion);

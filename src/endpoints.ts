@@ -26,9 +26,16 @@ export interface KiroEndpoints {
   runtime: string;
 }
 
+/**
+ * AWS region codes are lowercase, but a region can reach here in whatever case
+ * the user typed at login (e.g. `Ap-southeast-1`) and stay persisted that way.
+ * Normalize before the map lookup so a mis-cased SSO region still funnels into
+ * its Kiro API region instead of passing through as a nonexistent host.
+ */
 export function resolveApiRegion(ssoRegion: string | undefined): string {
-  if (!ssoRegion) return "us-east-1";
-  return API_REGION_MAP[ssoRegion] ?? ssoRegion;
+  const region = ssoRegion?.trim().toLowerCase();
+  if (!region) return "us-east-1";
+  return API_REGION_MAP[region] ?? region;
 }
 
 export function getKiroEndpoints(region: string): KiroEndpoints {

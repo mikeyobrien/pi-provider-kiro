@@ -111,7 +111,9 @@ export async function showLoginUI(hasCached?: boolean): Promise<LoginChoice> {
       const regionHint = new Text(theme.fg("dim", "enter submit • esc back"), 1, 0);
 
       regionInput.onSubmit = (value) => {
-        const region = value.trim();
+        // Region codes are lowercase; the OIDC host and the persisted credential
+        // both take this value verbatim.
+        const region = value.trim().toLowerCase();
         done({ method: "idc", startUrl: enteredStartUrl, region: region || undefined });
       };
       regionInput.onEscape = () => {

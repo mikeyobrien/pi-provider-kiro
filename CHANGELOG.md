@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - esbuild is now a devDependency (build-only); bumped to 0.28.2. It only produces `dist/index.js` and nothing in the published bundle imports it, yet as a runtime dependency every consumer installed esbuild 0.25.12 and its platform binary. Pinned exactly to match pi 0.87.1 (`@earendil-works/chord`). Both lockfiles now resolve a single esbuild (vite is deduped onto 0.28.2 too). `test/packaging.test.ts` pins esbuild's absence from `dependencies`.
 
+### Fixed
+
+- Normalize the SSO region's case before mapping it to a Kiro API region. A region typed at the IAM Identity Center prompt was persisted verbatim, so `Ap-southeast-1` missed `API_REGION_MAP` and every management call went to the nonexistent `management.Ap-southeast-1.kiro.dev`, failing each turn with `Kiro management ListAvailableProfiles request failed in Ap-southeast-1`. `resolveApiRegion` now trims and lowercases its input, and the login prompt lowercases the region before starting the device flow.
+
 ## [0.12.1] - 2026-09-24
 
 ### Fixed
