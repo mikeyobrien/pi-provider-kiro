@@ -8,6 +8,7 @@ import { join } from "node:path";
 import type {
   Api,
   AssistantMessage,
+  AssistantMessageEvent,
   AssistantMessageEventStream,
   Context,
   ImageContent,
@@ -530,6 +531,37 @@ function streamKiroWithUsageTracking(
   const StreamCtor = (PiAi as unknown as { AssistantMessageEventStream: new () => AssistantMessageEventStream })
     .AssistantMessageEventStream;
   const stream = new StreamCtor();
+  let started = false;
+  let publishedContent = false;
+  const openBlocks = new Map<number, "text" | "thinking">();
+  const push = stream.push.bind(stream);
+  stream.push = (event) => {
+    // Empty attempts may retry privately; the public stream starts only once.
+    if (event.type === "start") return;
+    if (event.type !== "done" && event.type !== "error") {
+      if (!started && "partial" in event) {
+        started = true;
+        push({ type: "start", partial: event.partial });
+      }
+      publishedContent = true;
+    } else if (event.type === "done" && !started) {
+      started = true;
+      push({ type: "start", partial: event.message });
+    }
+    if (event.type === "text_start") openBlocks.set(event.contentIndex, "text");
+    if (event.type === "thinking_start") openBlocks.set(event.contentIndex, "thinking");
+    if (event.type === "text_end" || event.type === "thinking_end") openBlocks.delete(event.contentIndex);
+    if (event.type === "done" || event.type === "error") {
+      const message = event.type === "done" ? event.message : event.error;
+      for (const [contentIndex, kind] of openBlocks) {
+        const block = message.content[contentIndex];
+        const content = block?.type === "text" ? block.text : block?.type === "thinking" ? block.thinking : "";
+        push({ type: `${kind}_end`, contentIndex, content, partial: message } as AssistantMessageEvent);
+      }
+      openBlocks.clear();
+    }
+    push(event);
+  };
   (async () => {
     const output: AssistantMessage = {
       role: "assistant",
@@ -1516,27 +1548,26 @@ function streamKiroWithUsageTracking(
           throw callerSignal.reason ?? new Error("Request aborted");
         }
         if (firstTokenTimedOut || idleCancelled || streamError) {
-          // Timed out or received error mid-stream: retry with backoff
+          if (publishedContent) {
+            endNativeThinking();
+            thinkingParser?.finalize();
+            if (textBlockIndex !== null)
+              stream.push({
+                type: "text_end",
+                contentIndex: textBlockIndex,
+                content: (output.content[textBlockIndex] as TextContent).text,
+                partial: output,
+              });
+            throw new Error(`Kiro stream interrupted after partial output: ${streamError ?? "stream timeout"}`);
+          }
+          // Timed out before exposing content: retry with backoff
           if (retryCount < maxRetries) {
             retryCount++;
             const delayMs = exponentialBackoff(retryCount - 1, 1000, MAX_RETRY_DELAY);
             if (streamErrorData && debugEnabled()) {
               debugLog("stream.error.typed", [streamErrorData]);
             }
-            // `output` is created once outside the retry loop, so anything the
-            // aborted attempt already appended survives into the next one. A
-            // typed error frame (throttling/validation/serviceUnavailable) can
-            // arrive after partial text, which would otherwise concatenate the
-            // abandoned prefix onto the retried response. The empty-response
-            // retry below resets for the same reason. `textBlockIndex` and the
-            // tool-call state are per-iteration and need no reset here; the
-            // usage block is cleared by `resetAttemptUsage` at the loop top.
-            //
-            // pi's event protocol has no retraction event, so deltas already
-            // pushed for the abandoned attempt cannot be withdrawn. The signals
-            // a consumer does get are the fresh `start` emitted for the retried
-            // attempt and the `partial` carried on every event, which is this
-            // same `output` object and so reflects the clear.
+            // No content was published, so retrying cannot retract visible deltas.
             output.content = [];
             await abortableDelay(delayMs, options?.signal);
             continue;
@@ -1692,7 +1723,7 @@ function streamKiroWithUsageTracking(
         const degenerate = (!hasText && !sawAnyToolCalls) || isEchoLoop;
         if (isEchoLoop) echoAttempts++;
         else if (degenerate) emptyAttempts++;
-        const exhausted = degenerate && retryCount >= maxRetries;
+        const exhausted = degenerate && (publishedContent || retryCount >= maxRetries);
         // Use emittedToolCalls (not toolCalls.length) to avoid stopReason:"toolUse"
         // when all tool calls were skipped due to empty/unparseable input — that
         // combination (empty content + toolUse stop) causes pi's agent loop to
