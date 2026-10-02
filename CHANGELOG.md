@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - esbuild is now a devDependency (build-only); bumped to 0.28.2. It only produces `dist/index.js` and nothing in the published bundle imports it, yet as a runtime dependency every consumer installed esbuild 0.25.12 and its platform binary. Pinned exactly to match pi 0.87.1 (`@earendil-works/chord`). Both lockfiles now resolve a single esbuild (vite is deduped onto 0.28.2 too). `test/packaging.test.ts` pins esbuild's absence from `dependencies`.
 
+### Fixed
+
+- Retry a Kiro management request once when it fails before any HTTP response (socket reset, stale pooled connection, DNS blip), and name the transport reason in the error. Profile discovery runs before every runtime request, so a single dropped connection ended the whole turn with an opaque `Kiro management ListAvailableProfiles request failed in <region>` — the underlying cause lived only in `Error.cause`, which hosts do not display. The retry covers `ListAvailableProfiles`, `ListAvailableModels`, `GetProfile` and `GetUsageLimits`; HTTP errors are not retried here. When the primary region answers 403 and the fallback region is then unreachable, the 403 is rethrown so the credential-refresh path ([#107](https://github.com/mikeyobrien/pi-provider-kiro/pull/107)) still runs instead of failing on the fallback's transport error.
+
 ## [0.12.1] - 2026-09-24
 
 ### Fixed

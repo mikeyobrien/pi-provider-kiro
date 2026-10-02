@@ -2,7 +2,8 @@
 // ABOUTME: Resolves profiles and discovers the current per-profile model catalog.
 
 import { createHash } from "node:crypto";
-import { debugLog, redactSensitiveText } from "./debug.js";
+import { setTimeout as sleep } from "node:timers/promises";
+import { debugLog, formatSafeError, redactSensitiveText } from "./debug.js";
 import { getKiroEndpoints } from "./endpoints.js";
 import { isApiKey, kiroAuthHeaders, kiroUserAgent } from "./oauth.js";
 import { kiroTokenTypeHeaders } from "./token-type.js";
@@ -103,6 +104,32 @@ export class KiroManagementHttpError extends Error {
   }
 }
 
+/**
+ * One retry for a request that never produced an HTTP response (socket reset,
+ * stale pooled connection, DNS blip). These fail a whole turn before the
+ * runtime call is even built, and they are almost always gone on the next
+ * attempt. HTTP errors are never retried here; callers own those semantics.
+ */
+const TRANSPORT_RETRY_DELAY_MS = 250;
+
+async function fetchManagement(url: string, init: RequestInit, operation: string, region: string): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (error) {
+    debugLog("management.transportRetry", { operation, region, error: formatSafeError(error) });
+  }
+  await sleep(TRANSPORT_RETRY_DELAY_MS);
+  try {
+    return await fetch(url, init);
+  } catch (error) {
+    // Keep the transport reason in the message: it is the only diagnostic a
+    // host shows, and hosts classify retryable failures from this text.
+    throw new Error(`Kiro management ${operation} request failed in ${region}: ${formatSafeError(error)}`, {
+      cause: error,
+    });
+  }
+}
+
 async function requestManagement<TResponse>(
   auth: KiroManagementAuth,
   operation: string,
@@ -128,13 +155,7 @@ async function requestManagement<TResponse>(
     request.body = JSON.stringify(body);
   }
 
-  let response: Response;
-  try {
-    response = await fetch(url.toString(), request);
-  } catch (error) {
-    throw new Error(`Kiro management ${operation} request failed in ${auth.region}`, { cause: error });
-  }
-
+  const response = await fetchManagement(url.toString(), request, operation, auth.region);
   return parseManagementResponse<TResponse>(response, operation, auth.region);
 }
 
@@ -150,9 +171,9 @@ function profileCacheKey(auth: KiroManagementAuth): string {
  */
 async function getApiKeyProfileArn(accessToken: string): Promise<string> {
   const operation = "GetProfile";
-  let response: Response;
-  try {
-    response = await fetch(getKiroEndpoints(API_KEY_REGION).management, {
+  const response = await fetchManagement(
+    getKiroEndpoints(API_KEY_REGION).management,
+    {
       method: "POST",
       headers: {
         "Content-Type": "application/x-amz-json-1.0",
@@ -161,10 +182,10 @@ async function getApiKeyProfileArn(accessToken: string): Promise<string> {
         ...kiroUserAgent("codewhispererruntime", "F,C"),
       },
       body: "{}",
-    });
-  } catch (error) {
-    throw new Error(`Kiro management ${operation} request failed in ${API_KEY_REGION}`, { cause: error });
-  }
+    },
+    operation,
+    API_KEY_REGION,
+  );
 
   const parsed = await parseManagementResponse<KiroGetProfileResponse>(response, operation, API_KEY_REGION);
   const arn = parsed.profile?.arn;
@@ -264,6 +285,11 @@ export async function resolveKiroProfileArn(auth: KiroManagementAuth, providedAr
           lastHttpError = error;
           continue;
         }
+        // An unreachable fallback region says nothing about the token. If an
+        // earlier region already answered 403, that is still the actionable
+        // signal: rethrow it so the 403 refresh-and-retry path (#107) runs
+        // instead of failing the turn on the fallback's transport error.
+        if (lastHttpError && !(error instanceof KiroManagementHttpError)) throw lastHttpError;
         throw error;
       }
       lastResponse = response;
@@ -347,9 +373,9 @@ export async function getUsageLimits<TResponse>(
     if (value !== undefined) url.searchParams.set(name, String(value));
   }
 
-  let response: Response;
-  try {
-    response = await fetch(url.toString(), {
+  const response = await fetchManagement(
+    url.toString(),
+    {
       method: "GET",
       headers: {
         Accept: "application/json",
@@ -357,10 +383,10 @@ export async function getUsageLimits<TResponse>(
         ...kiroTokenTypeHeaders(auth.accessToken),
         "User-Agent": "pi-provider-kiro",
       },
-    });
-  } catch (error) {
-    throw new Error(`Kiro management ${operation} request failed in ${auth.region}`, { cause: error });
-  }
+    },
+    operation,
+    auth.region,
+  );
 
   return parseManagementResponse<TResponse>(response, operation, auth.region);
 }

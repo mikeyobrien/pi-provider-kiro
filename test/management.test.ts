@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   fetchKiroModelCatalog,
+  KiroManagementHttpError,
   listAvailableModels,
   resetKiroProfileArnCache,
   resolveKiroProfileArn,
@@ -371,5 +372,47 @@ describe("Kiro management control plane", () => {
 
     await expect(resolveKiroProfileArn(auth)).resolves.toBe(profileArn);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a profile lookup once when the request never reaches the server", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(
+        Object.assign(new TypeError("The socket connection was closed unexpectedly"), {
+          code: "ECONNRESET",
+        }),
+      )
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ profiles: [{ arn: profileArn }] }) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(resolveKiroProfileArn(auth)).resolves.toBe(profileArn);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
+  });
+
+  it("names the transport failure when the retry also fails", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValue(new TypeError("Unable to connect. Is the computer able to access the url?"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(resolveKiroProfileArn(auth)).rejects.toThrow(
+      "Kiro management ListAvailableProfiles request failed in us-east-1: Unable to connect. Is the computer able to access the url?",
+    );
+    // One retry, and no probe of the fallback region on a non-HTTP failure.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the primary region's 403 when the fallback region is unreachable (#107)", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 403, statusText: "Forbidden" })
+      .mockRejectedValue(new TypeError("fetch failed"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await resolveKiroProfileArn(auth).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(KiroManagementHttpError);
+    expect((error as KiroManagementHttpError).status).toBe(403);
+    expect((error as Error).message).toBe("Kiro management ListAvailableProfiles failed in us-east-1: 403 Forbidden");
   });
 });
