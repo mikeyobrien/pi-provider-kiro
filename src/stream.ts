@@ -122,6 +122,8 @@ export interface KiroCredentialAccessor {
  *  host credential accessor, so typed consumers can pass it without a cast. */
 export interface KiroStreamOptions extends SimpleStreamOptions {
   credentialAccessor?: KiroCredentialAccessor;
+  /** Optional on older pi hosts; awaited before provider events are normalized. */
+  onProviderStreamEvent?: (event: unknown, model: Model<Api>) => void | Promise<void>;
 }
 
 const CAPACITY_LOG_DIR = join(homedir(), ".pi", "logs");
@@ -1015,6 +1017,8 @@ function streamKiroWithUsageTracking(
             toolResultCount: wireUimc?.toolResults?.length ?? 0,
             request,
           });
+          const replacementPayload = await options?.onPayload?.(request, model);
+          const requestBody = JSON.stringify(replacementPayload === undefined ? request : replacementPayload);
           const responseHeaderDeadline = createResponseHeaderDeadline(
             options?.signal,
             retryConfig.requestHeaderTimeoutMs,
@@ -1035,7 +1039,7 @@ function streamKiroWithUsageTracking(
                 "x-amz-user-agent": ua,
                 "user-agent": ua,
               },
-              body: JSON.stringify(request),
+              body: requestBody,
               signal: responseHeaderDeadline.signal,
             });
           } catch (error) {
@@ -1043,6 +1047,12 @@ function streamKiroWithUsageTracking(
             responseHeadersTimedOut = true;
           } finally {
             responseHeaderDeadline.cleanup();
+          }
+          if (!responseHeadersTimedOut) {
+            await options?.onResponse?.(
+              { status: response.status, headers: Object.fromEntries(response.headers?.entries() ?? []) },
+              model,
+            );
           }
           if (responseHeadersTimedOut) {
             if (retryCount >= maxRetries) {
@@ -1305,6 +1315,18 @@ function streamKiroWithUsageTracking(
           const entry = Object.entries(event)[0];
           if (!entry) throw new Error("Received an empty event stream message");
           const [key, msg] = entry;
+          if (options?.onProviderStreamEvent) {
+            let payload: unknown;
+            try {
+              payload = JSON.parse(utf8Decoder.decode(msg.body));
+            } catch {
+              payload = { malformed: true };
+            }
+            await options.onProviderStreamEvent(
+              { type: key, messageType: msg.headers[":message-type"]?.value, payload },
+              model,
+            );
+          }
           // The four error members of ChatResponseStream target `@error` shapes,
           // so the service frames them as `:message-type: exception`. The
           // marshaller keys those by `:exception-type` and throws whatever this
