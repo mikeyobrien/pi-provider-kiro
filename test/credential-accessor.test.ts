@@ -109,7 +109,7 @@ async function collect(stream: ReturnType<typeof streamKiro>): Promise<Assistant
   return events;
 }
 
-const idcCreds = (access: string, profileArn?: string) => ({
+const idcCreds = (access: string, profileArn = "arn:aws:codewhisperer:us-east-1:000000000000:profile/test") => ({
   refresh: `${access}-refresh|client|secret|idc`,
   access,
   expires: Date.now() + 3_600_000,
@@ -176,6 +176,25 @@ describe("streamKiro credential accessor", () => {
 
     expect(fetch.mock.calls[0][1].headers.Authorization).toBe("Bearer option-token");
     expect(events.find((e) => e.type === "done")).toBeDefined();
+    vi.unstubAllGlobals();
+  });
+
+  it("rejects runtime recovery with credentials from another profile", async () => {
+    const fetch = mockFetch403ThenOk(1);
+    vi.stubGlobal("fetch", fetch);
+    const kiroCli = await import("../src/kiro-cli.js");
+    const getSpy = vi.spyOn(kiroCli, "getKiroCliCredentials").mockReturnValue(idcCreds("stale-token"));
+    const refreshSpy = vi.spyOn(kiroCli, "refreshViaKiroCli").mockReturnValue(idcCreds("other-token", "profile-other"));
+    const accessor = { get: () => "stale-token", set: vi.fn() };
+    const events = await collect(
+      streamKiro(makeModel(), makeContext(), { apiKey: "stale-token", credentialAccessor: accessor }),
+    );
+    const error = events.find((event) => event.type === "error");
+    expect(error?.type === "error" && error.error.errorMessage).toContain("identity changed");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(accessor.set).not.toHaveBeenCalled();
+    getSpy.mockRestore();
+    refreshSpy.mockRestore();
     vi.unstubAllGlobals();
   });
 

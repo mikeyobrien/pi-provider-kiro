@@ -256,7 +256,7 @@ const TOKEN_KEY_BY_AUTH_METHOD: Record<KiroAuthMethod, string[]> = {
   apikey: [],
 };
 
-export function saveKiroCliCredentials(creds: KiroCredentials): void {
+export function saveKiroCliCredentials(creds: KiroCredentials, previous?: KiroCredentials): void {
   const dbPath = getKiroCliDbPath();
   if (!dbPath) return;
 
@@ -273,6 +273,17 @@ export function saveKiroCliCredentials(creds: KiroCredentials): void {
       const rows = JSON.parse(existing) as Array<{ value: string }>;
       if (!rows[0]?.value) continue;
       const tokenData = JSON.parse(rows[0].value);
+      if (previous) {
+        // Do not overwrite a CLI account selected after this session logged in.
+        const currentProfile = tokenData.profile_arn || tokenData.profileArn;
+        if (previous.profileArn && currentProfile && previous.profileArn !== currentProfile) continue;
+        if (
+          tokenData.access_token !== previous.access &&
+          tokenData.refresh_token !== previous.refresh.split("|")[0] &&
+          !(previous.profileArn && previous.profileArn === currentProfile)
+        )
+          continue;
+      }
 
       tokenData.access_token = creds.access;
       tokenData.refresh_token = rawRefreshToken;

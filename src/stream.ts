@@ -24,6 +24,7 @@ import * as PiAi from "@earendil-works/pi-ai";
 import { UniversalEventStreamMarshaller } from "@smithy/core/event-streams";
 import type { Message } from "@smithy/types";
 import { parseBracketToolCalls } from "./bracket-tool-parser.js";
+import { sameCredentialIdentity } from "./credential-identity.js";
 import { applyCacheEstimate } from "./cache-estimator.js";
 import { debugEnabled, debugLog, formatSafeError, redactSensitiveText } from "./debug.js";
 import {
@@ -599,6 +600,16 @@ function streamKiroWithUsageTracking(
       const cliCreds = getKiroCliCredentials() ?? getKiroCliCredentialsAllowExpired();
       const cliProfileArn = cliCreds?.access === accessToken ? cliCreds.profileArn : undefined;
       const initialProfileArn = modelMetadata.kiroProfileArn || optionProfileArn || cliProfileArn;
+      const boundIdentity = {
+        ...(cliCreds?.access === accessToken ? cliCreds : {}),
+        access: accessToken,
+        profileArn: initialProfileArn,
+      };
+      const verifyIdentity = (candidate: ReturnType<typeof getKiroCliCredentials>): void => {
+        if (candidate && !sameCredentialIdentity(boundIdentity, candidate)) {
+          throw new Error("Kiro credential identity changed; run /login kiro to select an account explicitly");
+        }
+      };
       let profileArn: string;
       try {
         profileArn =
@@ -613,8 +624,10 @@ function streamKiroWithUsageTracking(
         // runtime request can be constructed.
         const rejectedToken = accessToken;
         const storedCreds = getKiroCliCredentials();
+        verifyIdentity(storedCreds);
         const forcedRefresh = !(storedCreds?.access && storedCreds.access !== accessToken);
         const freshCreds = forcedRefresh ? refreshViaKiroCli() : storedCreds;
+        verifyIdentity(freshCreds);
         if (!freshCreds?.access) {
           refreshTrace.push(
             forcedRefresh ? "profile-403: refresh returned no token" : "profile-403: store had no fresh token",
@@ -643,6 +656,7 @@ function streamKiroWithUsageTracking(
       // runtime host and the catalog have to follow the profile: sending a
       // cross-region profile ARN to the runtime API fails the whole request with
       // a generic `Improperly formed request.`.
+      boundIdentity.profileArn = profileArn;
       let runtimeRegion = getKiroRegionFromProfileArn(profileArn) ?? region;
       let endpoint = new URL("generateAssistantResponse", getKiroEndpoints(runtimeRegion).runtime).toString();
 
@@ -1116,6 +1130,7 @@ function streamKiroWithUsageTracking(
               const rejectedAccessToken = accessToken;
               const rejectedProfileArn = profileArn;
               const storedCreds = getKiroCliCredentials();
+              verifyIdentity(storedCreds);
               const rejectedCliCreds =
                 storedCreds?.access === rejectedAccessToken
                   ? storedCreds
@@ -1124,6 +1139,7 @@ function streamKiroWithUsageTracking(
                     : undefined;
               const freshCreds: ReturnType<typeof getKiroCliCredentials> =
                 storedCreds?.access && storedCreds.access !== rejectedAccessToken ? storedCreds : refreshViaKiroCli();
+              verifyIdentity(freshCreds);
               const forcedRefresh = !(storedCreds?.access && storedCreds.access !== rejectedAccessToken);
               if (freshCreds?.access) accessToken = freshCreds.access;
               refreshTrace.push(
@@ -1151,6 +1167,11 @@ function streamKiroWithUsageTracking(
                 freshCreds?.profileArn ||
                 inheritedDesktopProfileArn ||
                 (skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth));
+              if (boundIdentity.profileArn && profileArn !== boundIdentity.profileArn) {
+                throw new Error(
+                  "Kiro profile changed during recovery; run /login kiro to select an account explicitly",
+                );
+              }
               // A replacement credential can carry a profile in another region,
               // so re-pin the runtime host before retrying.
               runtimeRegion = getKiroRegionFromProfileArn(profileArn) ?? region;
