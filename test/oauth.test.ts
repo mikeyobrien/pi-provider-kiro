@@ -207,6 +207,7 @@ describe("Feature 3: OAuth — Token Refresh", () => {
     it("uses expired kiro-cli creds as fallback when direct refresh fails", async () => {
       const { getKiroCliCredentialsAllowExpired } = await import("../src/kiro-cli.js");
       vi.mocked(getKiroCliCredentialsAllowExpired).mockReturnValueOnce({
+        profileArn: "profile-a",
         refresh: "cli_rt|cli_cid|cli_csec|idc",
         access: "cli_at",
         expires: Date.now() - 1000,
@@ -225,7 +226,12 @@ describe("Feature 3: OAuth — Token Refresh", () => {
         });
       vi.stubGlobal("fetch", mockFetch);
 
-      const creds = await refreshKiroToken({ refresh: "stale_rt|cid|csec|idc", access: "stale_at", expires: 0 });
+      const creds = await refreshKiroToken({
+        refresh: "stale_rt|cid|csec|idc",
+        access: "stale_at",
+        expires: 0,
+        profileArn: "profile-a",
+      } as KiroCredentials);
       expect(creds.access).toBe("new_at");
       vi.unstubAllGlobals();
     });
@@ -307,6 +313,7 @@ describe("Feature 3: OAuth — Token Refresh", () => {
 
     const creds = (await refreshKiroToken({
       refresh: "stored_rt|desktop",
+      profileArn: "arn:aws:codewhisperer:us-east-1:123456789012:profile/social",
       access: "stored_at",
       expires: 0,
       clientId: "",

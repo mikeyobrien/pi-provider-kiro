@@ -8,6 +8,7 @@
 // to the interactive login flow in login.ts (Feature 10).
 
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
+import { sameCredentialIdentity } from "./credential-identity.js";
 import { formatSafeError } from "./debug.js";
 import { resolveApiRegion } from "./endpoints.js";
 import { getKiroIdeCredentials, getKiroIdeCredentialsAllowExpired } from "./kiro-ide.js";
@@ -280,15 +281,17 @@ async function refreshKiroTokenInternal(credentials: OAuthCredentials): Promise<
   const credentialAuthMethod =
     (credentials as KiroCredentials).authMethod ??
     (credentials.refresh.split("|").at(-1) === "desktop" ? "desktop" : "idc");
+  const matching = (candidate: KiroCredentials | undefined): KiroCredentials | undefined =>
+    candidate && sameCredentialIdentity(credentials as KiroCredentials, candidate) ? candidate : undefined;
   const getValidCliCredentials = (): KiroCredentials | undefined => {
-    if (credentialAuthMethod === "desktop") return getKiroCliSocialToken();
+    if (credentialAuthMethod === "desktop") return matching(getKiroCliSocialToken());
     const cliCreds = getKiroCliCredentials();
-    return cliCreds?.authMethod === "idc" ? cliCreds : undefined;
+    return cliCreds?.authMethod === credentialAuthMethod ? matching(cliCreds) : undefined;
   };
   const getExpiredCliCredentials = (): KiroCredentials | undefined => {
-    if (credentialAuthMethod === "desktop") return getKiroCliSocialTokenAllowExpired();
+    if (credentialAuthMethod === "desktop") return matching(getKiroCliSocialTokenAllowExpired());
     const cliCreds = getKiroCliCredentialsAllowExpired();
-    return cliCreds?.authMethod === "idc" ? cliCreds : undefined;
+    return cliCreds?.authMethod === credentialAuthMethod ? matching(cliCreds) : undefined;
   };
 
   // API key credentials are long-lived bearer tokens — there is nothing to
@@ -302,7 +305,7 @@ async function refreshKiroTokenInternal(credentials: OAuthCredentials): Promise<
   // the IDE's potentially unrelated account (auth-family guard, #142).
   if (credentialAuthMethod === "idc") {
     const ideCreds = getKiroIdeCredentials();
-    if (ideCreds) return ideCreds;
+    if (ideCreds && matching(ideCreds)) return ideCreds;
   }
 
   // Prefer a fresh CLI token only when it belongs to the same auth family.
@@ -312,8 +315,7 @@ async function refreshKiroTokenInternal(credentials: OAuthCredentials): Promise<
   try {
     const refreshed = await refreshKiroTokenDirect(credentials);
 
-    // Write refreshed tokens back to kiro-cli's SQLite DB so both stay in sync.
-    saveKiroCliCredentials(refreshed as KiroCredentials);
+    saveKiroCliCredentials(refreshed as KiroCredentials, credentials as KiroCredentials);
 
     return refreshed;
   } catch (refreshError) {
@@ -327,7 +329,7 @@ async function refreshKiroTokenInternal(credentials: OAuthCredentials): Promise<
     if (expiredCliCreds && expiredCliCreds.refresh !== credentials.refresh) {
       try {
         const refreshedFromCli = await refreshKiroTokenDirect(expiredCliCreds);
-        saveKiroCliCredentials(refreshedFromCli as KiroCredentials);
+        saveKiroCliCredentials(refreshedFromCli as KiroCredentials, expiredCliCreds);
         return refreshedFromCli;
       } catch {
         // Also failed, continue to remaining fallbacks

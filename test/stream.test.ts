@@ -540,7 +540,7 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
-  it("uses a newer kiro-cli token when initial profile discovery returns 403", async () => {
+  it("rejects an unbound CLI identity when initial profile discovery returns 403", async () => {
     resetProfileArnCache(false);
     const freshProfileArn = "arn:aws:codewhisperer:us-east-1:123:profile/FRESH";
     const mockFetch = vi
@@ -588,15 +588,9 @@ describe("Feature 9: Streaming Integration", () => {
     const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "stale-token" }));
 
     expect(refreshSpy).not.toHaveBeenCalled();
-    expect(mockFetch).toHaveBeenCalledTimes(4);
-    expect(mockFetch.mock.calls[0][1].headers.Authorization).toBe("Bearer stale-token");
-    expect(mockFetch.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
-    expect(mockFetch.mock.calls[1][1].headers.Authorization).toBe("Bearer stale-token");
-    expect(mockFetch.mock.calls[1][0]).toBe("https://management.eu-central-1.kiro.dev/List-Available-Profiles");
-    expect(mockFetch.mock.calls[2][1].headers.Authorization).toBe("Bearer fresh-token");
-    expect(mockFetch.mock.calls[3][1].headers.Authorization).toBe("Bearer fresh-token");
-    expect(JSON.parse(mockFetch.mock.calls[3][1].body).profileArn).toBe(freshProfileArn);
-    expect(events.find((event) => event.type === "done")).toBeDefined();
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(events.find((event) => event.type === "error")?.type).toBe("error");
+    expect(events.some((event) => event.type === "done")).toBe(false);
 
     getCredsSpy.mockRestore();
     refreshSpy.mockRestore();
@@ -3528,7 +3522,7 @@ describe("Feature 9: Streaming Integration", () => {
   it("refreshes rejected CLI credentials and re-resolves the profile before retrying runtime", async () => {
     resetProfileArnCache(false);
     const staleProfileArn = "arn:aws:codewhisperer:us-east-1:123:profile/STALE";
-    const freshProfileArn = "arn:aws:codewhisperer:us-east-1:123:profile/FRESH";
+    const freshProfileArn = staleProfileArn;
     const successFrames = encodeBody('{"content":"ok"}{"contextUsagePercentage":5}');
     const mockFetch = vi
       .fn()
@@ -3572,7 +3566,7 @@ describe("Feature 9: Streaming Integration", () => {
     };
     const freshCliCreds = {
       ...staleCliCreds,
-      refresh: "fresh-refresh|client|secret|idc",
+      refresh: staleCliCreds.refresh,
       access: "fresh-token",
       profileArn: undefined,
     };
@@ -3642,7 +3636,7 @@ describe("Feature 9: Streaming Integration", () => {
     };
     const refreshedSocialCreds = {
       ...staleSocialCreds,
-      refresh: "fresh-social-refresh|desktop",
+      refresh: staleSocialCreds.refresh,
       access: "fresh-social-token",
       profileArn: undefined,
     };
@@ -3710,17 +3704,9 @@ describe("Feature 9: Streaming Integration", () => {
     const stream = streamKiro(makeModel(), makeContext(), { apiKey: "stale-token" });
     const events = await collect(stream);
 
-    expect(mockFetch).toHaveBeenCalledTimes(3);
-    // 1st: ListAvailableProfiles with stale token on management.
-    expect(mockFetch.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
-    expect(mockFetch.mock.calls[0][1].headers.Authorization).toBe("Bearer stale-token");
-    // 2nd: generateAssistantResponse with stale token → 403
-    expect(mockFetch.mock.calls[1][1].headers.Authorization).toBe("Bearer stale-token");
-    // 3rd: ListAvailableProfiles fails with the fresh token on management.
-    expect(mockFetch.mock.calls[2][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
-    expect(mockFetch.mock.calls[2][1].headers.Authorization).toBe("Bearer fresh-access-token");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
     const error = events.find((event) => event.type === "error");
-    expect(error?.type === "error" && error.error.errorMessage).toContain("ListAvailableProfiles failed");
+    expect(error?.type === "error" && error.error.errorMessage).toContain("identity changed");
 
     getCredsSpy.mockRestore();
     vi.unstubAllGlobals();
