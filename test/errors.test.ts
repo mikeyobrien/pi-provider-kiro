@@ -419,7 +419,7 @@ describe("typed classification per reason code", () => {
     expect(diagnostic?.error?.message).toBe(message.errorMessage);
   });
 
-  it("adds no diagnostic when the request succeeds", async () => {
+  it("adds no kiro_api_error diagnostic when the request succeeds", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       body: {
@@ -444,7 +444,10 @@ describe("typed classification per reason code", () => {
       const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
       const done = events.find((e) => e.type === "done");
 
-      expect(done?.type === "done" && done.message.diagnostics).toBeUndefined();
+      // A successful turn does carry the per-turn provenance record (see
+      // test/stream.test.ts); what it must never carry is an error record.
+      const diagnostics = done?.type === "done" ? (done.message.diagnostics ?? []) : [];
+      expect(diagnostics.some((d) => d.type === "kiro_api_error")).toBe(false);
     } finally {
       vi.unstubAllGlobals();
     }
