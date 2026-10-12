@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Recover the Claude/Opus text leak where a tool call arrives as a lone `court` line followed by `<invoke>`, including when prose comes first. Claude still skips broad text-tool recovery, so bracket text, `<tool_use>` JSON, fenced samples, and invokes without that sentinel stay as text. The sentinel and the invoke block are removed from the transcript so later turns do not copy them.
+- Keep that leaked markup out of the text stream. Pi draws the tool box from tool-call events, so streaming `court` and `<invoke>` first left the raw XML on screen. A registered call is now emitted as a tool call instead of as text.
 
 ### Changed
 

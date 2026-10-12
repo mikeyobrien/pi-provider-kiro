@@ -5479,6 +5479,89 @@ function parseCourtPrefixedInvokeCalls(text) {
   if (parsed.toolCalls.length !== opens.length) return untouched;
   return { toolCalls: parsed.toolCalls, cleanedText: stripCourtSentinelLines(parsed.cleanedText) };
 }
+var INVOKE_OPEN_PREFIX = '<invoke name="';
+function createCourtInvokeGate(isRegistered) {
+  let pending = "";
+  const drain = (flush) => {
+    let text = "";
+    const toolCalls = [];
+    while (pending.length > 0) {
+      const { visible, held } = takeVisibleCourtPrefix(pending);
+      text += visible;
+      pending = held;
+      if (!pending) break;
+      const consumed = consumeHeldCourtInvoke(pending, isRegistered);
+      if (consumed.kind === "wait") {
+        if (!flush) break;
+        text += pending;
+        pending = "";
+        break;
+      }
+      if (consumed.kind === "release") {
+        text += pending;
+        pending = "";
+        break;
+      }
+      toolCalls.push(...consumed.calls);
+      pending = consumed.rest;
+    }
+    return { text, toolCalls };
+  };
+  return {
+    push(chunk) {
+      pending += chunk;
+      return drain(false);
+    },
+    finish() {
+      return drain(true);
+    }
+  };
+}
+function takeVisibleCourtPrefix(pending) {
+  let lineStart = 0;
+  while (lineStart < pending.length) {
+    const nl = pending.indexOf("\n", lineStart);
+    if (nl < 0) {
+      const line2 = pending.slice(lineStart);
+      const indent = line2.match(/^[ \t]*/)?.[0].length ?? 0;
+      const body = line2.slice(indent);
+      if (COURT_SENTINEL.startsWith(body))
+        return { visible: pending.slice(0, lineStart), held: pending.slice(lineStart) };
+      return { visible: pending, held: "" };
+    }
+    const line = pending.slice(lineStart, nl);
+    if (line.trim() === COURT_SENTINEL && fenceAround(pending, lineStart) === "outside") {
+      return { visible: pending.slice(0, lineStart), held: pending.slice(lineStart) };
+    }
+    lineStart = nl + 1;
+  }
+  return { visible: pending, held: "" };
+}
+function fenceAround(text, index) {
+  const fence = fencedRanges(text).find((range) => index >= range.start && index < range.end);
+  if (!fence) return "outside";
+  const closer = text.indexOf(FENCE, fence.start + FENCE.length);
+  return closer >= 0 && closer < fence.end ? "closed" : "open";
+}
+function consumeHeldCourtInvoke(held, isRegistered) {
+  if (!/^[ \t]*court[ \t]*(\n|$)/.test(held)) return { kind: "release" };
+  const courtAt = held.search(/^[ \t]*court[ \t]*$/m);
+  if (courtAt >= 0) {
+    const fenced = fenceAround(held, courtAt);
+    if (fenced === "closed") return { kind: "release" };
+    if (fenced === "open") return { kind: "wait" };
+  }
+  if (!held.includes("\n")) return { kind: "wait" };
+  const after = held.replace(/^[ \t]*court[ \t]*\n/, "");
+  if (after.trim() === "") return { kind: "wait" };
+  const next = after.trimStart();
+  if (INVOKE_OPEN_PREFIX.startsWith(next)) return { kind: "wait" };
+  if (!next.startsWith(INVOKE_OPEN_PREFIX)) return { kind: "release" };
+  const parsed = parseCourtPrefixedInvokeCalls(held);
+  if (parsed.toolCalls.length === 0) return { kind: "wait" };
+  if (!parsed.toolCalls.every((call) => isRegistered(call.name))) return { kind: "release" };
+  return { kind: "tool", calls: parsed.toolCalls, rest: parsed.cleanedText };
+}
 
 // src/stream.ts
 init_kiro_cli();
@@ -6826,6 +6909,45 @@ ${currentContent}`;
         let emittedToolCalls = 0;
         let sawAnyToolCalls = false;
         const droppedToolCalls = [];
+        const registeredToolNames = new Set(currentTools.map((tool) => tool.name));
+        const courtGate = modelMetadata.recoverTextToolCalls === false ? createCourtInvokeGate((name) => registeredToolNames.has(normalizeToolName(name))) : null;
+        const emitVisibleText = (text) => {
+          if (!text) return;
+          if (thinkingParser) {
+            thinkingParser.processChunk(text);
+            return;
+          }
+          if (textBlockIndex === null) {
+            textBlockIndex = output.content.length;
+            output.content.push({ type: "text", text: "" });
+            stream.push({ type: "text_start", contentIndex: textBlockIndex, partial: output });
+          }
+          output.content[textBlockIndex].text += text;
+          stream.push({ type: "text_delta", contentIndex: textBlockIndex, delta: text, partial: output });
+        };
+        const trimCourtSeparator = () => {
+          const index = thinkingParser?.getTextBlockIndex() ?? textBlockIndex;
+          if (index === null) return;
+          const block = output.content[index];
+          if (block?.type === "text") block.text = block.text.replace(/\s+$/, "");
+        };
+        const applyCourtStep = (step) => {
+          emitVisibleText(step.text);
+          if (step.toolCalls.length === 0) return;
+          trimCourtSeparator();
+          for (const call of step.toolCalls) {
+            if (emitToolCall(
+              { toolUseId: call.toolUseId, name: call.name, input: JSON.stringify(call.arguments) },
+              output,
+              stream
+            )) {
+              emittedToolCalls++;
+              sawAnyToolCalls = true;
+            } else {
+              droppedToolCalls.push(call.name);
+            }
+          }
+        };
         let currentToolCall = null;
         const flushToolCall = () => {
           if (!currentToolCall) return;
@@ -6975,16 +7097,12 @@ ${currentContent}`;
               if (event.data === "") break;
               endNativeThinking();
               totalContent += event.data;
-              if (thinkingParser) {
+              if (courtGate) {
+                applyCourtStep(courtGate.push(event.data));
+              } else if (thinkingParser) {
                 thinkingParser.processChunk(event.data);
               } else {
-                if (textBlockIndex === null) {
-                  textBlockIndex = output.content.length;
-                  output.content.push({ type: "text", text: "" });
-                  stream.push({ type: "text_start", contentIndex: textBlockIndex, partial: output });
-                }
-                output.content[textBlockIndex].text += event.data;
-                stream.push({ type: "text_delta", contentIndex: textBlockIndex, delta: event.data, partial: output });
+                emitVisibleText(event.data);
               }
               break;
             }
@@ -7060,6 +7178,7 @@ ${currentContent}`;
           else droppedToolCalls.push(currentToolCall.name);
         }
         endNativeThinking();
+        if (courtGate) applyCourtStep(courtGate.finish());
         if (thinkingParser) {
           thinkingParser.finalize();
           textBlockIndex = thinkingParser.getTextBlockIndex();

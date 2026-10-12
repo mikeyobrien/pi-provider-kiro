@@ -220,3 +220,113 @@ export function parseCourtPrefixedInvokeCalls(text: string): InvokeParseResult {
   if (parsed.toolCalls.length !== opens.length) return untouched;
   return { toolCalls: parsed.toolCalls, cleanedText: stripCourtSentinelLines(parsed.cleanedText) };
 }
+
+export interface CourtGateStep {
+  /** Prose that cannot be part of a leaked invoke. Safe to stream as text. */
+  text: string;
+  /** Completed invokes whose markup must not be streamed as text. */
+  toolCalls: InvokeToolCall[];
+}
+
+type HeldConsumption = { kind: "wait" } | { kind: "release" } | { kind: "tool"; calls: InvokeToolCall[]; rest: string };
+
+const INVOKE_OPEN_PREFIX = '<invoke name="';
+
+/**
+ * Holds a possible `court` + `<invoke>` leak out of the text stream until it
+ * either completes as a registered tool call or proves it is ordinary prose.
+ * Pi paints tool calls from tool-call events; streaming the markup first leaves
+ * the raw XML on screen instead of the tool box.
+ */
+export function createCourtInvokeGate(isRegistered: (name: string) => boolean): {
+  push(chunk: string): CourtGateStep;
+  finish(): CourtGateStep;
+} {
+  let pending = "";
+  const drain = (flush: boolean): CourtGateStep => {
+    let text = "";
+    const toolCalls: InvokeToolCall[] = [];
+    while (pending.length > 0) {
+      const { visible, held } = takeVisibleCourtPrefix(pending);
+      text += visible;
+      pending = held;
+      if (!pending) break;
+      const consumed = consumeHeldCourtInvoke(pending, isRegistered);
+      if (consumed.kind === "wait") {
+        if (!flush) break;
+        text += pending;
+        pending = "";
+        break;
+      }
+      if (consumed.kind === "release") {
+        text += pending;
+        pending = "";
+        break;
+      }
+      toolCalls.push(...consumed.calls);
+      pending = consumed.rest;
+    }
+    return { text, toolCalls };
+  };
+  return {
+    push(chunk: string) {
+      pending += chunk;
+      return drain(false);
+    },
+    finish() {
+      return drain(true);
+    },
+  };
+}
+
+/** Split off a prefix that cannot grow into a lone `court` line. */
+function takeVisibleCourtPrefix(pending: string): { visible: string; held: string } {
+  let lineStart = 0;
+  while (lineStart < pending.length) {
+    const nl = pending.indexOf("\n", lineStart);
+    if (nl < 0) {
+      const line = pending.slice(lineStart);
+      const indent = line.match(/^[ \t]*/)?.[0].length ?? 0;
+      const body = line.slice(indent);
+      if (COURT_SENTINEL.startsWith(body))
+        return { visible: pending.slice(0, lineStart), held: pending.slice(lineStart) };
+      return { visible: pending, held: "" };
+    }
+    const line = pending.slice(lineStart, nl);
+    // A `court` line inside ``` is a sample, not a call. Leave it in the prose.
+    if (line.trim() === COURT_SENTINEL && fenceAround(pending, lineStart) === "outside") {
+      return { visible: pending.slice(0, lineStart), held: pending.slice(lineStart) };
+    }
+    lineStart = nl + 1;
+  }
+  return { visible: pending, held: "" };
+}
+
+function fenceAround(text: string, index: number): "outside" | "closed" | "open" {
+  const fence = fencedRanges(text).find((range) => index >= range.start && index < range.end);
+  if (!fence) return "outside";
+  const closer = text.indexOf(FENCE, fence.start + FENCE.length);
+  return closer >= 0 && closer < fence.end ? "closed" : "open";
+}
+
+function consumeHeldCourtInvoke(held: string, isRegistered: (name: string) => boolean): HeldConsumption {
+  if (!/^[ \t]*court[ \t]*(\n|$)/.test(held)) return { kind: "release" };
+  const courtAt = held.search(/^[ \t]*court[ \t]*$/m);
+  if (courtAt >= 0) {
+    const fenced = fenceAround(held, courtAt);
+    // A sample inside ``` must stay text. An unclosed fence is still being
+    // typed, so hold it until the fence ends or the stream finishes.
+    if (fenced === "closed") return { kind: "release" };
+    if (fenced === "open") return { kind: "wait" };
+  }
+  if (!held.includes("\n")) return { kind: "wait" };
+  const after = held.replace(/^[ \t]*court[ \t]*\n/, "");
+  if (after.trim() === "") return { kind: "wait" };
+  const next = after.trimStart();
+  if (INVOKE_OPEN_PREFIX.startsWith(next)) return { kind: "wait" };
+  if (!next.startsWith(INVOKE_OPEN_PREFIX)) return { kind: "release" };
+  const parsed = parseCourtPrefixedInvokeCalls(held);
+  if (parsed.toolCalls.length === 0) return { kind: "wait" };
+  if (!parsed.toolCalls.every((call) => isRegistered(call.name))) return { kind: "release" };
+  return { kind: "tool", calls: parsed.toolCalls, rest: parsed.cleanedText };
+}

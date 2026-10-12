@@ -42,7 +42,7 @@ import {
   prepareHistory,
 } from "./history.js";
 import { isKiroToolStructureRule, kiroConversationEntries, repairKiroConversation } from "./history-validator.js";
-import { parseCourtPrefixedInvokeCalls, parseInvokeToolCalls } from "./invoke-tool-parser.js";
+import { createCourtInvokeGate, parseCourtPrefixedInvokeCalls, parseInvokeToolCalls } from "./invoke-tool-parser.js";
 import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, refreshViaKiroCli } from "./kiro-cli.js";
 import {
   invalidateKiroProfileArn,
@@ -1258,6 +1258,53 @@ function streamKiroWithUsageTracking(
          *  not parse. Per-attempt, like `emittedToolCalls`: a retry must not inherit
          *  a discarded attempt's drops. */
         const droppedToolCalls: unknown[] = [];
+        const registeredToolNames = new Set(currentTools.map((tool) => tool.name));
+        const courtGate =
+          modelMetadata.recoverTextToolCalls === false
+            ? createCourtInvokeGate((name) => registeredToolNames.has(normalizeToolName(name)))
+            : null;
+        const emitVisibleText = (text: string): void => {
+          if (!text) return;
+          if (thinkingParser) {
+            thinkingParser.processChunk(text);
+            return;
+          }
+          if (textBlockIndex === null) {
+            textBlockIndex = output.content.length;
+            output.content.push({ type: "text", text: "" });
+            stream.push({ type: "text_start", contentIndex: textBlockIndex, partial: output });
+          }
+          (output.content[textBlockIndex] as TextContent).text += text;
+          stream.push({ type: "text_delta", contentIndex: textBlockIndex, delta: text, partial: output });
+        };
+        const trimCourtSeparator = (): void => {
+          const index = thinkingParser?.getTextBlockIndex() ?? textBlockIndex;
+          if (index === null) return;
+          const block = output.content[index];
+          if (block?.type === "text") block.text = block.text.replace(/\s+$/, "");
+        };
+        const applyCourtStep = (step: {
+          text: string;
+          toolCalls: Array<{ toolUseId: string; name: string; arguments: Record<string, unknown> }>;
+        }): void => {
+          emitVisibleText(step.text);
+          if (step.toolCalls.length === 0) return;
+          trimCourtSeparator();
+          for (const call of step.toolCalls) {
+            if (
+              emitToolCall(
+                { toolUseId: call.toolUseId, name: call.name, input: JSON.stringify(call.arguments) },
+                output,
+                stream,
+              )
+            ) {
+              emittedToolCalls++;
+              sawAnyToolCalls = true;
+            } else {
+              droppedToolCalls.push(call.name);
+            }
+          }
+        };
         let currentToolCall: KiroToolCallState | null = null;
         const flushToolCall = () => {
           if (!currentToolCall) return;
@@ -1448,16 +1495,12 @@ function streamKiroWithUsageTracking(
               if (event.data === "") break;
               endNativeThinking();
               totalContent += event.data;
-              if (thinkingParser) {
+              if (courtGate) {
+                applyCourtStep(courtGate.push(event.data));
+              } else if (thinkingParser) {
                 thinkingParser.processChunk(event.data);
               } else {
-                if (textBlockIndex === null) {
-                  textBlockIndex = output.content.length;
-                  output.content.push({ type: "text", text: "" });
-                  stream.push({ type: "text_start", contentIndex: textBlockIndex, partial: output });
-                }
-                (output.content[textBlockIndex] as TextContent).text += event.data;
-                stream.push({ type: "text_delta", contentIndex: textBlockIndex, delta: event.data, partial: output });
+                emitVisibleText(event.data);
               }
               break;
             }
@@ -1554,6 +1597,7 @@ function streamKiroWithUsageTracking(
           else droppedToolCalls.push(currentToolCall.name);
         }
         endNativeThinking();
+        if (courtGate) applyCourtStep(courtGate.finish());
         if (thinkingParser) {
           thinkingParser.finalize();
           textBlockIndex = thinkingParser.getTextBlockIndex();

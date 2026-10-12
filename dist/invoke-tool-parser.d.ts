@@ -20,3 +20,19 @@ export declare function parseInvokeToolCalls(text: string): InvokeParseResult;
  * any invoke that is not prefixed by that sentinel, are left in the text.
  */
 export declare function parseCourtPrefixedInvokeCalls(text: string): InvokeParseResult;
+export interface CourtGateStep {
+    /** Prose that cannot be part of a leaked invoke. Safe to stream as text. */
+    text: string;
+    /** Completed invokes whose markup must not be streamed as text. */
+    toolCalls: InvokeToolCall[];
+}
+/**
+ * Holds a possible `court` + `<invoke>` leak out of the text stream until it
+ * either completes as a registered tool call or proves it is ordinary prose.
+ * Pi paints tool calls from tool-call events; streaming the markup first leaves
+ * the raw XML on screen instead of the tool box.
+ */
+export declare function createCourtInvokeGate(isRegistered: (name: string) => boolean): {
+    push(chunk: string): CourtGateStep;
+    finish(): CourtGateStep;
+};

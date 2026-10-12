@@ -4982,6 +4982,52 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
+  it("does not stream court invoke markup as text when recovery is off", async () => {
+    // The green tool box is drawn from tool-call events. If the leak is
+    // forwarded as text deltas first, the TUI paints the raw XML and the box
+    // never replaces it. Prose may stream; the sentinel and the invoke may not.
+    const command = "ls /tmp";
+    const prose = "先看一下目录。";
+    const leaked = [
+      prose,
+      "",
+      "court",
+      '<invoke name="bash">',
+      `<parameter name="command">${command}</parameter>`,
+      "</invoke>",
+    ].join("\n");
+    const cut = leaked.indexOf("court");
+    vi.stubGlobal(
+      "fetch",
+      mockFetchChunked([
+        JSON.stringify({ content: leaked.slice(0, cut) }),
+        JSON.stringify({ content: leaked.slice(cut) }),
+        '{"contextUsagePercentage":10}',
+      ]),
+    );
+    const model = { ...makeModel({ reasoning: true }), recoverTextToolCalls: false };
+    const context: Context = {
+      ...makeContext(),
+      tools: [{ name: "bash", description: "Run a command", parameters: { type: "object", properties: {} } }],
+    };
+    const events = await collect(streamKiro(model, context, { apiKey: "tok" }));
+    const streamed = events
+      .filter((event) => event.type === "text_delta")
+      .map((event) => (event.type === "text_delta" ? event.delta : ""))
+      .join("");
+    expect(streamed).not.toContain("court");
+    expect(streamed).not.toContain("<invoke");
+    expect(events.some((event) => event.type === "toolcall_end")).toBe(true);
+    const done = events.find((event) => event.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    const call = msg?.content.find((block) => block.type === "toolCall");
+    expect(call?.type === "toolCall" && call.name).toBe("bash");
+    expect(call?.type === "toolCall" && call.arguments.command).toBe(command);
+    expect(msg?.content.find((block) => block.type === "text")).toEqual({ type: "text", text: prose });
+    expect(done?.type === "done" && done.reason).toBe("toolUse");
+    vi.unstubAllGlobals();
+  });
+
   it("leaves an invoke alone when recovery is off and the court sentinel is missing", async () => {
     const leaked = '<invoke name="bash">\n<parameter name="command">ls /tmp</parameter>\n</invoke>';
     vi.stubGlobal("fetch", mockFetchOk(`${JSON.stringify({ content: leaked })}{"contextUsagePercentage":10}`));
