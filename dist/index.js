@@ -5445,6 +5445,40 @@ function parseInvokeToolCalls(text) {
   }
   return { toolCalls, cleanedText };
 }
+var COURT_SENTINEL = "court";
+function invokeOpensOutsideFences(text) {
+  const fences = fencedRanges(text);
+  const opens = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const openStart = text.indexOf(INVOKE_OPEN_SEARCH, cursor);
+    if (openStart < 0) break;
+    const containingFence = fences.find((range) => openStart >= range.start && openStart < range.end);
+    if (containingFence) {
+      cursor = containingFence.end;
+      continue;
+    }
+    opens.push(openStart);
+    cursor = openStart + INVOKE_OPEN_SEARCH.length;
+  }
+  return opens;
+}
+function precededByCourtLine(text, openStart) {
+  const before = text.slice(0, openStart).trimEnd();
+  const lineStart = before.lastIndexOf("\n") + 1;
+  return before.slice(lineStart).trim() === COURT_SENTINEL;
+}
+function stripCourtSentinelLines(text) {
+  return text.split("\n").filter((line) => line.trim() !== COURT_SENTINEL).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+function parseCourtPrefixedInvokeCalls(text) {
+  const untouched = { toolCalls: [], cleanedText: text };
+  const opens = invokeOpensOutsideFences(text);
+  if (opens.length === 0 || !opens.every((start) => precededByCourtLine(text, start))) return untouched;
+  const parsed = parseInvokeToolCalls(text);
+  if (parsed.toolCalls.length !== opens.length) return untouched;
+  return { toolCalls: parsed.toolCalls, cleanedText: stripCourtSentinelLines(parsed.cleanedText) };
+}
 
 // src/stream.ts
 init_kiro_cli();
@@ -7030,23 +7064,32 @@ ${currentContent}`;
           thinkingParser.finalize();
           textBlockIndex = thinkingParser.getTextBlockIndex();
         }
-        if (modelMetadata.recoverTextToolCalls !== false && !sawAnyToolCalls && textBlockIndex !== null) {
+        if (!sawAnyToolCalls && textBlockIndex !== null) {
           const textBlock = output.content[textBlockIndex];
           const recovered = [];
-          const bracketResult = parseBracketToolCalls(textBlock.text);
-          if (bracketResult.toolCalls.length > 0) {
-            textBlock.text = bracketResult.cleanedText;
-            recovered.push(...bracketResult.toolCalls);
-          }
-          const invokeResult = parseInvokeToolCalls(textBlock.text);
-          if (invokeResult.toolCalls.length > 0) {
-            textBlock.text = invokeResult.cleanedText;
-            recovered.push(...invokeResult.toolCalls);
-          }
-          const toolUseResult = parseToolUseCalls(textBlock.text);
-          if (toolUseResult.toolCalls.length > 0) {
-            textBlock.text = toolUseResult.cleanedText;
-            recovered.push(...toolUseResult.toolCalls);
+          if (modelMetadata.recoverTextToolCalls !== false) {
+            const bracketResult = parseBracketToolCalls(textBlock.text);
+            if (bracketResult.toolCalls.length > 0) {
+              textBlock.text = bracketResult.cleanedText;
+              recovered.push(...bracketResult.toolCalls);
+            }
+            const invokeResult = parseInvokeToolCalls(textBlock.text);
+            if (invokeResult.toolCalls.length > 0) {
+              textBlock.text = invokeResult.cleanedText;
+              recovered.push(...invokeResult.toolCalls);
+            }
+            const toolUseResult = parseToolUseCalls(textBlock.text);
+            if (toolUseResult.toolCalls.length > 0) {
+              textBlock.text = toolUseResult.cleanedText;
+              recovered.push(...toolUseResult.toolCalls);
+            }
+          } else {
+            const invokeResult = parseCourtPrefixedInvokeCalls(textBlock.text);
+            const registeredNames = new Set(currentTools.map((tool) => tool.name));
+            if (invokeResult.toolCalls.length > 0 && invokeResult.toolCalls.every((call) => registeredNames.has(normalizeToolName(call.name)))) {
+              textBlock.text = invokeResult.cleanedText;
+              recovered.push(...invokeResult.toolCalls);
+            }
           }
           if (recovered.length > 0) {
             sawAnyToolCalls = true;

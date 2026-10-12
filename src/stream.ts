@@ -42,7 +42,7 @@ import {
   prepareHistory,
 } from "./history.js";
 import { isKiroToolStructureRule, kiroConversationEntries, repairKiroConversation } from "./history-validator.js";
-import { parseInvokeToolCalls } from "./invoke-tool-parser.js";
+import { parseCourtPrefixedInvokeCalls, parseInvokeToolCalls } from "./invoke-tool-parser.js";
 import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, refreshViaKiroCli } from "./kiro-cli.js";
 import {
   invalidateKiroProfileArn,
@@ -1570,25 +1570,41 @@ function streamKiroWithUsageTracking(
         // the agent loop sees a finished answer and an unattended session stalls
         // indefinitely with no error recorded anywhere.
         //
-        // Never reinterpret text for models that opt out, including Claude.
-        // Native malformed tool calls remain errors rather than triggering recovery.
-        if (modelMetadata.recoverTextToolCalls !== false && !sawAnyToolCalls && textBlockIndex !== null) {
+        // Models that opt out, including Claude, skip the broad dialects above.
+        // They still leak one recognizable shape at high context: a lone `court`
+        // line immediately before a complete `<invoke>` of a registered tool,
+        // usually after a sentence of prose. Recover only that shape. Anything
+        // else — bracket text, `<tool_use>` JSON, an invoke quoted without the
+        // sentinel — stays text, and native malformed tool calls stay errors.
+        if (!sawAnyToolCalls && textBlockIndex !== null) {
           const textBlock = output.content[textBlockIndex] as TextContent;
           const recovered: Array<{ toolUseId: string; name: string; arguments: Record<string, unknown> }> = [];
-          const bracketResult = parseBracketToolCalls(textBlock.text);
-          if (bracketResult.toolCalls.length > 0) {
-            textBlock.text = bracketResult.cleanedText;
-            recovered.push(...bracketResult.toolCalls);
-          }
-          const invokeResult = parseInvokeToolCalls(textBlock.text);
-          if (invokeResult.toolCalls.length > 0) {
-            textBlock.text = invokeResult.cleanedText;
-            recovered.push(...invokeResult.toolCalls);
-          }
-          const toolUseResult = parseToolUseCalls(textBlock.text);
-          if (toolUseResult.toolCalls.length > 0) {
-            textBlock.text = toolUseResult.cleanedText;
-            recovered.push(...toolUseResult.toolCalls);
+          if (modelMetadata.recoverTextToolCalls !== false) {
+            const bracketResult = parseBracketToolCalls(textBlock.text);
+            if (bracketResult.toolCalls.length > 0) {
+              textBlock.text = bracketResult.cleanedText;
+              recovered.push(...bracketResult.toolCalls);
+            }
+            const invokeResult = parseInvokeToolCalls(textBlock.text);
+            if (invokeResult.toolCalls.length > 0) {
+              textBlock.text = invokeResult.cleanedText;
+              recovered.push(...invokeResult.toolCalls);
+            }
+            const toolUseResult = parseToolUseCalls(textBlock.text);
+            if (toolUseResult.toolCalls.length > 0) {
+              textBlock.text = toolUseResult.cleanedText;
+              recovered.push(...toolUseResult.toolCalls);
+            }
+          } else {
+            const invokeResult = parseCourtPrefixedInvokeCalls(textBlock.text);
+            const registeredNames = new Set(currentTools.map((tool) => tool.name));
+            if (
+              invokeResult.toolCalls.length > 0 &&
+              invokeResult.toolCalls.every((call) => registeredNames.has(normalizeToolName(call.name)))
+            ) {
+              textBlock.text = invokeResult.cleanedText;
+              recovered.push(...invokeResult.toolCalls);
+            }
           }
           if (recovered.length > 0) {
             sawAnyToolCalls = true;

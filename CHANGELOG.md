@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Recover the Claude/Opus text leak where a tool call arrives as a lone `court` line followed by `<invoke>`, including when prose comes first. Claude still skips broad text-tool recovery, so bracket text, `<tool_use>` JSON, fenced samples, and invokes without that sentinel stay as text. The sentinel and the invoke block are removed from the transcript so later turns do not copy them.
+
 ### Changed
 
 - esbuild is now a devDependency (build-only); bumped to 0.28.2. It only produces `dist/index.js` and nothing in the published bundle imports it, yet as a runtime dependency every consumer installed esbuild 0.25.12 and its platform binary. Pinned exactly to match pi 0.87.1 (`@earendil-works/chord`). Both lockfiles now resolve a single esbuild (vite is deduped onto 0.28.2 too). `test/packaging.test.ts` pins esbuild's absence from `dependencies`.

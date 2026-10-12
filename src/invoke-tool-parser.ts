@@ -169,3 +169,54 @@ export function parseInvokeToolCalls(text: string): InvokeParseResult {
 
   return { toolCalls, cleanedText };
 }
+
+const COURT_SENTINEL = "court";
+
+/** `<invoke` opens that sit outside fenced code, in source order. */
+function invokeOpensOutsideFences(text: string): number[] {
+  const fences = fencedRanges(text);
+  const opens: number[] = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const openStart = text.indexOf(INVOKE_OPEN_SEARCH, cursor);
+    if (openStart < 0) break;
+    const containingFence = fences.find((range) => openStart >= range.start && openStart < range.end);
+    if (containingFence) {
+      cursor = containingFence.end;
+      continue;
+    }
+    opens.push(openStart);
+    cursor = openStart + INVOKE_OPEN_SEARCH.length;
+  }
+  return opens;
+}
+
+/** The leaked sentinel is its own line, immediately before the invoke tag. */
+function precededByCourtLine(text: string, openStart: number): boolean {
+  const before = text.slice(0, openStart).trimEnd();
+  const lineStart = before.lastIndexOf("\n") + 1;
+  return before.slice(lineStart).trim() === COURT_SENTINEL;
+}
+
+function stripCourtSentinelLines(text: string): string {
+  return text
+    .split("\n")
+    .filter((line) => line.trim() !== COURT_SENTINEL)
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * Recovers the Opus leak: a lone `court` line immediately before every
+ * `<invoke>` block, with optional prose around it. Blocks inside fences, or
+ * any invoke that is not prefixed by that sentinel, are left in the text.
+ */
+export function parseCourtPrefixedInvokeCalls(text: string): InvokeParseResult {
+  const untouched: InvokeParseResult = { toolCalls: [], cleanedText: text };
+  const opens = invokeOpensOutsideFences(text);
+  if (opens.length === 0 || !opens.every((start) => precededByCourtLine(text, start))) return untouched;
+  const parsed = parseInvokeToolCalls(text);
+  if (parsed.toolCalls.length !== opens.length) return untouched;
+  return { toolCalls: parsed.toolCalls, cleanedText: stripCourtSentinelLines(parsed.cleanedText) };
+}

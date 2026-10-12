@@ -4944,6 +4944,101 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
+  it("recovers a court-prefixed invoke after prose when broad text recovery is off", async () => {
+    // Opus leaks this exact shape once native toolUse frames stop arriving:
+    // an explanation, a lone `court` line, then a complete <invoke>. Claude
+    // opts out of broad text recovery, so anything short of this sentinel
+    // must stay text — but this one has to become a real tool call or the
+    // agent loop ends the turn and the session looks stuck.
+    const command = "ls /tmp";
+    const prose = "先看一下目录。";
+    const leaked = [
+      prose,
+      "",
+      "court",
+      '<invoke name="bash">',
+      `<parameter name="command">${command}</parameter>`,
+      "</invoke>",
+    ].join("\n");
+    vi.stubGlobal("fetch", mockFetchOk(`${JSON.stringify({ content: leaked })}{"contextUsagePercentage":10}`));
+
+    const model = { ...makeModel({ reasoning: false }), recoverTextToolCalls: false };
+    const context: Context = {
+      ...makeContext(),
+      tools: [{ name: "bash", description: "Run a command", parameters: { type: "object", properties: {} } }],
+    };
+    const events = await collect(streamKiro(model, context, { apiKey: "tok" }));
+
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    const toolCalls = msg?.content.filter((b) => b.type === "toolCall");
+    expect(toolCalls).toHaveLength(1);
+    expect(toolCalls?.[0].type === "toolCall" && toolCalls[0].name).toBe("bash");
+    expect(toolCalls?.[0].type === "toolCall" && toolCalls[0].arguments.command).toBe(command);
+    const textBlock = msg?.content.find((b) => b.type === "text");
+    expect(textBlock?.type === "text" && textBlock.text).toBe(prose);
+    expect(done?.type === "done" && done.reason).toBe("toolUse");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("leaves an invoke alone when recovery is off and the court sentinel is missing", async () => {
+    const leaked = '<invoke name="bash">\n<parameter name="command">ls /tmp</parameter>\n</invoke>';
+    vi.stubGlobal("fetch", mockFetchOk(`${JSON.stringify({ content: leaked })}{"contextUsagePercentage":10}`));
+    const model = { ...makeModel({ reasoning: false }), recoverTextToolCalls: false };
+    const context: Context = {
+      ...makeContext(),
+      tools: [{ name: "bash", description: "Run a command", parameters: { type: "object", properties: {} } }],
+    };
+    const events = await collect(streamKiro(model, context, { apiKey: "tok" }));
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg?.content.filter((b) => b.type === "toolCall")).toHaveLength(0);
+    expect(msg?.content.find((b) => b.type === "text")).toEqual({ type: "text", text: leaked });
+    expect(done?.type === "done" && done.reason).toBe("stop");
+    vi.unstubAllGlobals();
+  });
+
+  it("leaves a court-prefixed invoke alone when the tool is not registered", async () => {
+    const leaked = 'court\n<invoke name="bash">\n<parameter name="command">ls /tmp</parameter>\n</invoke>';
+    vi.stubGlobal("fetch", mockFetchOk(`${JSON.stringify({ content: leaked })}{"contextUsagePercentage":10}`));
+    const model = { ...makeModel({ reasoning: false }), recoverTextToolCalls: false };
+    const context: Context = {
+      ...makeContext(),
+      tools: [{ name: "read", description: "Read a file", parameters: { type: "object", properties: {} } }],
+    };
+    const events = await collect(streamKiro(model, context, { apiKey: "tok" }));
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg?.content.filter((b) => b.type === "toolCall")).toHaveLength(0);
+    expect(done?.type === "done" && done.reason).toBe("stop");
+    vi.unstubAllGlobals();
+  });
+
+  it("does not execute a court-prefixed invoke quoted inside a code fence", async () => {
+    const leaked = [
+      "说明：",
+      "```",
+      "court",
+      '<invoke name="bash">',
+      '<parameter name="command">ls /tmp</parameter>',
+      "</invoke>",
+      "```",
+    ].join("\n");
+    vi.stubGlobal("fetch", mockFetchOk(`${JSON.stringify({ content: leaked })}{"contextUsagePercentage":10}`));
+    const model = { ...makeModel({ reasoning: false }), recoverTextToolCalls: false };
+    const context: Context = {
+      ...makeContext(),
+      tools: [{ name: "bash", description: "Run a command", parameters: { type: "object", properties: {} } }],
+    };
+    const events = await collect(streamKiro(model, context, { apiKey: "tok" }));
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg?.content.filter((b) => b.type === "toolCall")).toHaveLength(0);
+    expect(msg?.content.find((b) => b.type === "text")).toEqual({ type: "text", text: leaked });
+    vi.unstubAllGlobals();
+  });
+
   // =========================================================================
   // Empty response / ghost tool call recovery (stopReason stall fix)
   // =========================================================================

@@ -14,3 +14,9 @@ export interface InvokeParseResult {
  * that cannot be parsed in full is left in the text untouched.
  */
 export declare function parseInvokeToolCalls(text: string): InvokeParseResult;
+/**
+ * Recovers the Opus leak: a lone `court` line immediately before every
+ * `<invoke>` block, with optional prose around it. Blocks inside fences, or
+ * any invoke that is not prefixed by that sentinel, are left in the text.
+ */
+export declare function parseCourtPrefixedInvokeCalls(text: string): InvokeParseResult;
