@@ -5028,6 +5028,33 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
+  it("recovers a core-prefixed invoke (sentinel varies across sessions)", async () => {
+    const command = "echo hello";
+    const leaked = [
+      "先执行。",
+      "",
+      "core",
+      '<invoke name="bash">',
+      `<parameter name="command">${command}</parameter>`,
+      "</invoke>",
+    ].join("\n");
+    vi.stubGlobal("fetch", mockFetchOk(`${JSON.stringify({ content: leaked })}{"contextUsagePercentage":10}`));
+    const model = { ...makeModel({ reasoning: false }), recoverTextToolCalls: false };
+    const context: Context = {
+      ...makeContext(),
+      tools: [{ name: "bash", description: "Run a command", parameters: { type: "object", properties: {} } }],
+    };
+    const events = await collect(streamKiro(model, context, { apiKey: "tok" }));
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    const toolCalls = msg?.content.filter((b) => b.type === "toolCall");
+    expect(toolCalls).toHaveLength(1);
+    expect(toolCalls?.[0].type === "toolCall" && toolCalls[0].name).toBe("bash");
+    expect(toolCalls?.[0].type === "toolCall" && toolCalls[0].arguments.command).toBe(command);
+    expect(done?.type === "done" && done.reason).toBe("toolUse");
+    vi.unstubAllGlobals();
+  });
+
   it("leaves an invoke alone when recovery is off and the court sentinel is missing", async () => {
     const leaked = '<invoke name="bash">\n<parameter name="command">ls /tmp</parameter>\n</invoke>';
     vi.stubGlobal("fetch", mockFetchOk(`${JSON.stringify({ content: leaked })}{"contextUsagePercentage":10}`));

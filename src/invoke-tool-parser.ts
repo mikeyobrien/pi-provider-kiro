@@ -170,7 +170,16 @@ export function parseInvokeToolCalls(text: string): InvokeParseResult {
   return { toolCalls, cleanedText };
 }
 
-const COURT_SENTINEL = "court";
+/**
+ * A sentinel is a single short alphabetic word on its own line — the leaked
+ * prefix Opus drops before `<invoke>`. Known values include `court` and `core`,
+ * but the exact word varies across sessions.
+ */
+const SENTINEL_RE = /^[a-z]{2,12}$/;
+
+function isSentinelWord(word: string): boolean {
+  return SENTINEL_RE.test(word);
+}
 
 /** `<invoke` opens that sit outside fenced code, in source order. */
 function invokeOpensOutsideFences(text: string): number[] {
@@ -192,33 +201,41 @@ function invokeOpensOutsideFences(text: string): number[] {
 }
 
 /** The leaked sentinel is its own line, immediately before the invoke tag. */
-function precededByCourtLine(text: string, openStart: number): boolean {
+function precededBySentinelLine(text: string, openStart: number): string | null {
   const before = text.slice(0, openStart).trimEnd();
   const lineStart = before.lastIndexOf("\n") + 1;
-  return before.slice(lineStart).trim() === COURT_SENTINEL;
+  const word = before.slice(lineStart).trim();
+  return isSentinelWord(word) ? word : null;
 }
 
-function stripCourtSentinelLines(text: string): string {
+function stripSentinelLines(text: string, sentinels: Set<string>): string {
   return text
     .split("\n")
-    .filter((line) => line.trim() !== COURT_SENTINEL)
+    .filter((line) => !sentinels.has(line.trim()))
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
 /**
- * Recovers the Opus leak: a lone `court` line immediately before every
- * `<invoke>` block, with optional prose around it. Blocks inside fences, or
- * any invoke that is not prefixed by that sentinel, are left in the text.
+ * Recovers the Opus leak: a lone short word (e.g. `court`, `core`) on its own
+ * line immediately before every `<invoke>` block, with optional prose around
+ * it. Blocks inside fences, or any invoke not prefixed by such a sentinel, are
+ * left in the text.
  */
 export function parseCourtPrefixedInvokeCalls(text: string): InvokeParseResult {
   const untouched: InvokeParseResult = { toolCalls: [], cleanedText: text };
   const opens = invokeOpensOutsideFences(text);
-  if (opens.length === 0 || !opens.every((start) => precededByCourtLine(text, start))) return untouched;
+  if (opens.length === 0) return untouched;
+  const sentinels = new Set<string>();
+  for (const start of opens) {
+    const word = precededBySentinelLine(text, start);
+    if (!word) return untouched;
+    sentinels.add(word);
+  }
   const parsed = parseInvokeToolCalls(text);
   if (parsed.toolCalls.length !== opens.length) return untouched;
-  return { toolCalls: parsed.toolCalls, cleanedText: stripCourtSentinelLines(parsed.cleanedText) };
+  return { toolCalls: parsed.toolCalls, cleanedText: stripSentinelLines(parsed.cleanedText, sentinels) };
 }
 
 export interface CourtGateStep {
@@ -279,22 +296,19 @@ export function createCourtInvokeGate(isRegistered: (name: string) => boolean): 
   };
 }
 
-/** Split off a prefix that cannot grow into a lone `court` line. */
+/** Split off a prefix that cannot grow into a lone sentinel line. */
 function takeVisibleCourtPrefix(pending: string): { visible: string; held: string } {
   let lineStart = 0;
   while (lineStart < pending.length) {
     const nl = pending.indexOf("\n", lineStart);
     if (nl < 0) {
-      const line = pending.slice(lineStart);
-      const indent = line.match(/^[ \t]*/)?.[0].length ?? 0;
-      const body = line.slice(indent);
-      if (COURT_SENTINEL.startsWith(body))
+      const line = pending.slice(lineStart).trim();
+      if (line.length > 0 && line.length <= 12 && /^[a-z]+$/.test(line))
         return { visible: pending.slice(0, lineStart), held: pending.slice(lineStart) };
       return { visible: pending, held: "" };
     }
     const line = pending.slice(lineStart, nl);
-    // A `court` line inside ``` is a sample, not a call. Leave it in the prose.
-    if (line.trim() === COURT_SENTINEL && fenceAround(pending, lineStart) === "outside") {
+    if (isSentinelWord(line.trim()) && fenceAround(pending, lineStart) === "outside") {
       return { visible: pending.slice(0, lineStart), held: pending.slice(lineStart) };
     }
     lineStart = nl + 1;
@@ -310,17 +324,17 @@ function fenceAround(text: string, index: number): "outside" | "closed" | "open"
 }
 
 function consumeHeldCourtInvoke(held: string, isRegistered: (name: string) => boolean): HeldConsumption {
-  if (!/^[ \t]*court[ \t]*(\n|$)/.test(held)) return { kind: "release" };
-  const courtAt = held.search(/^[ \t]*court[ \t]*$/m);
-  if (courtAt >= 0) {
-    const fenced = fenceAround(held, courtAt);
-    // A sample inside ``` must stay text. An unclosed fence is still being
-    // typed, so hold it until the fence ends or the stream finishes.
+  const firstLine = held.split("\n")[0];
+  const word = firstLine.trim();
+  if (!isSentinelWord(word)) return { kind: "release" };
+  const sentinelAt = held.search(new RegExp(`^[ \\t]*${word}[ \\t]*$`, "m"));
+  if (sentinelAt >= 0) {
+    const fenced = fenceAround(held, sentinelAt);
     if (fenced === "closed") return { kind: "release" };
     if (fenced === "open") return { kind: "wait" };
   }
   if (!held.includes("\n")) return { kind: "wait" };
-  const after = held.replace(/^[ \t]*court[ \t]*\n/, "");
+  const after = held.replace(new RegExp(`^[ \\t]*${word}[ \\t]*\\n`), "");
   if (after.trim() === "") return { kind: "wait" };
   const next = after.trimStart();
   if (INVOKE_OPEN_PREFIX.startsWith(next)) return { kind: "wait" };

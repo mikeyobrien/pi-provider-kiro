@@ -5445,7 +5445,10 @@ function parseInvokeToolCalls(text) {
   }
   return { toolCalls, cleanedText };
 }
-var COURT_SENTINEL = "court";
+var SENTINEL_RE = /^[a-z]{2,12}$/;
+function isSentinelWord(word) {
+  return SENTINEL_RE.test(word);
+}
 function invokeOpensOutsideFences(text) {
   const fences = fencedRanges(text);
   const opens = [];
@@ -5463,21 +5466,28 @@ function invokeOpensOutsideFences(text) {
   }
   return opens;
 }
-function precededByCourtLine(text, openStart) {
+function precededBySentinelLine(text, openStart) {
   const before = text.slice(0, openStart).trimEnd();
   const lineStart = before.lastIndexOf("\n") + 1;
-  return before.slice(lineStart).trim() === COURT_SENTINEL;
+  const word = before.slice(lineStart).trim();
+  return isSentinelWord(word) ? word : null;
 }
-function stripCourtSentinelLines(text) {
-  return text.split("\n").filter((line) => line.trim() !== COURT_SENTINEL).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+function stripSentinelLines(text, sentinels) {
+  return text.split("\n").filter((line) => !sentinels.has(line.trim())).join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 function parseCourtPrefixedInvokeCalls(text) {
   const untouched = { toolCalls: [], cleanedText: text };
   const opens = invokeOpensOutsideFences(text);
-  if (opens.length === 0 || !opens.every((start) => precededByCourtLine(text, start))) return untouched;
+  if (opens.length === 0) return untouched;
+  const sentinels = /* @__PURE__ */ new Set();
+  for (const start of opens) {
+    const word = precededBySentinelLine(text, start);
+    if (!word) return untouched;
+    sentinels.add(word);
+  }
   const parsed = parseInvokeToolCalls(text);
   if (parsed.toolCalls.length !== opens.length) return untouched;
-  return { toolCalls: parsed.toolCalls, cleanedText: stripCourtSentinelLines(parsed.cleanedText) };
+  return { toolCalls: parsed.toolCalls, cleanedText: stripSentinelLines(parsed.cleanedText, sentinels) };
 }
 var INVOKE_OPEN_PREFIX = '<invoke name="';
 function createCourtInvokeGate(isRegistered) {
@@ -5522,15 +5532,13 @@ function takeVisibleCourtPrefix(pending) {
   while (lineStart < pending.length) {
     const nl = pending.indexOf("\n", lineStart);
     if (nl < 0) {
-      const line2 = pending.slice(lineStart);
-      const indent = line2.match(/^[ \t]*/)?.[0].length ?? 0;
-      const body = line2.slice(indent);
-      if (COURT_SENTINEL.startsWith(body))
+      const line2 = pending.slice(lineStart).trim();
+      if (line2.length > 0 && line2.length <= 12 && /^[a-z]+$/.test(line2))
         return { visible: pending.slice(0, lineStart), held: pending.slice(lineStart) };
       return { visible: pending, held: "" };
     }
     const line = pending.slice(lineStart, nl);
-    if (line.trim() === COURT_SENTINEL && fenceAround(pending, lineStart) === "outside") {
+    if (isSentinelWord(line.trim()) && fenceAround(pending, lineStart) === "outside") {
       return { visible: pending.slice(0, lineStart), held: pending.slice(lineStart) };
     }
     lineStart = nl + 1;
@@ -5544,15 +5552,17 @@ function fenceAround(text, index) {
   return closer >= 0 && closer < fence.end ? "closed" : "open";
 }
 function consumeHeldCourtInvoke(held, isRegistered) {
-  if (!/^[ \t]*court[ \t]*(\n|$)/.test(held)) return { kind: "release" };
-  const courtAt = held.search(/^[ \t]*court[ \t]*$/m);
-  if (courtAt >= 0) {
-    const fenced = fenceAround(held, courtAt);
+  const firstLine = held.split("\n")[0];
+  const word = firstLine.trim();
+  if (!isSentinelWord(word)) return { kind: "release" };
+  const sentinelAt = held.search(new RegExp(`^[ \\t]*${word}[ \\t]*$`, "m"));
+  if (sentinelAt >= 0) {
+    const fenced = fenceAround(held, sentinelAt);
     if (fenced === "closed") return { kind: "release" };
     if (fenced === "open") return { kind: "wait" };
   }
   if (!held.includes("\n")) return { kind: "wait" };
-  const after = held.replace(/^[ \t]*court[ \t]*\n/, "");
+  const after = held.replace(new RegExp(`^[ \\t]*${word}[ \\t]*\\n`), "");
   if (after.trim() === "") return { kind: "wait" };
   const next = after.trimStart();
   if (INVOKE_OPEN_PREFIX.startsWith(next)) return { kind: "wait" };

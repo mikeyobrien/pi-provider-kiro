@@ -15,9 +15,10 @@ export interface InvokeParseResult {
  */
 export declare function parseInvokeToolCalls(text: string): InvokeParseResult;
 /**
- * Recovers the Opus leak: a lone `court` line immediately before every
- * `<invoke>` block, with optional prose around it. Blocks inside fences, or
- * any invoke that is not prefixed by that sentinel, are left in the text.
+ * Recovers the Opus leak: a lone short word (e.g. `court`, `core`) on its own
+ * line immediately before every `<invoke>` block, with optional prose around
+ * it. Blocks inside fences, or any invoke not prefixed by such a sentinel, are
+ * left in the text.
  */
 export declare function parseCourtPrefixedInvokeCalls(text: string): InvokeParseResult;
 export interface CourtGateStep {
