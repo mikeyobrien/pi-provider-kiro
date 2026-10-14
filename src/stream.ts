@@ -42,7 +42,13 @@ import {
   prepareHistory,
 } from "./history.js";
 import { isKiroToolStructureRule, kiroConversationEntries, repairKiroConversation } from "./history-validator.js";
-import { createCourtInvokeGate, parseCourtPrefixedInvokeCalls, parseInvokeToolCalls } from "./invoke-tool-parser.js";
+import {
+  createCourtInvokeGate,
+  hasUnclosedInvoke,
+  parseCourtPrefixedInvokeCalls,
+  parseInvokeToolCalls,
+  stripUnclosedInvoke,
+} from "./invoke-tool-parser.js";
 import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, refreshViaKiroCli } from "./kiro-cli.js";
 import {
   invalidateKiroProfileArn,
@@ -711,6 +717,11 @@ function streamKiroWithUsageTracking(
        *  also occurred, names it separately. */
       let emptyAttempts = 0;
       let echoAttempts = 0;
+      let truncatedInvokeAttempts = 0;
+      /** Prepended to the next attempt when the previous one died inside an unclosed `<invoke>`. */
+      let truncatedInvokeNudge = "";
+      const TRUNCATED_INVOKE_NUDGE =
+        "[NOTE: Your previous reply stopped halfway through a tool call written as plain text. That text was discarded and did not run. Call the tool through the native tool interface now. Do not write tool calls as text.]";
 
       // Cumulative provider-internal retry tallies reported on KiroApiError.
       // `retryCount` cannot stand in for either: it is also consumed by stream
@@ -866,6 +877,11 @@ function streamKiroWithUsageTracking(
         // Prepend truncation notice if the previous assistant response was cut off
         if (wasPreviousResponseTruncated(contextMessages)) {
           currentContent = currentContent === "" ? TRUNCATION_NOTICE : `${TRUNCATION_NOTICE}\n\n${currentContent}`;
+        }
+        if (truncatedInvokeNudge) {
+          currentContent =
+            currentContent === "" ? truncatedInvokeNudge : `${truncatedInvokeNudge}\n\n${currentContent}`;
+          truncatedInvokeNudge = "";
         }
         // Always synthesize placeholder specs for tool names referenced in
         // history, even when the current tools are empty/undefined. Without this,
@@ -1680,6 +1696,34 @@ function streamKiroWithUsageTracking(
             }
           }
         }
+        // Opus at high context sometimes ends the turn inside an unclosed
+        // `<invoke>` (often after a lone sentinel word). Nothing recoverable is
+        // in that prefix — the arguments never arrived — so resending the same
+        // prompt just reproduces it. Nudge the retry toward a native tool call.
+        const attemptText = textBlockIndex !== null ? (output.content[textBlockIndex] as TextContent).text : "";
+        let truncatedInvokeGaveUp = false;
+        if (!sawAnyToolCalls && hasUnclosedInvoke(attemptText)) {
+          truncatedInvokeAttempts++;
+          if (retryCount < maxRetries) {
+            retryCount++;
+            truncatedInvokeNudge = TRUNCATED_INVOKE_NUDGE;
+            console.warn(`[pi-provider-kiro] Truncated text tool call — retrying (${retryCount}/${maxRetries})`);
+            output.content = [];
+            textBlockIndex = null;
+            await abortableDelay(exponentialBackoff(retryCount - 1, 1000, MAX_RETRY_DELAY), options?.signal);
+            continue;
+          }
+          truncatedInvokeGaveUp = true;
+          if (textBlockIndex !== null) {
+            (output.content[textBlockIndex] as TextContent).text = stripUnclosedInvoke(attemptText);
+          }
+          console.warn(
+            `[pi-provider-kiro] Truncated text tool call persisted across ${describeAttempts(truncatedInvokeAttempts)} — retry budget exhausted`,
+          );
+          output.errorMessage = `Kiro stopped inside an unfinished text tool call on ${describeAttempts(
+            truncatedInvokeAttempts,
+          )}; retry budget exhausted, the unfinished call was discarded, stopReason:"stop"`;
+        }
         // Strip echo noise: when tool calls are present and the text content
         // is just "." or similar short echo from history padding, remove it.
         // This prevents the echo from accumulating in conversation history
@@ -1750,7 +1794,7 @@ function streamKiroWithUsageTracking(
         const isEchoLoop = hasText && !sawAnyToolCalls && /^\s*(continue|\.+)\s*$/i.test(responseText);
         // Explicit completion/refusal metadata is authoritative, including empty turns.
         const explicitStop = usageEvent?.rawStopReason;
-        const degenerate = !explicitStop && ((!hasText && !sawAnyToolCalls) || isEchoLoop);
+        const degenerate = !truncatedInvokeGaveUp && !explicitStop && ((!hasText && !sawAnyToolCalls) || isEchoLoop);
         if (degenerate && isEchoLoop) echoAttempts++;
         else if (degenerate) emptyAttempts++;
         const exhausted = degenerate && retryCount >= maxRetries;

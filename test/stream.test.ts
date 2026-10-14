@@ -5055,6 +5055,37 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
+  it("retries when a text tool call stops before the invoke closes", async () => {
+    const truncated = [
+      "理解了结构。现在替换这个类。",
+      "",
+      "court",
+      '<invoke name="edit">',
+      '<parameter name="path">/tmp/a.py</parameter>',
+    ].join("\n");
+    const truncatedResponse = `${JSON.stringify({ content: truncated })}{"contextUsagePercentage":10}`;
+    const recoveredResponse = '{"content":"改用原生工具调用。"}{"contextUsagePercentage":10}';
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce(mockResponseOnce(truncatedResponse))
+      .mockResolvedValueOnce(mockResponseOnce(recoveredResponse));
+    vi.stubGlobal("fetch", mockFetch);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const model = { ...makeModel({ reasoning: false }), recoverTextToolCalls: false };
+    const events = await collect(streamKiro(model, makeContext(), { apiKey: "tok" }));
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    const secondBody = JSON.parse(String(mockFetch.mock.calls[1][1].body)) as {
+      conversationState: { currentMessage: { userInputMessage: { content: string } } };
+    };
+    expect(secondBody.conversationState.currentMessage.userInputMessage.content).toContain("native tool interface");
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg?.content.find((b) => b.type === "text")).toEqual({ type: "text", text: "改用原生工具调用。" });
+    expect(msg?.errorMessage).toBeUndefined();
+    warnSpy.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
   it("leaves an invoke alone when recovery is off and the court sentinel is missing", async () => {
     const leaked = '<invoke name="bash">\n<parameter name="command">ls /tmp</parameter>\n</invoke>';
     vi.stubGlobal("fetch", mockFetchOk(`${JSON.stringify({ content: leaked })}{"contextUsagePercentage":10}`));

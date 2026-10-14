@@ -5488,6 +5488,47 @@ function parseCourtPrefixedInvokeCalls(text) {
   if (parsed.toolCalls.length !== opens.length) return untouched;
   return { toolCalls: parsed.toolCalls, cleanedText: stripSentinelLines(parsed.cleanedText, sentinels) };
 }
+function hasUnclosedInvoke(text) {
+  const fences = fencedRanges(text);
+  const outside = (index) => !fences.some((range) => index >= range.start && index < range.end);
+  let depth = 0;
+  let cursor = 0;
+  while (cursor < text.length) {
+    const openAt = text.indexOf(INVOKE_OPEN_SEARCH, cursor);
+    const closeAt = text.indexOf(INVOKE_CLOSE, cursor);
+    if (openAt < 0 && closeAt < 0) break;
+    if (closeAt >= 0 && (openAt < 0 || closeAt < openAt)) {
+      if (outside(closeAt) && depth > 0) depth--;
+      cursor = closeAt + INVOKE_CLOSE.length;
+      continue;
+    }
+    if (outside(openAt)) depth++;
+    cursor = openAt + INVOKE_OPEN_SEARCH.length;
+  }
+  return depth > 0;
+}
+function stripUnclosedInvoke(text) {
+  if (!hasUnclosedInvoke(text)) return text;
+  const fences = fencedRanges(text);
+  const outside = (index) => !fences.some((range) => index >= range.start && index < range.end);
+  let cut = -1;
+  let cursor = 0;
+  while (cursor < text.length) {
+    const openAt = text.indexOf(INVOKE_OPEN_SEARCH, cursor);
+    if (openAt < 0) break;
+    if (outside(openAt)) {
+      const closeAt = text.indexOf(INVOKE_CLOSE, openAt);
+      if (closeAt < 0 || !outside(closeAt)) cut = openAt;
+    }
+    cursor = openAt + INVOKE_OPEN_SEARCH.length;
+  }
+  if (cut < 0) return text;
+  let head = text.slice(0, cut).replace(/\s+$/, "");
+  const lineBreak = head.lastIndexOf("\n");
+  const lastLine = head.slice(lineBreak + 1).trim();
+  if (/^[a-z]{2,12}$/.test(lastLine)) head = head.slice(0, Math.max(0, lineBreak)).replace(/\s+$/, "");
+  return head;
+}
 var INVOKE_OPEN_PREFIX = '<invoke name="';
 function createCourtInvokeGate(isRegistered) {
   let pending = "";
@@ -6531,6 +6572,9 @@ ${systemPrompt}` : ""}`;
       const maxRetries = 3;
       let emptyAttempts = 0;
       let echoAttempts = 0;
+      let truncatedInvokeAttempts = 0;
+      let truncatedInvokeNudge = "";
+      const TRUNCATED_INVOKE_NUDGE = "[NOTE: Your previous reply stopped halfway through a tool call written as plain text. That text was discarded and did not run. Call the tool through the native tool interface now. Do not write tool calls as text.]";
       let credentialRefreshTotal = 0;
       let capacityRetryTotal = 0;
       const conversationId = options?.sessionId ?? crypto.randomUUID();
@@ -6645,6 +6689,12 @@ ${currentContent}`;
           currentContent = currentContent === "" ? TRUNCATION_NOTICE : `${TRUNCATION_NOTICE}
 
 ${currentContent}`;
+        }
+        if (truncatedInvokeNudge) {
+          currentContent = currentContent === "" ? truncatedInvokeNudge : `${truncatedInvokeNudge}
+
+${currentContent}`;
+          truncatedInvokeNudge = "";
         }
         let uimc;
         const baseTools = currentTools.length ? convertToolsToKiro(currentTools) : [];
@@ -7238,6 +7288,30 @@ ${currentContent}`;
             }
           }
         }
+        const attemptText = textBlockIndex !== null ? output.content[textBlockIndex].text : "";
+        let truncatedInvokeGaveUp = false;
+        if (!sawAnyToolCalls && hasUnclosedInvoke(attemptText)) {
+          truncatedInvokeAttempts++;
+          if (retryCount < maxRetries) {
+            retryCount++;
+            truncatedInvokeNudge = TRUNCATED_INVOKE_NUDGE;
+            console.warn(`[pi-provider-kiro] Truncated text tool call \u2014 retrying (${retryCount}/${maxRetries})`);
+            output.content = [];
+            textBlockIndex = null;
+            await abortableDelay(exponentialBackoff(retryCount - 1, 1e3, MAX_RETRY_DELAY), options?.signal);
+            continue;
+          }
+          truncatedInvokeGaveUp = true;
+          if (textBlockIndex !== null) {
+            output.content[textBlockIndex].text = stripUnclosedInvoke(attemptText);
+          }
+          console.warn(
+            `[pi-provider-kiro] Truncated text tool call persisted across ${describeAttempts(truncatedInvokeAttempts)} \u2014 retry budget exhausted`
+          );
+          output.errorMessage = `Kiro stopped inside an unfinished text tool call on ${describeAttempts(
+            truncatedInvokeAttempts
+          )}; retry budget exhausted, the unfinished call was discarded, stopReason:"stop"`;
+        }
         if (emittedToolCalls > 0 && textBlockIndex !== null) {
           const textBlock = output.content[textBlockIndex];
           if (/^\s*(\.+|continue)\s*$/i.test(textBlock.text)) {
@@ -7265,7 +7339,7 @@ ${currentContent}`;
         const responseText = hasText2 ? output.content[textBlockIndex].text : "";
         const isEchoLoop = hasText2 && !sawAnyToolCalls && /^\s*(continue|\.+)\s*$/i.test(responseText);
         const explicitStop = usageEvent?.rawStopReason;
-        const degenerate = !explicitStop && (!hasText2 && !sawAnyToolCalls || isEchoLoop);
+        const degenerate = !truncatedInvokeGaveUp && !explicitStop && (!hasText2 && !sawAnyToolCalls || isEchoLoop);
         if (degenerate && isEchoLoop) echoAttempts++;
         else if (degenerate) emptyAttempts++;
         const exhausted = degenerate && retryCount >= maxRetries;

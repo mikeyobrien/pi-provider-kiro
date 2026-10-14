@@ -21,6 +21,14 @@ export declare function parseInvokeToolCalls(text: string): InvokeParseResult;
  * left in the text.
  */
 export declare function parseCourtPrefixedInvokeCalls(text: string): InvokeParseResult;
+/**
+ * True when an `<invoke` outside fenced code has no matching `</invoke>`.
+ * Opus at high context sometimes stops the turn inside that markup, so the
+ * call cannot be recovered and the agent loop would otherwise end on `stop`.
+ */
+export declare function hasUnclosedInvoke(text: string): boolean;
+/** Drop an unclosed invoke, plus a lone sentinel word on the line before it. */
+export declare function stripUnclosedInvoke(text: string): string;
 export interface CourtGateStep {
     /** Prose that cannot be part of a leaked invoke. Safe to stream as text. */
     text: string;

@@ -2,7 +2,7 @@
 // ABOUTME: Validates <invoke name="..."><parameter name="...">…</parameter></invoke> parsing.
 
 import { describe, expect, it } from "vitest";
-import { parseInvokeToolCalls } from "../src/invoke-tool-parser.js";
+import { hasUnclosedInvoke, parseInvokeToolCalls, stripUnclosedInvoke } from "../src/invoke-tool-parser.js";
 import { RECORD_279_COMMAND, RECORD_279_SUMMARY, RECORD_279_TEXT } from "./helpers/invoke-fixture.js";
 
 describe("parseInvokeToolCalls", () => {
@@ -270,8 +270,26 @@ describe("parseInvokeToolCalls", () => {
 // Dynamic import for ESM-only export
 const { createCourtInvokeGate } = await import("../src/invoke-tool-parser.js");
 
-describe("createCourtInvokeGate — streaming", () => {
+describe("unclosed invoke leak", () => {
+  it("detects a sentinel-prefixed invoke that never closes", () => {
+    const text = '先改这个类。\n\ncourt\n<invoke name="edit">\n<parameter name="path">/tmp/a.py</parameter>';
+    expect(hasUnclosedInvoke(text)).toBe(true);
+    expect(stripUnclosedInvoke(text)).toBe("先改这个类。");
+  });
 
+  it("leaves a closed invoke alone", () => {
+    const text = '<invoke name="bash">\n<parameter name="command">ls</parameter>\n</invoke>';
+    expect(hasUnclosedInvoke(text)).toBe(false);
+    expect(stripUnclosedInvoke(text)).toBe(text);
+  });
+
+  it("ignores an unclosed invoke quoted inside a fence", () => {
+    const text = '示例：\n```\n<invoke name="edit">\n```\n就这些。';
+    expect(hasUnclosedInvoke(text)).toBe(false);
+  });
+});
+
+describe("createCourtInvokeGate — streaming", () => {
   const registered = (name: string) => ["edit", "bash", "read", "write"].includes(name);
 
   it("recovers court-prefixed invoke across realistic streaming chunks", () => {

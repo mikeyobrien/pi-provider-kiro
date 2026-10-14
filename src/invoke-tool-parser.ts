@@ -240,6 +240,55 @@ export function parseCourtPrefixedInvokeCalls(text: string): InvokeParseResult {
   return { toolCalls: parsed.toolCalls, cleanedText: stripSentinelLines(parsed.cleanedText, sentinels) };
 }
 
+/**
+ * True when an `<invoke` outside fenced code has no matching `</invoke>`.
+ * Opus at high context sometimes stops the turn inside that markup, so the
+ * call cannot be recovered and the agent loop would otherwise end on `stop`.
+ */
+export function hasUnclosedInvoke(text: string): boolean {
+  const fences = fencedRanges(text);
+  const outside = (index: number) => !fences.some((range) => index >= range.start && index < range.end);
+  let depth = 0;
+  let cursor = 0;
+  while (cursor < text.length) {
+    const openAt = text.indexOf(INVOKE_OPEN_SEARCH, cursor);
+    const closeAt = text.indexOf(INVOKE_CLOSE, cursor);
+    if (openAt < 0 && closeAt < 0) break;
+    if (closeAt >= 0 && (openAt < 0 || closeAt < openAt)) {
+      if (outside(closeAt) && depth > 0) depth--;
+      cursor = closeAt + INVOKE_CLOSE.length;
+      continue;
+    }
+    if (outside(openAt)) depth++;
+    cursor = openAt + INVOKE_OPEN_SEARCH.length;
+  }
+  return depth > 0;
+}
+
+/** Drop an unclosed invoke, plus a lone sentinel word on the line before it. */
+export function stripUnclosedInvoke(text: string): string {
+  if (!hasUnclosedInvoke(text)) return text;
+  const fences = fencedRanges(text);
+  const outside = (index: number) => !fences.some((range) => index >= range.start && index < range.end);
+  let cut = -1;
+  let cursor = 0;
+  while (cursor < text.length) {
+    const openAt = text.indexOf(INVOKE_OPEN_SEARCH, cursor);
+    if (openAt < 0) break;
+    if (outside(openAt)) {
+      const closeAt = text.indexOf(INVOKE_CLOSE, openAt);
+      if (closeAt < 0 || !outside(closeAt)) cut = openAt;
+    }
+    cursor = openAt + INVOKE_OPEN_SEARCH.length;
+  }
+  if (cut < 0) return text;
+  let head = text.slice(0, cut).replace(/\s+$/, "");
+  const lineBreak = head.lastIndexOf("\n");
+  const lastLine = head.slice(lineBreak + 1).trim();
+  if (/^[a-z]{2,12}$/.test(lastLine)) head = head.slice(0, Math.max(0, lineBreak)).replace(/\s+$/, "");
+  return head;
+}
+
 export interface CourtGateStep {
   /** Prose that cannot be part of a leaked invoke. Safe to stream as text. */
   text: string;
