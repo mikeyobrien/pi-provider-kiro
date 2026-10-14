@@ -13,6 +13,7 @@ import type {
   ToolResultMessage,
   UserMessage,
 } from "@earendil-works/pi-ai";
+import { stripRepeatedSentinelLines } from "./invoke-tool-parser.js";
 
 export interface KiroImage {
   format: string;
@@ -286,6 +287,7 @@ export function buildHistory(
           }
         }
       }
+      armContent = stripRepeatedSentinelLines(armContent);
       // Drop only a turn that genuinely carried nothing. A thinking-only turn is
       // retained with `content: ""`, which is what first-party sends for the same
       // shape — `extractTextContent` returns `''` and the entry is still emitted.

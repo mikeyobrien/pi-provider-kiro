@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Drop a repeated lone sentinel word (`court` on its own line, over and over) from the streamed text and from history sent back to the model. One copy can still introduce a real tool call; a run of them is the leak looping, and leaving it in the transcript makes the next turn copy a longer run.
 - Retry a turn that stops inside an unclosed `<invoke>` text tool call. The arguments never arrived, so the markup cannot be executed; the retry tells the model to use the native tool interface instead. If every retry still stops there, the unfinished call is removed from the transcript and the turn records an error instead of looking like a normal answer.
 - Recover the Claude/Opus text leak where a tool call arrives as a lone short word (e.g. `court`, `core`) on its own line followed by `<invoke>`, including when prose comes first. The sentinel is no longer hardcoded — any 2-12 letter lowercase word is recognized. Claude still skips broad text-tool recovery, so bracket text, `<tool_use>` JSON, fenced samples, and invokes without a sentinel stay as text. The sentinel and the invoke block are removed from the transcript so later turns do not copy them.
 - Keep that leaked markup out of the text stream. Pi draws the tool box from tool-call events, so streaming a sentinel word and `<invoke>` first left the raw XML on screen. A registered call is now emitted as a tool call instead of as text.

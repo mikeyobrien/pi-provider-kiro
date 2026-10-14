@@ -35,6 +35,8 @@ export interface CourtGateStep {
     /** Completed invokes whose markup must not be streamed as text. */
     toolCalls: InvokeToolCall[];
 }
+/** Remove a short word that occupies its own line at least twice. */
+export declare function stripRepeatedSentinelLines(text: string): string;
 /**
  * Holds a possible `court` + `<invoke>` leak out of the text stream until it
  * either completes as a registered tool call or proves it is ordinary prose.

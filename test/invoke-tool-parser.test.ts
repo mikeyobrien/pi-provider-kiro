@@ -2,7 +2,12 @@
 // ABOUTME: Validates <invoke name="..."><parameter name="...">…</parameter></invoke> parsing.
 
 import { describe, expect, it } from "vitest";
-import { hasUnclosedInvoke, parseInvokeToolCalls, stripUnclosedInvoke } from "../src/invoke-tool-parser.js";
+import {
+  hasUnclosedInvoke,
+  parseInvokeToolCalls,
+  stripRepeatedSentinelLines,
+  stripUnclosedInvoke,
+} from "../src/invoke-tool-parser.js";
 import { RECORD_279_COMMAND, RECORD_279_SUMMARY, RECORD_279_TEXT } from "./helpers/invoke-fixture.js";
 
 describe("parseInvokeToolCalls", () => {
@@ -283,6 +288,11 @@ describe("unclosed invoke leak", () => {
     expect(stripUnclosedInvoke(text)).toBe(text);
   });
 
+  it("strips a word that occupies its own line more than once", () => {
+    const text = `先改这里。\n\n${"court\n\n".repeat(40)}`.trim();
+    expect(stripRepeatedSentinelLines(text)).toBe("先改这里。");
+  });
+
   it("ignores an unclosed invoke quoted inside a fence", () => {
     const text = '示例：\n```\n<invoke name="edit">\n```\n就这些。';
     expect(hasUnclosedInvoke(text)).toBe(false);
@@ -347,6 +357,37 @@ describe("createCourtInvokeGate — streaming", () => {
     const joined = allText.join("");
     expect(joined).not.toContain("core");
     expect(joined).not.toContain("<invoke");
+  });
+
+  it("drops a repeated court run instead of streaming it", () => {
+    const gate = createCourtInvokeGate(registered);
+    const step = gate.push(`${"court\n\n".repeat(50)}先继续。`);
+    const final = gate.finish();
+    expect(step.text + final.text).toBe("先继续。");
+    expect(step.toolCalls.length + final.toolCalls.length).toBe(0);
+  });
+
+  it("keeps one court when it still introduces an invoke", () => {
+    const gate = createCourtInvokeGate(registered);
+    const chunks = [
+      "court\n\ncourt\n",
+      '<invoke name="bash">\n',
+      '<parameter name="command">ls</parameter>\n',
+      "</invoke>",
+    ];
+    const calls = [];
+    let text = "";
+    for (const chunk of chunks) {
+      const step = gate.push(chunk);
+      text += step.text;
+      calls.push(...step.toolCalls);
+    }
+    const final = gate.finish();
+    text += final.text;
+    calls.push(...final.toolCalls);
+    expect(calls).toHaveLength(1);
+    expect(text).not.toContain("court");
+    expect(text).not.toContain("<invoke");
   });
 
   it("releases unregistered tool as text even with sentinel prefix", () => {

@@ -47,6 +47,7 @@ import {
   hasUnclosedInvoke,
   parseCourtPrefixedInvokeCalls,
   parseInvokeToolCalls,
+  stripRepeatedSentinelLines,
   stripUnclosedInvoke,
 } from "./invoke-tool-parser.js";
 import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, refreshViaKiroCli } from "./kiro-cli.js";
@@ -804,6 +805,7 @@ function streamKiroWithUsageTracking(
                 });
               }
             }
+          armContent = stripRepeatedSentinelLines(armContent);
           if (armContent || armToolUses.length > 0) {
             const lastEntryForArm = history[history.length - 1];
             const prevArm = lastEntryForArm?.assistantResponseMessage;
@@ -1734,13 +1736,18 @@ function streamKiroWithUsageTracking(
             textBlock.text = "";
           }
         }
-        if (textBlockIndex !== null)
+        if (textBlockIndex !== null) {
+          const textBlock = output.content[textBlockIndex] as TextContent;
+          // A repeated lone word (`court` fifty times) is the leak looping.
+          // It must not be stored: the next turn copies it and the run grows.
+          textBlock.text = stripRepeatedSentinelLines(textBlock.text);
           stream.push({
             type: "text_end",
             contentIndex: textBlockIndex,
-            content: (output.content[textBlockIndex] as TextContent).text,
+            content: textBlock.text,
             partial: output,
           });
+        }
         // The Kiro streaming API does not reliably emit per-response output
         // token counts (unlike Anthropic's `output_tokens` or Bedrock's
         // `usage.outputTokens`). When the `usage` event is missing or only

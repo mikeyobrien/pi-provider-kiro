@@ -4890,6 +4890,318 @@ function addPlaceholderTools(tools, history) {
 
 // src/transform.ts
 import { createHash as createHash2 } from "node:crypto";
+
+// src/invoke-tool-parser.ts
+var INVOKE_OPEN_ANCHORED = /^<invoke name="([\w-]+)">/;
+var INVOKE_OPEN_SEARCH = "<invoke name=";
+var INVOKE_OPEN_ANYWHERE = /<invoke name="[\w-]+">/;
+var PARAM_OPEN_ANCHORED = /^<parameter name="([^"]*)">/;
+var INVOKE_CLOSE = "</invoke>";
+var PARAM_CLOSE = "</parameter>";
+var FENCE = "```";
+function fencedRanges(text) {
+  const ranges = [];
+  let searchFrom = 0;
+  while (true) {
+    const open = text.indexOf(FENCE, searchFrom);
+    if (open < 0) break;
+    const close = text.indexOf(FENCE, open + FENCE.length);
+    if (close < 0) {
+      ranges.push({ start: open, end: text.length });
+      break;
+    }
+    ranges.push({ start: open, end: close + FENCE.length });
+    searchFrom = close + FENCE.length;
+  }
+  return ranges;
+}
+var AmbiguousDialectError = class extends Error {
+};
+function parseBlockAt(text, start) {
+  const openMatch = INVOKE_OPEN_ANCHORED.exec(text.substring(start));
+  if (!openMatch) return null;
+  const args = {};
+  let cursor = start + openMatch[0].length;
+  while (true) {
+    const remainder = text.substring(cursor);
+    const leadingWhitespace = remainder.length - remainder.trimStart().length;
+    if (leadingWhitespace > 0) cursor += leadingWhitespace;
+    if (text.startsWith(INVOKE_CLOSE, cursor)) {
+      const end = cursor + INVOKE_CLOSE.length;
+      if (end < text.length && !/\s/.test(text[end])) return null;
+      return { name: openMatch[1], arguments: args, end };
+    }
+    const paramMatch = PARAM_OPEN_ANCHORED.exec(text.substring(cursor));
+    if (!paramMatch) return null;
+    const valueStart = cursor + paramMatch[0].length;
+    const valueEnd = text.indexOf(PARAM_CLOSE, valueStart);
+    if (valueEnd < 0) return null;
+    const value = text.substring(valueStart, valueEnd);
+    if (INVOKE_OPEN_ANYWHERE.test(value)) throw new AmbiguousDialectError();
+    args[paramMatch[1]] = value;
+    cursor = valueEnd + PARAM_CLOSE.length;
+  }
+}
+function parseInvokeToolCalls(text) {
+  const toolCalls = [];
+  const removals = [];
+  const fences = fencedRanges(text);
+  const untouched = { toolCalls: [], cleanedText: text };
+  let cursor = 0;
+  while (cursor < text.length) {
+    const openStart = text.indexOf(INVOKE_OPEN_SEARCH, cursor);
+    if (openStart < 0) break;
+    const containingFence = fences.find((range) => openStart >= range.start && openStart < range.end);
+    if (containingFence) {
+      cursor = containingFence.end;
+      continue;
+    }
+    let block;
+    try {
+      block = parseBlockAt(text, openStart);
+    } catch (e) {
+      if (e instanceof AmbiguousDialectError) return untouched;
+      throw e;
+    }
+    if (block === null) return untouched;
+    const nextOpen = text.indexOf(INVOKE_OPEN_SEARCH, block.end);
+    const interstitialEnd = nextOpen < 0 ? text.length : nextOpen;
+    const interstitial = text.substring(block.end, interstitialEnd);
+    if (interstitial.includes(PARAM_CLOSE) || interstitial.includes(INVOKE_CLOSE)) return untouched;
+    toolCalls.push({ toolUseId: crypto.randomUUID(), name: block.name, arguments: block.arguments });
+    removals.push({ start: openStart, end: block.end });
+    cursor = block.end;
+  }
+  let cleanedText = text;
+  for (let i = removals.length - 1; i >= 0; i--) {
+    const { start, end } = removals[i];
+    cleanedText = cleanedText.substring(0, start) + cleanedText.substring(end);
+  }
+  return { toolCalls, cleanedText };
+}
+function isSentinelWord(word) {
+  return /^[a-z]{2,12}$/.test(word);
+}
+function invokeOpensOutsideFences(text) {
+  const fences = fencedRanges(text);
+  const opens = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const openStart = text.indexOf(INVOKE_OPEN_SEARCH, cursor);
+    if (openStart < 0) break;
+    const containingFence = fences.find((range) => openStart >= range.start && openStart < range.end);
+    if (containingFence) {
+      cursor = containingFence.end;
+      continue;
+    }
+    opens.push(openStart);
+    cursor = openStart + INVOKE_OPEN_SEARCH.length;
+  }
+  return opens;
+}
+function precededBySentinelLine(text, openStart) {
+  const before = text.slice(0, openStart).trimEnd();
+  const lineStart = before.lastIndexOf("\n") + 1;
+  const word = before.slice(lineStart).trim();
+  return isSentinelWord(word) ? word : null;
+}
+function stripSentinelLines(text, sentinels) {
+  return text.split("\n").filter((line) => !sentinels.has(line.trim())).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+function parseCourtPrefixedInvokeCalls(text) {
+  const untouched = { toolCalls: [], cleanedText: text };
+  const opens = invokeOpensOutsideFences(text);
+  if (opens.length === 0) return untouched;
+  const sentinels = /* @__PURE__ */ new Set();
+  for (const start of opens) {
+    const word = precededBySentinelLine(text, start);
+    if (!word) return untouched;
+    sentinels.add(word);
+  }
+  const parsed = parseInvokeToolCalls(text);
+  if (parsed.toolCalls.length !== opens.length) return untouched;
+  return { toolCalls: parsed.toolCalls, cleanedText: stripSentinelLines(parsed.cleanedText, sentinels) };
+}
+function hasUnclosedInvoke(text) {
+  const fences = fencedRanges(text);
+  const outside = (index) => !fences.some((range) => index >= range.start && index < range.end);
+  let depth = 0;
+  let cursor = 0;
+  while (cursor < text.length) {
+    const openAt = text.indexOf(INVOKE_OPEN_SEARCH, cursor);
+    const closeAt = text.indexOf(INVOKE_CLOSE, cursor);
+    if (openAt < 0 && closeAt < 0) break;
+    if (closeAt >= 0 && (openAt < 0 || closeAt < openAt)) {
+      if (outside(closeAt) && depth > 0) depth--;
+      cursor = closeAt + INVOKE_CLOSE.length;
+      continue;
+    }
+    if (outside(openAt)) depth++;
+    cursor = openAt + INVOKE_OPEN_SEARCH.length;
+  }
+  return depth > 0;
+}
+function stripUnclosedInvoke(text) {
+  if (!hasUnclosedInvoke(text)) return text;
+  const fences = fencedRanges(text);
+  const outside = (index) => !fences.some((range) => index >= range.start && index < range.end);
+  let cut = -1;
+  let cursor = 0;
+  while (cursor < text.length) {
+    const openAt = text.indexOf(INVOKE_OPEN_SEARCH, cursor);
+    if (openAt < 0) break;
+    if (outside(openAt)) {
+      const closeAt = text.indexOf(INVOKE_CLOSE, openAt);
+      if (closeAt < 0 || !outside(closeAt)) cut = openAt;
+    }
+    cursor = openAt + INVOKE_OPEN_SEARCH.length;
+  }
+  if (cut < 0) return text;
+  let head = text.slice(0, cut).replace(/\s+$/, "");
+  const lineBreak = head.lastIndexOf("\n");
+  const lastLine = head.slice(lineBreak + 1).trim();
+  if (/^[a-z]{2,12}$/.test(lastLine)) head = head.slice(0, Math.max(0, lineBreak)).replace(/\s+$/, "");
+  return head;
+}
+function splitRepeatedSentinelRun(held, flush) {
+  const lines = held.split("\n");
+  const word = lines[0]?.trim() ?? "";
+  if (!isSentinelWord(word)) return null;
+  let count = 0;
+  let index = 0;
+  for (; index < lines.length; index++) {
+    const trimmed = lines[index].trim();
+    if (trimmed === "") continue;
+    if (trimmed !== word) break;
+    count++;
+  }
+  if (count < 2) return null;
+  const afterRun = lines.slice(index).join("\n");
+  if (afterRun.trim() === "") {
+    if (flush) return { rest: "" };
+    let last = index - 1;
+    while (last > 0 && lines[last].trim() === "") last--;
+    const kept = lines.slice(last).join("\n");
+    if (kept === held) return null;
+    return { rest: kept };
+  }
+  const next = afterRun.trimStart();
+  if (next.startsWith("<") || INVOKE_OPEN_PREFIX.startsWith(next)) {
+    let last = index - 1;
+    while (last > 0 && lines[last].trim() === "") last--;
+    return { rest: lines.slice(last).join("\n") };
+  }
+  return { rest: afterRun };
+}
+function stripRepeatedSentinelLines(text) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const line of text.split("\n")) {
+    const word = line.trim();
+    if (!isSentinelWord(word)) continue;
+    counts.set(word, (counts.get(word) ?? 0) + 1);
+  }
+  const repeated = new Set([...counts].filter(([, count]) => count >= 2).map(([word]) => word));
+  if (repeated.size === 0) return text;
+  return text.split("\n").filter((line) => !repeated.has(line.trim())).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+var INVOKE_OPEN_PREFIX = '<invoke name="';
+function createCourtInvokeGate(isRegistered) {
+  let pending = "";
+  const drain = (flush) => {
+    let text = "";
+    const toolCalls = [];
+    while (pending.length > 0) {
+      const { visible, held } = takeVisibleCourtPrefix(pending);
+      text += visible;
+      pending = held;
+      if (!pending) break;
+      const consumed = consumeHeldCourtInvoke(pending, isRegistered, flush);
+      if (consumed.kind === "wait") {
+        if (!flush) break;
+        const run = splitRepeatedSentinelRun(pending, true);
+        if (run && run.rest.trim() === "") {
+          pending = "";
+          break;
+        }
+        text += pending;
+        pending = "";
+        break;
+      }
+      if (consumed.kind === "drop") {
+        pending = consumed.rest;
+        continue;
+      }
+      if (consumed.kind === "release") {
+        text += pending;
+        pending = "";
+        break;
+      }
+      toolCalls.push(...consumed.calls);
+      pending = consumed.rest;
+    }
+    return { text, toolCalls };
+  };
+  return {
+    push(chunk) {
+      pending += chunk;
+      return drain(false);
+    },
+    finish() {
+      return drain(true);
+    }
+  };
+}
+function takeVisibleCourtPrefix(pending) {
+  let lineStart = 0;
+  while (lineStart < pending.length) {
+    const nl = pending.indexOf("\n", lineStart);
+    if (nl < 0) {
+      const line2 = pending.slice(lineStart).trim();
+      if (line2.length > 0 && line2.length <= 12 && /^[a-z]+$/.test(line2))
+        return { visible: pending.slice(0, lineStart), held: pending.slice(lineStart) };
+      return { visible: pending, held: "" };
+    }
+    const line = pending.slice(lineStart, nl);
+    if (isSentinelWord(line.trim()) && fenceAround(pending, lineStart) === "outside") {
+      return { visible: pending.slice(0, lineStart), held: pending.slice(lineStart) };
+    }
+    lineStart = nl + 1;
+  }
+  return { visible: pending, held: "" };
+}
+function fenceAround(text, index) {
+  const fence = fencedRanges(text).find((range) => index >= range.start && index < range.end);
+  if (!fence) return "outside";
+  const closer = text.indexOf(FENCE, fence.start + FENCE.length);
+  return closer >= 0 && closer < fence.end ? "closed" : "open";
+}
+function consumeHeldCourtInvoke(held, isRegistered, flush) {
+  const firstLine = held.split("\n")[0];
+  const word = firstLine.trim();
+  if (!isSentinelWord(word)) return { kind: "release" };
+  const sentinelAt = held.search(new RegExp(`^[ \\t]*${word}[ \\t]*$`, "m"));
+  if (sentinelAt >= 0) {
+    const fenced = fenceAround(held, sentinelAt);
+    if (fenced === "closed") return { kind: "release" };
+    if (fenced === "open") return { kind: "wait" };
+  }
+  if (!held.includes("\n")) return { kind: "wait" };
+  const after = held.replace(new RegExp(`^[ \\t]*${word}[ \\t]*\\n`), "");
+  if (after.trim() === "") return { kind: "wait" };
+  const next = after.trimStart();
+  if (INVOKE_OPEN_PREFIX.startsWith(next)) return { kind: "wait" };
+  if (!next.startsWith(INVOKE_OPEN_PREFIX)) {
+    const run = splitRepeatedSentinelRun(held, flush);
+    if (run) return { kind: "drop", rest: run.rest };
+    return { kind: "release" };
+  }
+  const parsed = parseCourtPrefixedInvokeCalls(held);
+  if (parsed.toolCalls.length === 0) return { kind: "wait" };
+  if (!parsed.toolCalls.every((call) => isRegistered(call.name))) return { kind: "release" };
+  return { kind: "tool", calls: parsed.toolCalls, rest: parsed.cleanedText };
+}
+
+// src/transform.ts
 var TOOL_RESULT_LIMIT = 25e4;
 var EMPTY_CONTENT_PLACEHOLDER = "Please proceed with the task.";
 function sanitizeSurrogates(text) {
@@ -5022,6 +5334,7 @@ ${uim.content}` : prevUim.content || uim.content;
           }
         }
       }
+      armContent = stripRepeatedSentinelLines(armContent);
       if (!armContent && armToolUses.length === 0 && !armHadBlocks) continue;
       history.push({
         assistantResponseMessage: { content: armContent, ...armToolUses.length > 0 ? { toolUses: armToolUses } : {} }
@@ -5355,262 +5668,6 @@ function syntheticToolResultEntry(toolUseIds, modelId) {
       userInputMessageContext: { toolResults: toolUseIds.map(syntheticFailedToolResult) }
     }
   };
-}
-
-// src/invoke-tool-parser.ts
-var INVOKE_OPEN_ANCHORED = /^<invoke name="([\w-]+)">/;
-var INVOKE_OPEN_SEARCH = "<invoke name=";
-var INVOKE_OPEN_ANYWHERE = /<invoke name="[\w-]+">/;
-var PARAM_OPEN_ANCHORED = /^<parameter name="([^"]*)">/;
-var INVOKE_CLOSE = "</invoke>";
-var PARAM_CLOSE = "</parameter>";
-var FENCE = "```";
-function fencedRanges(text) {
-  const ranges = [];
-  let searchFrom = 0;
-  while (true) {
-    const open = text.indexOf(FENCE, searchFrom);
-    if (open < 0) break;
-    const close = text.indexOf(FENCE, open + FENCE.length);
-    if (close < 0) {
-      ranges.push({ start: open, end: text.length });
-      break;
-    }
-    ranges.push({ start: open, end: close + FENCE.length });
-    searchFrom = close + FENCE.length;
-  }
-  return ranges;
-}
-var AmbiguousDialectError = class extends Error {
-};
-function parseBlockAt(text, start) {
-  const openMatch = INVOKE_OPEN_ANCHORED.exec(text.substring(start));
-  if (!openMatch) return null;
-  const args = {};
-  let cursor = start + openMatch[0].length;
-  while (true) {
-    const remainder = text.substring(cursor);
-    const leadingWhitespace = remainder.length - remainder.trimStart().length;
-    if (leadingWhitespace > 0) cursor += leadingWhitespace;
-    if (text.startsWith(INVOKE_CLOSE, cursor)) {
-      const end = cursor + INVOKE_CLOSE.length;
-      if (end < text.length && !/\s/.test(text[end])) return null;
-      return { name: openMatch[1], arguments: args, end };
-    }
-    const paramMatch = PARAM_OPEN_ANCHORED.exec(text.substring(cursor));
-    if (!paramMatch) return null;
-    const valueStart = cursor + paramMatch[0].length;
-    const valueEnd = text.indexOf(PARAM_CLOSE, valueStart);
-    if (valueEnd < 0) return null;
-    const value = text.substring(valueStart, valueEnd);
-    if (INVOKE_OPEN_ANYWHERE.test(value)) throw new AmbiguousDialectError();
-    args[paramMatch[1]] = value;
-    cursor = valueEnd + PARAM_CLOSE.length;
-  }
-}
-function parseInvokeToolCalls(text) {
-  const toolCalls = [];
-  const removals = [];
-  const fences = fencedRanges(text);
-  const untouched = { toolCalls: [], cleanedText: text };
-  let cursor = 0;
-  while (cursor < text.length) {
-    const openStart = text.indexOf(INVOKE_OPEN_SEARCH, cursor);
-    if (openStart < 0) break;
-    const containingFence = fences.find((range) => openStart >= range.start && openStart < range.end);
-    if (containingFence) {
-      cursor = containingFence.end;
-      continue;
-    }
-    let block;
-    try {
-      block = parseBlockAt(text, openStart);
-    } catch (e) {
-      if (e instanceof AmbiguousDialectError) return untouched;
-      throw e;
-    }
-    if (block === null) return untouched;
-    const nextOpen = text.indexOf(INVOKE_OPEN_SEARCH, block.end);
-    const interstitialEnd = nextOpen < 0 ? text.length : nextOpen;
-    const interstitial = text.substring(block.end, interstitialEnd);
-    if (interstitial.includes(PARAM_CLOSE) || interstitial.includes(INVOKE_CLOSE)) return untouched;
-    toolCalls.push({ toolUseId: crypto.randomUUID(), name: block.name, arguments: block.arguments });
-    removals.push({ start: openStart, end: block.end });
-    cursor = block.end;
-  }
-  let cleanedText = text;
-  for (let i = removals.length - 1; i >= 0; i--) {
-    const { start, end } = removals[i];
-    cleanedText = cleanedText.substring(0, start) + cleanedText.substring(end);
-  }
-  return { toolCalls, cleanedText };
-}
-function isSentinelWord(word) {
-  return /^[a-z]{2,12}$/.test(word);
-}
-function invokeOpensOutsideFences(text) {
-  const fences = fencedRanges(text);
-  const opens = [];
-  let cursor = 0;
-  while (cursor < text.length) {
-    const openStart = text.indexOf(INVOKE_OPEN_SEARCH, cursor);
-    if (openStart < 0) break;
-    const containingFence = fences.find((range) => openStart >= range.start && openStart < range.end);
-    if (containingFence) {
-      cursor = containingFence.end;
-      continue;
-    }
-    opens.push(openStart);
-    cursor = openStart + INVOKE_OPEN_SEARCH.length;
-  }
-  return opens;
-}
-function precededBySentinelLine(text, openStart) {
-  const before = text.slice(0, openStart).trimEnd();
-  const lineStart = before.lastIndexOf("\n") + 1;
-  const word = before.slice(lineStart).trim();
-  return isSentinelWord(word) ? word : null;
-}
-function stripSentinelLines(text, sentinels) {
-  return text.split("\n").filter((line) => !sentinels.has(line.trim())).join("\n").replace(/\n{3,}/g, "\n\n").trim();
-}
-function parseCourtPrefixedInvokeCalls(text) {
-  const untouched = { toolCalls: [], cleanedText: text };
-  const opens = invokeOpensOutsideFences(text);
-  if (opens.length === 0) return untouched;
-  const sentinels = /* @__PURE__ */ new Set();
-  for (const start of opens) {
-    const word = precededBySentinelLine(text, start);
-    if (!word) return untouched;
-    sentinels.add(word);
-  }
-  const parsed = parseInvokeToolCalls(text);
-  if (parsed.toolCalls.length !== opens.length) return untouched;
-  return { toolCalls: parsed.toolCalls, cleanedText: stripSentinelLines(parsed.cleanedText, sentinels) };
-}
-function hasUnclosedInvoke(text) {
-  const fences = fencedRanges(text);
-  const outside = (index) => !fences.some((range) => index >= range.start && index < range.end);
-  let depth = 0;
-  let cursor = 0;
-  while (cursor < text.length) {
-    const openAt = text.indexOf(INVOKE_OPEN_SEARCH, cursor);
-    const closeAt = text.indexOf(INVOKE_CLOSE, cursor);
-    if (openAt < 0 && closeAt < 0) break;
-    if (closeAt >= 0 && (openAt < 0 || closeAt < openAt)) {
-      if (outside(closeAt) && depth > 0) depth--;
-      cursor = closeAt + INVOKE_CLOSE.length;
-      continue;
-    }
-    if (outside(openAt)) depth++;
-    cursor = openAt + INVOKE_OPEN_SEARCH.length;
-  }
-  return depth > 0;
-}
-function stripUnclosedInvoke(text) {
-  if (!hasUnclosedInvoke(text)) return text;
-  const fences = fencedRanges(text);
-  const outside = (index) => !fences.some((range) => index >= range.start && index < range.end);
-  let cut = -1;
-  let cursor = 0;
-  while (cursor < text.length) {
-    const openAt = text.indexOf(INVOKE_OPEN_SEARCH, cursor);
-    if (openAt < 0) break;
-    if (outside(openAt)) {
-      const closeAt = text.indexOf(INVOKE_CLOSE, openAt);
-      if (closeAt < 0 || !outside(closeAt)) cut = openAt;
-    }
-    cursor = openAt + INVOKE_OPEN_SEARCH.length;
-  }
-  if (cut < 0) return text;
-  let head = text.slice(0, cut).replace(/\s+$/, "");
-  const lineBreak = head.lastIndexOf("\n");
-  const lastLine = head.slice(lineBreak + 1).trim();
-  if (/^[a-z]{2,12}$/.test(lastLine)) head = head.slice(0, Math.max(0, lineBreak)).replace(/\s+$/, "");
-  return head;
-}
-var INVOKE_OPEN_PREFIX = '<invoke name="';
-function createCourtInvokeGate(isRegistered) {
-  let pending = "";
-  const drain = (flush) => {
-    let text = "";
-    const toolCalls = [];
-    while (pending.length > 0) {
-      const { visible, held } = takeVisibleCourtPrefix(pending);
-      text += visible;
-      pending = held;
-      if (!pending) break;
-      const consumed = consumeHeldCourtInvoke(pending, isRegistered);
-      if (consumed.kind === "wait") {
-        if (!flush) break;
-        text += pending;
-        pending = "";
-        break;
-      }
-      if (consumed.kind === "release") {
-        text += pending;
-        pending = "";
-        break;
-      }
-      toolCalls.push(...consumed.calls);
-      pending = consumed.rest;
-    }
-    return { text, toolCalls };
-  };
-  return {
-    push(chunk) {
-      pending += chunk;
-      return drain(false);
-    },
-    finish() {
-      return drain(true);
-    }
-  };
-}
-function takeVisibleCourtPrefix(pending) {
-  let lineStart = 0;
-  while (lineStart < pending.length) {
-    const nl = pending.indexOf("\n", lineStart);
-    if (nl < 0) {
-      const line2 = pending.slice(lineStart).trim();
-      if (line2.length > 0 && line2.length <= 12 && /^[a-z]+$/.test(line2))
-        return { visible: pending.slice(0, lineStart), held: pending.slice(lineStart) };
-      return { visible: pending, held: "" };
-    }
-    const line = pending.slice(lineStart, nl);
-    if (isSentinelWord(line.trim()) && fenceAround(pending, lineStart) === "outside") {
-      return { visible: pending.slice(0, lineStart), held: pending.slice(lineStart) };
-    }
-    lineStart = nl + 1;
-  }
-  return { visible: pending, held: "" };
-}
-function fenceAround(text, index) {
-  const fence = fencedRanges(text).find((range) => index >= range.start && index < range.end);
-  if (!fence) return "outside";
-  const closer = text.indexOf(FENCE, fence.start + FENCE.length);
-  return closer >= 0 && closer < fence.end ? "closed" : "open";
-}
-function consumeHeldCourtInvoke(held, isRegistered) {
-  const firstLine = held.split("\n")[0];
-  const word = firstLine.trim();
-  if (!isSentinelWord(word)) return { kind: "release" };
-  const sentinelAt = held.search(new RegExp(`^[ \\t]*${word}[ \\t]*$`, "m"));
-  if (sentinelAt >= 0) {
-    const fenced = fenceAround(held, sentinelAt);
-    if (fenced === "closed") return { kind: "release" };
-    if (fenced === "open") return { kind: "wait" };
-  }
-  if (!held.includes("\n")) return { kind: "wait" };
-  const after = held.replace(new RegExp(`^[ \\t]*${word}[ \\t]*\\n`), "");
-  if (after.trim() === "") return { kind: "wait" };
-  const next = after.trimStart();
-  if (INVOKE_OPEN_PREFIX.startsWith(next)) return { kind: "wait" };
-  if (!next.startsWith(INVOKE_OPEN_PREFIX)) return { kind: "release" };
-  const parsed = parseCourtPrefixedInvokeCalls(held);
-  if (parsed.toolCalls.length === 0) return { kind: "wait" };
-  if (!parsed.toolCalls.every((call) => isRegistered(call.name))) return { kind: "release" };
-  return { kind: "tool", calls: parsed.toolCalls, rest: parsed.cleanedText };
 }
 
 // src/stream.ts
@@ -6621,6 +6678,7 @@ ${systemPrompt}` : ""}`;
                 });
               }
             }
+          armContent = stripRepeatedSentinelLines(armContent);
           if (armContent || armToolUses.length > 0) {
             const lastEntryForArm = history[history.length - 1];
             const prevArm = lastEntryForArm?.assistantResponseMessage;
@@ -7318,13 +7376,16 @@ ${currentContent}`;
             textBlock.text = "";
           }
         }
-        if (textBlockIndex !== null)
+        if (textBlockIndex !== null) {
+          const textBlock = output.content[textBlockIndex];
+          textBlock.text = stripRepeatedSentinelLines(textBlock.text);
           stream.push({
             type: "text_end",
             contentIndex: textBlockIndex,
-            content: output.content[textBlockIndex].text,
+            content: textBlock.text,
             partial: output
           });
+        }
         if (usageEvent?.inputTokens !== void 0) output.usage.input = usageEvent.inputTokens;
         if (usageEvent?.cacheReadInputTokens !== void 0) output.usage.cacheRead = usageEvent.cacheReadInputTokens;
         if (usageEvent?.cacheWriteInputTokens !== void 0) output.usage.cacheWrite = usageEvent.cacheWriteInputTokens;

@@ -296,7 +296,68 @@ export interface CourtGateStep {
   toolCalls: InvokeToolCall[];
 }
 
-type HeldConsumption = { kind: "wait" } | { kind: "release" } | { kind: "tool"; calls: InvokeToolCall[]; rest: string };
+type HeldConsumption =
+  | { kind: "wait" }
+  | { kind: "release" }
+  | { kind: "drop"; rest: string }
+  | { kind: "tool"; calls: InvokeToolCall[]; rest: string };
+
+/**
+ * A run of the same short word on its own line (`court`, blank line, `court`…)
+ * is the leak looping, not prose. Returns the text after that run, or null when
+ * the buffer is not such a run.
+ */
+function splitRepeatedSentinelRun(held: string, flush: boolean): { rest: string } | null {
+  const lines = held.split("\n");
+  const word = lines[0]?.trim() ?? "";
+  if (!isSentinelWord(word)) return null;
+  let count = 0;
+  let index = 0;
+  for (; index < lines.length; index++) {
+    const trimmed = lines[index].trim();
+    if (trimmed === "") continue;
+    if (trimmed !== word) break;
+    count++;
+  }
+  if (count < 2) return null;
+  const afterRun = lines.slice(index).join("\n");
+  if (afterRun.trim() === "") {
+    if (flush) return { rest: "" };
+    // More text may still arrive, including an invoke. Keep the last copy.
+    let last = index - 1;
+    while (last > 0 && lines[last].trim() === "") last--;
+    const kept = lines.slice(last).join("\n");
+    if (kept === held) return null;
+    return { rest: kept };
+  }
+  const next = afterRun.trimStart();
+  // Keep the last copy when it still introduces an invoke. Dropping it would
+  // leave a bare `<invoke` that the gate then streams as text.
+  if (next.startsWith("<") || INVOKE_OPEN_PREFIX.startsWith(next)) {
+    let last = index - 1;
+    while (last > 0 && lines[last].trim() === "") last--;
+    return { rest: lines.slice(last).join("\n") };
+  }
+  return { rest: afterRun };
+}
+
+/** Remove a short word that occupies its own line at least twice. */
+export function stripRepeatedSentinelLines(text: string): string {
+  const counts = new Map<string, number>();
+  for (const line of text.split("\n")) {
+    const word = line.trim();
+    if (!isSentinelWord(word)) continue;
+    counts.set(word, (counts.get(word) ?? 0) + 1);
+  }
+  const repeated = new Set([...counts].filter(([, count]) => count >= 2).map(([word]) => word));
+  if (repeated.size === 0) return text;
+  return text
+    .split("\n")
+    .filter((line) => !repeated.has(line.trim()))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
 
 const INVOKE_OPEN_PREFIX = '<invoke name="';
 
@@ -319,12 +380,21 @@ export function createCourtInvokeGate(isRegistered: (name: string) => boolean): 
       text += visible;
       pending = held;
       if (!pending) break;
-      const consumed = consumeHeldCourtInvoke(pending, isRegistered);
+      const consumed = consumeHeldCourtInvoke(pending, isRegistered, flush);
       if (consumed.kind === "wait") {
         if (!flush) break;
+        const run = splitRepeatedSentinelRun(pending, true);
+        if (run && run.rest.trim() === "") {
+          pending = "";
+          break;
+        }
         text += pending;
         pending = "";
         break;
+      }
+      if (consumed.kind === "drop") {
+        pending = consumed.rest;
+        continue;
       }
       if (consumed.kind === "release") {
         text += pending;
@@ -374,7 +444,11 @@ function fenceAround(text: string, index: number): "outside" | "closed" | "open"
   return closer >= 0 && closer < fence.end ? "closed" : "open";
 }
 
-function consumeHeldCourtInvoke(held: string, isRegistered: (name: string) => boolean): HeldConsumption {
+function consumeHeldCourtInvoke(
+  held: string,
+  isRegistered: (name: string) => boolean,
+  flush: boolean,
+): HeldConsumption {
   const firstLine = held.split("\n")[0];
   const word = firstLine.trim();
   if (!isSentinelWord(word)) return { kind: "release" };
@@ -389,7 +463,11 @@ function consumeHeldCourtInvoke(held: string, isRegistered: (name: string) => bo
   if (after.trim() === "") return { kind: "wait" };
   const next = after.trimStart();
   if (INVOKE_OPEN_PREFIX.startsWith(next)) return { kind: "wait" };
-  if (!next.startsWith(INVOKE_OPEN_PREFIX)) return { kind: "release" };
+  if (!next.startsWith(INVOKE_OPEN_PREFIX)) {
+    const run = splitRepeatedSentinelRun(held, flush);
+    if (run) return { kind: "drop", rest: run.rest };
+    return { kind: "release" };
+  }
   const parsed = parseCourtPrefixedInvokeCalls(held);
   if (parsed.toolCalls.length === 0) return { kind: "wait" };
   if (!parsed.toolCalls.every((call) => isRegistered(call.name))) return { kind: "release" };
