@@ -174,11 +174,13 @@ export function parseInvokeToolCalls(text: string): InvokeParseResult {
  * A sentinel is a single short alphabetic word on its own line — the leaked
  * prefix Opus drops before `<invoke>`. Known values include `court` and `core`,
  * but the exact word varies across sessions.
+ *
+ * The regex is inlined to prevent esbuild from collapsing the constant and the
+ * function into the same minified name (observed: both became `n`, the function
+ * shadowed the regex, and `.test()` silently returned `undefined`).
  */
-const SENTINEL_RE = /^[a-z]{2,12}$/;
-
 function isSentinelWord(word: string): boolean {
-  return SENTINEL_RE.test(word);
+  return /^[a-z]{2,12}$/.test(word);
 }
 
 /** `<invoke` opens that sit outside fenced code, in source order. */

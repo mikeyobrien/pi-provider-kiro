@@ -5445,9 +5445,8 @@ function parseInvokeToolCalls(text) {
   }
   return { toolCalls, cleanedText };
 }
-var SENTINEL_RE = /^[a-z]{2,12}$/;
 function isSentinelWord(word) {
-  return SENTINEL_RE.test(word);
+  return /^[a-z]{2,12}$/.test(word);
 }
 function invokeOpensOutsideFences(text) {
   const fences = fencedRanges(text);

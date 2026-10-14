@@ -266,3 +266,77 @@ describe("parseInvokeToolCalls", () => {
     expect(result.toolCalls[0].toolUseId).not.toBe(result.toolCalls[1].toolUseId);
   });
 });
+
+// Dynamic import for ESM-only export
+const { createCourtInvokeGate } = await import("../src/invoke-tool-parser.js");
+
+describe("createCourtInvokeGate — streaming", () => {
+
+  const registered = (name: string) => ["edit", "bash", "read", "write"].includes(name);
+
+  it("recovers court-prefixed invoke across realistic streaming chunks", () => {
+    const gate = createCourtInvokeGate(registered);
+    const chunks = [
+      "我整体替换 922-1023。新版加入阶段跟踪 + 自动补发。\n\n",
+      "court",
+      "\n",
+      '<invoke name="edit">\n',
+      '<parameter name="path">/some/file.py</parameter>\n',
+      '<parameter name="new_string">code</parameter>\n',
+      "</invoke>",
+    ];
+    const allText: string[] = [];
+    const allCalls: unknown[] = [];
+    for (const chunk of chunks) {
+      const step = gate.push(chunk);
+      if (step.text) allText.push(step.text);
+      allCalls.push(...step.toolCalls);
+    }
+    const final = gate.finish();
+    if (final.text) allText.push(final.text);
+    allCalls.push(...final.toolCalls);
+
+    expect(allCalls).toHaveLength(1);
+    expect((allCalls[0] as any).name).toBe("edit");
+    const joined = allText.join("");
+    expect(joined).not.toContain("court");
+    expect(joined).not.toContain("<invoke");
+  });
+
+  it("recovers core-prefixed invoke across realistic streaming chunks", () => {
+    const gate = createCourtInvokeGate(registered);
+    const chunks = [
+      "先执行一下。\n\n",
+      "core",
+      "\n",
+      '<invoke name="bash">\n',
+      '<parameter name="command">echo hello</parameter>\n',
+      "</invoke>",
+    ];
+    const allText: string[] = [];
+    const allCalls: unknown[] = [];
+    for (const chunk of chunks) {
+      const step = gate.push(chunk);
+      if (step.text) allText.push(step.text);
+      allCalls.push(...step.toolCalls);
+    }
+    const final = gate.finish();
+    if (final.text) allText.push(final.text);
+    allCalls.push(...final.toolCalls);
+
+    expect(allCalls).toHaveLength(1);
+    expect((allCalls[0] as any).name).toBe("bash");
+    const joined = allText.join("");
+    expect(joined).not.toContain("core");
+    expect(joined).not.toContain("<invoke");
+  });
+
+  it("releases unregistered tool as text even with sentinel prefix", () => {
+    const gate = createCourtInvokeGate(registered);
+    const step = gate.push("court\n" + '<invoke name="unknown_tool">\n<parameter name="x">1</parameter>\n</invoke>');
+    const final = gate.finish();
+    const text = step.text + final.text;
+    expect(step.toolCalls.length + final.toolCalls.length).toBe(0);
+    expect(text).toContain("court");
+  });
+});
