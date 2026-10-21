@@ -37,6 +37,8 @@ export interface KiroCredentials extends OAuthCredentials {
   profileArn?: string;
   startUrl?: string;
   isEnterprise?: boolean;
+  /** Social sign-in provider (`google` / `github`) for a desktop token, as kiro-cli records it. */
+  socialProvider?: string;
 }
 
 export const KIRO_DESKTOP_USER_AGENT = "Kiro-Desktop/0.2.13 (darwin; arm64)";
@@ -381,6 +383,9 @@ async function refreshKiroTokenDirect(credentials: OAuthCredentials): Promise<OA
       authMethod: "desktop" as KiroAuthMethod,
       profileArn: data.profileArn || (credentials as KiroCredentials).profileArn,
       startUrl: (credentials as KiroCredentials).startUrl,
+      ...((credentials as KiroCredentials).socialProvider
+        ? { socialProvider: (credentials as KiroCredentials).socialProvider }
+        : {}),
     };
   }
 

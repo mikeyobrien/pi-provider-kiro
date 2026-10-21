@@ -66,6 +66,9 @@ HTTP 429 is provider-retried only when its JSON `reason` is exactly `USER_REQUES
 - `desktop`: Google/GitHub social login via Kiro auth service. Refresh via `prod.{region}.auth.desktop.kiro.dev`. Token format: `refreshToken|desktop`
 - `external-idp`: Enterprise OIDC IdP (e.g. Okta) configured by the org, established by `kiro-cli login`. Refresh is a public-client `refresh_token` grant against the tenant's own `token_endpoint` (form-encoded, snake_case response, no client secret). Token format: `refreshToken|clientId|tokenEndpoint|external-idp`. Requests **must** carry `tokentype: EXTERNAL_IDP` or Kiro answers 403 "Invalid token" — see `src/token-type.ts`.
 
+### Cloud memory (`src/memory.ts`, `src/memory-tools.ts`)
+Not the runtime or management API: it is Kiro's web service (`app.kiro.dev`, `KiroWebBearerService`, Smithy RPCv2 CBOR — `POST /service/KiroWebBearerService/operation/<Op>` with `smithy-protocol: rpc-v2-cbor`). Only four ops are on the bearer surface: Put/Get/DeleteMemory and ListMemoryChanges. Every memory op needs `X-Kiro-Idp` (`AWSIdC` for any IdC that is not Builder ID; other values get 400) and is gated per user on the `enableRemoteMemorySync` rollout, so a 403 naming that flag is a rollout answer, not an auth bug. `@smithy/core/cbor` refuses `undefined` members — strip them before `serialize`.
+
 ### Login Methods
 Users can authenticate via:
 - **Builder ID**: Native device code flow (works in SSH/remote)

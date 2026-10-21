@@ -14,7 +14,11 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function makeTokenDb(profileArn?: string, authMethod: "idc" | "desktop" = "idc"): string {
+function makeTokenDb(
+  profileArn?: string,
+  authMethod: "idc" | "desktop" = "idc",
+  extra: Record<string, unknown> = {},
+): string {
   tempDir = mkdtempSync(join(tmpdir(), "kiro-cli-test-"));
   const dbPath = join(tempDir, "data.sqlite3");
   const db = new DatabaseSync(dbPath);
@@ -25,6 +29,7 @@ function makeTokenDb(profileArn?: string, authMethod: "idc" | "desktop" = "idc")
     region: "eu-central-1",
     expires_at: new Date(Date.now() + 3600000).toISOString(),
     ...(profileArn ? { profile_arn: profileArn } : {}),
+    ...extra,
   });
   const key = authMethod === "idc" ? "kirocli:odic:token" : "kirocli:social:token";
   db.prepare(`INSERT INTO auth_kv (key, value) VALUES (?, ?)`).run(key, token);
@@ -53,6 +58,18 @@ describe("tryKiroCliToken (#110)", () => {
     const result = tryKiroCliToken(dbPath, "kirocli:social:token", "desktop");
     expect(result?.profileArn).toBe(pinnedArn);
     expect(result?.authMethod).toBe("desktop");
+  });
+
+  // The memory API requires X-Kiro-Idp, and a social token is the only record
+  // of whether the sign-in was Google or GitHub (kiro-cli SocialToken.provider).
+  it("carries the social provider through the desktop token path", () => {
+    const dbPath = makeTokenDb(undefined, "desktop", { provider: "github" });
+    expect(tryKiroCliToken(dbPath, "kirocli:social:token", "desktop")?.socialProvider).toBe("github");
+  });
+
+  it("leaves socialProvider absent when the social token names none", () => {
+    const dbPath = makeTokenDb(undefined, "desktop");
+    expect(tryKiroCliToken(dbPath, "kirocli:social:token", "desktop")).not.toHaveProperty("socialProvider");
   });
 
   it("leaves profileArn undefined when the token has no profile", () => {

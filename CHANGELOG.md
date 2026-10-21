@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Kiro cloud memory. `createKiroMemoryClient()` (exported with `KiroMemoryError` and its types) calls the four memory operations Kiro's web service exposes to bearer clients — `PutMemory`, `GetMemory`, `DeleteMemory`, `ListMemoryChanges` — over Smithy RPCv2 CBOR on `app.kiro.dev`, with the existing Kiro sign-in. Inputs are checked against the service model's limits before sending; failures carry a `kind` (`forbidden`, `unauthorized`, `notFound`, `gone`, `conflict`, `invalid`, `throttled`, `unavailable`) and never the token or memory content; the endpoint is restricted to Kiro hosts and the local loopback. Opt-in tools `kiro_memory_save` / `_get` / `_list` / `_delete` register when `pi-provider-kiro.memory.enabled` is `true`. The service is gated per user by Kiro's `enableRemoteMemorySync` rollout, so most accounts currently get `forbidden`.
+- `kiro-cli` social credentials now carry the sign-in's provider (`socialProvider`), which the memory API requires as `X-Kiro-Idp`.
+
 ### Changed
 
 - esbuild is now a devDependency (build-only); bumped to 0.28.2. It only produces `dist/index.js` and nothing in the published bundle imports it, yet as a runtime dependency every consumer installed esbuild 0.25.12 and its platform binary. Pinned exactly to match pi 0.87.1 (`@earendil-works/chord`). Both lockfiles now resolve a single esbuild (vite is deduped onto 0.28.2 too). `test/packaging.test.ts` pins esbuild's absence from `dependencies`.
