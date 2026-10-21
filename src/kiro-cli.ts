@@ -164,6 +164,7 @@ function tryKiroCliToken(
       region,
       authMethod: "desktop",
       profileArn: tokenData.profile_arn || tokenData.profileArn,
+      ...(typeof tokenData.provider === "string" && tokenData.provider ? { socialProvider: tokenData.provider } : {}),
     };
   }
 

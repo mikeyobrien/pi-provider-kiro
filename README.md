@@ -111,6 +111,104 @@ Opt in to a compact allowance indicator in Pi's footer while a Kiro model is act
 
 The badge shows the percent of your allowance **used** (e.g. `◆ Kiro 1%`), colored by consumption — comfortable below 70%, warning at 70%, and critical at 90%. It refreshes on session start, model switches, and after completed Kiro turns, throttled to avoid extra requests. It stays hidden for non-Kiro models, when no local Kiro credential is available, or if a usage lookup fails, and is disabled by default.
 
+## Kiro cloud memory
+
+Kiro keeps a per-user memory store in the cloud, behind the Kiro web service at
+`app.kiro.dev`. This provider exposes it two ways: opt-in tools the model can
+call, and a typed client for code. Both send your existing Kiro sign-in; there is
+no separate login.
+
+> **Availability.** The service only answers for accounts in Kiro's
+> `enableRemoteMemorySync` rollout, which is currently limited. Every other
+> account gets
+> `403 ForbiddenException: enableRemoteMemorySync feature is not enabled for this user`
+> (`KiroMemoryError` kind `forbidden`). There is no API to opt in.
+
+### Tools
+
+Add to `~/.pi/agent/settings.json`:
+
+```json
+{
+  "pi-provider-kiro": {
+    "memory": { "enabled": true }
+  }
+}
+```
+
+This registers four tools, whatever model is active:
+
+| Tool | Does |
+|---|---|
+| `kiro_memory_save` | Create a memory, or replace one by `memoryId` |
+| `kiro_memory_get` | Read one memory with its full content |
+| `kiro_memory_list` | List memories newest first, optionally filtered by `query` |
+| `kiro_memory_delete` | Delete a memory |
+
+Optional keys: `namespace` (default `KNOWLEDGE`, the partition Kiro's own clients
+sync) and `endpoint` (`https://beta.app.kiro.dev` and similar; only Kiro hosts
+and the local loopback are accepted, because the endpoint receives your token).
+The tools add no memories to the system prompt: the model reads them only by
+calling a tool.
+
+### Client
+
+```ts
+import { createKiroMemoryClient, KiroMemoryError } from "pi-provider-kiro";
+
+const memory = createKiroMemoryClient({
+  // Called per request, so a refreshed token is picked up.
+  getCredential: () => ({
+    access: creds.access, // Kiro access token or ksk_ API key
+    profileArn: creds.profileArn,
+    authMethod: creds.authMethod, // "idc" | "desktop" | "external-idp" | "apikey"
+  }),
+});
+
+const { memoryId } = await memory.put({
+  content: "The user indents with tabs.",
+  title: "Tabs",
+  memoryType: "USER_PREFERENCE",
+  scopes: ["Global"],
+});
+const stored = await memory.get(memoryId); // full record, including content
+const { memories, version } = await memory.listAll(); // every active memory
+const page = await memory.listChanges({ from: version }); // changes since then
+await memory.delete(memoryId);
+
+try {
+  await memory.get("missing");
+} catch (error) {
+  if (error instanceof KiroMemoryError && error.kind === "notFound") {
+    // also: forbidden, unauthorized, gone, conflict, invalid, throttled, unavailable
+  }
+}
+```
+
+What the service does and does not offer:
+
+- Exactly four operations: `PutMemory`, `GetMemory`, `DeleteMemory`,
+  `ListMemoryChanges`. There is no search and no server-side ranking;
+  `listAll` reads the whole change stream and the `kiro_memory_list` tool filters
+  locally.
+- A memory belongs to the signed-in user. The service derives the user from the
+  token; the client never sends a user id. `namespace` partitions one user's
+  memories; `scopes` are tags and do not isolate anything.
+- `put` with an existing `memoryId` replaces the whole record. A deleted id can
+  never be reused (`conflict`). Without `memoryId` the service mints one.
+- Limits: content up to 65,536 characters, title and summary 4,096, up to 50
+  scopes and 50 metadata entries (string values only). The client checks these
+  before sending.
+- A Google or GitHub sign-in must say which one (`socialProvider`), because the
+  service requires the identity provider. A `kiro-cli` social login records it;
+  other desktop credentials are refused locally rather than sent.
+- Error messages carry the HTTP status and the service's own message with tokens
+  redacted. They never include memory content.
+
+The operations and their limits come from the model of Kiro's web service
+(`KiroWebBearerService`, Smithy RPCv2 CBOR), the same API Kiro Agent's memory
+sync uses.
+
 ## Retry Behavior
 
 Generic transient retries such as HTTP `429` and `5xx` are handled by `pi-coding-agent` at the session layer.

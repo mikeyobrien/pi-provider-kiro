@@ -11,6 +11,8 @@ import { registerKiroUsageFooter } from "./footer-lifecycle.js";
 import { getKiroCliCredentials, getKiroCliSocialToken } from "./kiro-cli.js";
 import { getKiroIdeCredentials } from "./kiro-ide.js";
 import { setExtensionContext } from "./login-ui.js";
+import type { KiroMemoryCredential } from "./memory.js";
+import { loadKiroMemoryToolsConfig, registerKiroMemoryTools } from "./memory-tools.js";
 import { getCachedModels, isCacheStale, type KiroModel, kiroModels, updateKiroModelsCache } from "./models.js";
 import type { KiroCredentials } from "./oauth.js";
 import { loginKiro, refreshKiroToken } from "./oauth.js";
@@ -39,6 +41,30 @@ export {
   validateKiroToolStructure,
 } from "./history-validator.js";
 export { KiroManagementHttpError } from "./management.js";
+export {
+  createKiroMemoryClient,
+  KIRO_MEMORY_DEFAULT_ENDPOINT,
+  KIRO_MEMORY_DEFAULT_NAMESPACE,
+  KIRO_MEMORY_ENDPOINT_ENV,
+  KIRO_MEMORY_LIMITS,
+  KIRO_MEMORY_TYPES,
+  type KiroListMemoryChangesInput,
+  type KiroMemory,
+  type KiroMemoryChange,
+  type KiroMemoryChangeEntry,
+  type KiroMemoryChangePage,
+  type KiroMemoryClient,
+  type KiroMemoryClientOptions,
+  type KiroMemoryCredential,
+  KiroMemoryError,
+  type KiroMemoryErrorKind,
+  type KiroMemoryOperation,
+  type KiroMemoryStatus,
+  type KiroMemoryType,
+  type KiroPutMemoryInput,
+  kiroMemoryIdpHeader,
+  resolveKiroMemoryEndpoint,
+} from "./memory.js";
 export { KIRO_MODEL_IDS, kiroModels, resolveKiroModel } from "./models.js";
 // Kiro's own error vocabulary and the predicates this provider classifies it
 // with. Published so consumers can interpret a reason code without an error
@@ -99,6 +125,25 @@ function resolveOAuthCredential(): OAuthCredentials | undefined {
   if (hostCredential) return hostCredential as OAuthCredentials;
   const credential = resolveLocalCredential();
   return credential && "access" in credential ? (credential as OAuthCredentials) : undefined;
+}
+
+/**
+ * The credential memory tools send, resolved per call. Same precedence as the
+ * footer: pi's own persisted credential, then kiro-cli / IDE, then an API key.
+ */
+function resolveMemoryCredential(): KiroMemoryCredential | undefined {
+  const oauth = resolveOAuthCredential() as KiroCredentials | undefined;
+  if (oauth?.access) {
+    return {
+      access: oauth.access,
+      profileArn: oauth.profileArn,
+      authMethod: oauth.authMethod,
+      startUrl: oauth.startUrl,
+      socialProvider: oauth.socialProvider,
+    };
+  }
+  const apiKey = process.env.KIRO_API_KEY;
+  return apiKey ? { access: apiKey, authMethod: "apikey" } : undefined;
 }
 
 function credentialRegion(credential: KiroRefreshCredential): string {
@@ -185,6 +230,12 @@ export default function (pi: ExtensionAPI) {
     fetchUsage: fetchKiroUsage,
   });
 
+  // Opt-in tools over Kiro's cloud memory API. Off by default: the backend is
+  // rolled out per user, so most accounts would only see a 403.
+  registerKiroMemoryTools(pi, {
+    loadConfig: loadKiroMemoryToolsConfig,
+    resolveCredential: resolveMemoryCredential,
+  });
   const credential = resolveLocalCredential();
   const streamSimple = createKiroStream(loadKiroUsageTracking());
   pi.registerProvider("kiro", {

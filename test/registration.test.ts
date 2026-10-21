@@ -71,6 +71,25 @@ describe("Feature 1: Extension Registration", () => {
   // Consumers that classify a reason code without an error instance in hand
   // (a persisted log line, say) need the vocabulary through the package entry
   // point, not a deep import into src/retry.js.
+  it("exposes the memory client API from the entry point", async () => {
+    const mod = await import("../src/index.js");
+    const memory = await import("../src/memory.js");
+
+    expect(mod.createKiroMemoryClient).toBe(memory.createKiroMemoryClient);
+    expect(mod.KiroMemoryError).toBe(memory.KiroMemoryError);
+    expect(mod.KIRO_MEMORY_DEFAULT_NAMESPACE).toBe("KNOWLEDGE");
+  });
+
+  it("registers no memory tools unless settings opt in", async () => {
+    const mod = await import("../src/index.js");
+    const registerTool = vi.fn();
+    const pi = { registerProvider: vi.fn(), on: vi.fn(), registerTool } as unknown as ExtensionAPI;
+
+    mod.default(pi);
+
+    expect(registerTool).not.toHaveBeenCalled();
+  });
+
   it("exposes Kiro's reason codes and classification predicates from the entry point", async () => {
     const mod = await import("../src/index.js");
     const retry = await import("../src/retry.js");
