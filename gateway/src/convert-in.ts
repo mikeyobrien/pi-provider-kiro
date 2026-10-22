@@ -13,7 +13,7 @@ import type {
   Tool,
   ToolResultMessage,
 } from "@earendil-works/pi-ai";
-import { kiroModels, type KiroModel } from "../../src/models.js";
+import { getCachedModels, kiroModels, type KiroModel } from "../../src/models.js";
 
 export interface AnthropicRequest {
   model?: string;
@@ -52,16 +52,26 @@ export interface AnthropicBlock {
 
 const THINKING_LEVELS: ThinkingLevel[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
 
-/** Resolve an Anthropic-facing model id to a bootstrap Kiro model entry. */
+/**
+ * Resolve an Anthropic-facing model id to a Kiro model entry.
+ * Search order mirrors pi: the account's dynamic catalog first (what the
+ * account can actually use), then the static bootstrap list (so a
+ * bootstrap-only id is still attempted and Kiro returns its own error
+ * instead of the gateway silently swapping models).
+ */
 export function resolveGatewayModel(requested: string | undefined): KiroModel {
+  const catalog = getCachedModels("us-east-1");
+  const byId = new Map<string, KiroModel>();
+  for (const m of [...catalog, ...kiroModels]) if (!byId.has(m.id)) byId.set(m.id, m);
+  const models = [...byId.values()];
   const raw = (requested ?? "").trim();
   const normalized = raw.replace(/-\d{8}$/, "").replace(/\./g, "-").toLowerCase();
-  const exact = kiroModels.find((m) => m.id.toLowerCase() === normalized);
+  const exact = models.find((m) => m.id.toLowerCase() === normalized);
   if (exact) return exact;
   // Claude Code may send provider-prefixed or dated ids; fall back by family.
-  const byPrefix = kiroModels.find((m) => normalized.startsWith(m.id.toLowerCase()));
+  const byPrefix = models.find((m) => normalized.startsWith(m.id.toLowerCase()));
   if (byPrefix) return byPrefix;
-  const fallback = kiroModels.find((m) => m.id === "claude-sonnet-4-6") ?? kiroModels[0];
+  const fallback = models.find((m) => m.id === "claude-sonnet-4-6") ?? models[0];
   if (raw) console.warn(`[kiro-gateway] unknown model "${raw}", falling back to ${fallback.id}`);
   return fallback;
 }

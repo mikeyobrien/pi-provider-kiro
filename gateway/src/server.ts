@@ -6,7 +6,8 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Api, AssistantMessageEventStream, Context, Model } from "@earendil-works/pi-ai";
-import { kiroModels } from "../../src/models.js";
+import { getCachedModels, isCacheStale, updateKiroModelsCache } from "../../src/models.js";
+import { resolveKiroProfileArn } from "../../src/management.js";
 import { countTokens } from "../../src/tokenizer.js";
 import { anthropicToPiContext, contextToText, type AnthropicRequest } from "./convert-in.js";
 import {
@@ -54,6 +55,32 @@ function clientToken(req: IncomingMessage): string | undefined {
   return typeof key === "string" ? key : undefined;
 }
 
+
+const CATALOG_REGION = "us-east-1";
+let catalogRefresh: Promise<void> | null = null;
+
+/**
+ * Refresh the account's dynamic model catalog when stale, so /v1/models and
+ * model resolution reflect what the account can actually use (same cache
+ * pi reads). Best-effort: failures keep the previous/bootstrap list.
+ */
+async function ensureCatalog(apiKey: string, log: (m: string) => void): Promise<void> {
+  if (!isCacheStale(CATALOG_REGION)) return;
+  if (!catalogRefresh) {
+    catalogRefresh = (async () => {
+      try {
+        const arn = await resolveKiroProfileArn({ accessToken: apiKey, region: CATALOG_REGION });
+        await updateKiroModelsCache(apiKey, CATALOG_REGION, arn);
+      } catch (error) {
+        log(`[kiro-gateway] catalog refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        catalogRefresh = null;
+      }
+    })();
+  }
+  await catalogRefresh;
+}
+
 export function createGatewayServer(opts: GatewayOptions): Server {
   const log = opts.log ?? ((m: string) => console.log(m));
 
@@ -61,12 +88,16 @@ export function createGatewayServer(opts: GatewayOptions): Server {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     try {
       if (req.method === "GET" && url.pathname === "/health") {
-        return sendJson(res, 200, { status: "ok", models: kiroModels.length });
+        return sendJson(res, 200, { status: "ok", models: getCachedModels("us-east-1").length });
       }
 
       if (req.method === "GET" && (url.pathname === "/v1/models" || url.pathname === "/models")) {
+        const token = clientToken(req);
+        const apiKey = token?.startsWith("ksk_") ? token : opts.fallbackToken;
+        if (apiKey) await ensureCatalog(apiKey, log);
+        const catalog = getCachedModels("us-east-1");
         return sendJson(res, 200, {
-          data: kiroModels.map((m) => ({
+          data: catalog.map((m) => ({
             type: "model",
             id: m.id,
             display_name: m.name,
@@ -75,8 +106,8 @@ export function createGatewayServer(opts: GatewayOptions): Server {
             max_tokens: m.maxTokens,
           })),
           has_more: false,
-          first_id: kiroModels[0]?.id,
-          last_id: kiroModels[kiroModels.length - 1]?.id,
+          first_id: catalog[0]?.id,
+          last_id: catalog[catalog.length - 1]?.id,
         });
       }
 
@@ -120,6 +151,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse, opts: G
     return sendJson(res, 401, anthropicErrorBody("no Kiro API key: send a ksk_ token or configure KIRO_API_KEY"));
   }
 
+  await ensureCatalog(apiKey, log);
   const { context, model, reasoning, sessionId } = anthropicToPiContext(body);
   const estimatedInputTokens = Math.max(1, countTokens(contextToText(context)));
   const abort = new AbortController();

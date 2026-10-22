@@ -16,6 +16,12 @@ two thin adapters:
   Includes the provider quirk that `toolcall_delta` carries the *full* input
   string — the writer diffs it into append-only `input_json_delta`s.
 
+Models: the gateway serves and resolves the account's **dynamic catalog**
+(the same `List-Available-Models` data pi shows, refreshed when stale using
+the request's key), falling back to the static bootstrap list only before
+discovery. A bootstrap-only id is still attempted upstream so Kiro's own
+error (e.g. `INVALID_MODEL_ID`) surfaces instead of a silent model swap.
+
 Endpoints: `POST /v1/messages` (stream + non-stream), `GET /v1/models`,
 `POST /v1/messages/count_tokens` (local estimate), `GET /health`.
 An SSE `: ping` comment heartbeat (15s) keeps Claude Code from idle-timing
