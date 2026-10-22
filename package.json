@@ -32,7 +32,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "prepare": "node scripts/prepare.mjs",
-    "prepublishOnly": "npm run check && npm run build"
+    "prepublishOnly": "npm run check && npm run build",
+    "gateway:build": "node gateway/build.mjs",
+    "gateway:start": "node gateway/dist/main.js",
+    "gateway:smoke": "node gateway/smoke.mjs"
   },
   "pi": {
     "extensions": [
