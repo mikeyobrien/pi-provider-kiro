@@ -3,7 +3,7 @@
 //   KIRO_API_KEY=<your ksk_ key> node gateway/smoke-live.mjs
 // Starts the built gateway on :8992, then checks:
 //   1. basic non-streaming chat        3. tool_use round trip
-//   2. streaming chat (SSE deltas)     4. image input (valid 64x64 PNG)
+//   2. streaming chat (SSE deltas)     4. image input (PIL-generated 256x256 PNG)
 // Parallel tools / interrupt / compact / subagents are Claude Code behaviors —
 // verify those by hand with the checklist in gateway/README.md.
 
@@ -104,9 +104,9 @@ try {
     check("tool_result round trip", follow.status === 200 && followText.length > 0, followText.slice(0, 60));
   }
 
-  // 4. image input (1x1 transparent PNG)
+  // 4. image input (PIL-generated 256x256 gradient PNG, verified decodable)
   const png =
-    "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAb0lEQVR4nO3PAQkAAAyEwO9feoshgnABdLep8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3IPanc8OLDQitxAAAAAElFTkSuQmCC";
+    "iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAIAAADTED8xAAADJ0lEQVR4nO3VsQnEABADQR24/5o/+CJs2EkmViL2tt12OzLos/tfgCz67D6xg3xFBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWBaBWDaH92Rhfunl8qyAAAAAElFTkSuQmCC";
   const img = await messages({
     model: "claude-sonnet-4-6",
     max_tokens: 128,
