@@ -3,7 +3,7 @@
 //   KIRO_API_KEY=<your ksk_ key> node gateway/smoke-live.mjs
 // Starts the built gateway on :8992, then checks:
 //   1. basic non-streaming chat        3. tool_use round trip
-//   2. streaming chat (SSE deltas)     4. image input
+//   2. streaming chat (SSE deltas)     4. image input (valid 64x64 PNG)
 // Parallel tools / interrupt / compact / subagents are Claude Code behaviors —
 // verify those by hand with the checklist in gateway/README.md.
 
@@ -106,7 +106,7 @@ try {
 
   // 4. image input (1x1 transparent PNG)
   const png =
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8Xw8AAwMCAO+ip1sAAAAASUVORK5CYII=";
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAb0lEQVR4nO3PAQkAAAyEwO9feoshgnABdLep8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3IPanc8OLDQitxAAAAAElFTkSuQmCC";
   const img = await messages({
     model: "claude-sonnet-4-6",
     max_tokens: 128,
@@ -120,7 +120,7 @@ try {
       },
     ],
   });
-  check("image input", img.status === 200, img.status === 200 ? "" : JSON.stringify(img.body).slice(0, 120));
+  check("image input", img.status === 200, img.status === 200 ? "" : JSON.stringify(img.body).slice(0, 400));
 } finally {
   child.kill();
 }
