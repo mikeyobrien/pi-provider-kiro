@@ -1,9 +1,18 @@
-import { rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import type { ProviderModelsStore } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getKiroCliCredentials } from "../src/kiro-cli.js";
-import { getCachedModels, KIRO_MANAGEMENT_CACHE_PATH, type KiroModel, kiroModels } from "../src/models.js";
+import {
+  getCachedModels,
+  KIRO_MANAGEMENT_CACHE_PATH,
+  KIRO_MANAGEMENT_CACHE_SOURCE,
+  KIRO_MANAGEMENT_CACHE_VERSION,
+  type KiroModel,
+  kiroModels,
+  mapKiroCatalogModels,
+} from "../src/models.js";
 
 const credentialMocks = vi.hoisted(() => ({
   cli: vi.fn(),
@@ -115,6 +124,30 @@ describe("Feature 1: Extension Registration", () => {
 
     const config = registerProvider.mock.calls[0][1];
     expect(config.models).toHaveLength(15);
+  });
+
+  // Regression: registration used the bootstrap list even with a fresh cache, so a
+  // host that lists models right after startup missed every model not in it.
+  it("registers the cached catalog when one is on disk", async () => {
+    const models = mapKiroCatalogModels([{ modelId: "claude-opus-5.5" }], "us-east-1");
+    mkdirSync(dirname(KIRO_MANAGEMENT_CACHE_PATH), { recursive: true });
+    writeFileSync(
+      KIRO_MANAGEMENT_CACHE_PATH,
+      JSON.stringify({
+        version: KIRO_MANAGEMENT_CACHE_VERSION,
+        source: KIRO_MANAGEMENT_CACHE_SOURCE,
+        regions: { "us-east-1": { region: "us-east-1", fetchedAt: Date.now(), models } },
+      }),
+    );
+    vi.stubGlobal("fetch", vi.fn());
+
+    const mod = await import("../src/index.js");
+    const { pi, registerProvider } = mockPi();
+    mod.default(pi);
+
+    const config = registerProvider.mock.calls[0][1];
+    expect(config.models.map((model: { id: string }) => model.id)).toEqual(["claude-opus-5-5"]);
+    await mod.whenStartupCatalogSettled();
   });
 
   // Regression: the factory used to await catalog discovery before registering,

@@ -11,7 +11,7 @@ import { registerKiroUsageFooter } from "./footer-lifecycle.js";
 import { getKiroCliCredentials, getKiroCliSocialToken } from "./kiro-cli.js";
 import { getKiroIdeCredentials } from "./kiro-ide.js";
 import { setExtensionContext } from "./login-ui.js";
-import { getCachedModels, isCacheStale, type KiroModel, kiroModels, updateKiroModelsCache } from "./models.js";
+import { getCachedModels, isCacheStale, type KiroModel, updateKiroModelsCache } from "./models.js";
 import type { KiroCredentials } from "./oauth.js";
 import { loginKiro, refreshKiroToken } from "./oauth.js";
 import { getPiHostKiroCredentials } from "./pi-auth-store.js";
@@ -191,7 +191,9 @@ export default function (pi: ExtensionAPI) {
     baseUrl: getKiroEndpoints("us-east-1").runtime,
     api: "kiro-api",
     apiKey: "$KIRO_API_KEY",
-    models: kiroModels,
+    // Seed with the on-disk catalog so hosts that list models right after startup
+    // (e.g. RPC clients) see it before the async refresh below publishes.
+    models: getCachedModels(credentialRegion(credential)),
     refreshModels: refreshKiroModels,
     oauth: {
       // Name reflects all supported auth methods: AWS Builder ID, Google, GitHub
