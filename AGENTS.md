@@ -88,6 +88,7 @@ npm run test:watch # vitest (watch mode)
 - Stream tests mock `fetch` to return a `ReadableStream`-like reader with `read()` returning encoded JSON chunks
 - No integration tests — all unit tests with mocks
 - Test file naming: `test/<source-name>.test.ts`
+- Behaviour proofs (PR verdicts, "it works" claims) drive real pi with this build: `.agents/skills/verify-pi-provider-kiro/` — read its `features/` map first.
 
 ## Adding a New Model
 

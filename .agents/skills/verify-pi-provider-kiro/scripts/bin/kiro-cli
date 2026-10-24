@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Sandbox stand-in for kiro-cli (first on pi.sh's PATH). The provider shells out to
+# `kiro-cli debug refresh-auth-token` on a 403; the real binary would refresh (and rotate)
+# credentials outside the fake's reach. Log the call as evidence and refuse.
+log="${KIRO_VERIFY_RUN:-/tmp}/evidence/kiro-cli-calls.log"
+printf '%s kiro-cli %s (refused by verify sandbox)\n' "$(date -u +%FT%TZ)" "$*" >>"$log"
+echo "kiro-cli is disabled inside the verify sandbox" >&2
+exit 1
