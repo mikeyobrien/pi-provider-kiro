@@ -66,9 +66,7 @@ printf '%s\n' "$repo" >"$run/repo"
 
 # Fingerprint the person's real stores so doctor/stop can prove they were not touched.
 real_db="$HOME/.local/share/kiro-cli/data.sqlite3"
-for f in "$real_db" "$HOME/.pi/agent/auth.json" "$HOME/.pi/agent/settings.json"; do
-	if [ -f "$f" ]; then printf '%s  %s\n' "$(sha256sum <"$f" | cut -d' ' -f1)" "$f"; fi
-done >"$run/real-stores.sha256"
+"$here/stores.sh" snapshot "$run"
 
 env_file="$run/env"
 {

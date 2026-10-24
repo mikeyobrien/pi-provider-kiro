@@ -31,6 +31,8 @@ Proof (fake): `tool_execution_end` for `bash` shows `out: "verify-tool-ran\n"` a
 
 Live: use one prompt that needs exactly one tool. Proof is the same event and message sequence, with Kiro's final answer quoting the output.
 
+Proven 2026-10-24 (live, `kiro/claude-haiku-4-5`, prompt `Use the bash tool to run: echo verify-tool-ran   Then reply with its output only.`): `~/.cache/verify-pi-provider-kiro/20261024T085801-live-e85H/evidence/tool.jsonl` runs assistant[toolCall bash] (`toolUse`) → toolResult `verify-tool-ran\n` → assistant `verify-tool-ran` (`stop`). `evidence/live-requests.jsonl` (from `scripts/requests.mjs`) shows request 3 with `content: ""`, one `toolResults` entry (`status: success`) and history `userInputMessage, assistantResponseMessage`.
+
 Proven 2026-10-24 (fake): `~/.cache/verify-pi-provider-kiro/20261024T073311-fake-dzta/evidence/tool.jsonl`.
 
 ## Gotchas

@@ -10,7 +10,7 @@ One file per user-facing feature. Each says what the feature is, how a pi user r
 | Credentials: kiro-cli pickup, `/login`, refresh | [credentials.md](credentials.md) | TUI `/login kiro`, kiro-cli DB, `KIRO_API_KEY` | cached-credential login, desktop refresh + write-back, API-key path | a real token being accepted (`--live`) |
 | Errors and retries | [errors-retry.md](errors-retry.md) | `pi -p --mode json` + fake scenarios | 429 `USER_REQUEST_RATE_EXCEEDED` retry, 413 no-retry, mid-stream exception retry | real throttling/limits (do not provoke them live) |
 
-Proven in fake mode on 2026-10-24 against pi 1.4.0: every row above (see each file's "Proven" line). Live mode is implemented but unproven, because the only kiro-cli token on this host was expired (the sandbox refused, as designed).
+Proven in fake mode on 2026-10-24 against pi 1.4.0: every row above (see each file's "Proven" line). Proven live on 2026-10-24 (Google social token, `kiro/claude-haiku-4-5`): streamed chat and tool round trip, plus `/login` cached-credential pickup and `--list-models` (8 models on that profile). Run dirs `~/.cache/verify-pi-provider-kiro/20261024T085801-live-e85H` and `…/20261024T090108-live-MTvS`. Model-catalog picker and errors/retry are fake-only so far.
 
 Not yet mapped (add a file before claiming them verified):
 

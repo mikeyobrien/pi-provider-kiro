@@ -39,6 +39,8 @@ For a multi-turn history check, run a second prompt with `--continue` in the sam
 
 TUI variant: `tui.sh start --model kiro/claude-sonnet-4-6`, then `send "Say hello"`, `wait '↑[0-9.]+k? ↓' 60` and `capture chat`.
 
+Proven 2026-10-24 (live, `kiro/claude-haiku-4-5`): `~/.cache/verify-pi-provider-kiro/20261024T085801-live-e85H/evidence/chat.jsonl`. It shows `text_delta "VERIFY-LIVE-OK"`, `stopReason: "stop"` and usage from Kiro (`input 6036`, `output 5`, `contextPercent 3.02`), with no thinking block (non-reasoning model). The request side is in `live-requests.jsonl` (`modelId: "claude-haiku-4.5"`).
+
 Proven 2026-10-24 (fake), the skill's end-to-end run: `~/.cache/verify-pi-provider-kiro/20261024T074248-fake-cUde/evidence/` (`chat.jsonl`, `tui-chat.txt`, `fake-kiro-requests.jsonl`, `e2e-transcript.txt`).
 
 ## Gotchas

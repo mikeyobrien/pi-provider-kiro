@@ -35,9 +35,9 @@ What `sandbox.sh` does:
 - runs `npm run build` if `dist/index.js` is missing or older than any `src/*.ts`;
 - resolves the real pi binary (`mise which pi`) **before** swapping HOME (`~/.local/bin/pi` is a mise shim that needs the real HOME);
 - makes `$RUN/{home,agent,work,sessions,evidence,logs}` and an env file setting `HOME=$RUN/home`, `PI_CODING_AGENT_DIR=$RUN/agent`, `PI_CODING_AGENT_SESSION_DIR=$RUN/sessions`, `KIRO_DEBUG=1`, `KIRO_DEBUG_LOG=$RUN/logs/kiro-debug.log`. A scratch HOME matters: the provider resolves the kiro-cli DB, `~/.pi/agent/kiro-management-models-cache.json`, `~/.pi/logs` and `~/.aws/sso/cache` with `os.homedir()`, not with `PI_CODING_AGENT_DIR`;
-- writes sha256 fingerprints of the person's real stores to `$RUN/real-stores.sha256` (doctor and stop compare them);
+- fingerprints the person's real stores with `stores.sh snapshot` into `$RUN/real-stores.sha256` (doctor and stop compare them). The kiro-cli DB is fingerprinted by its `auth_kv` rows, the credentials: a running `kiro-cli chat` rewrites its other tables about once a minute, so a whole-file change is only a `NOTE`;
 - `--fake`: starts the fake on a free loopback port (ready when `logs/fake-kiro.log` prints `fake-kiro listening http://127.0.0.1:<port>`), and adds dummy credentials: `KIRO_API_KEY=verify-fake-key` (default), or a dummy kiro-cli DB (`--creds kiro-cli`, or `--creds kiro-cli-expired`, which forces a refresh);
-- `--live`: copies the kiro-cli DB with `sqlite3 -readonly <real> .backup <scratch>`, and **refuses (exit 3) unless the token the provider would choose has ≥ 10 min left**. A refresh would rotate the refresh token into the scratch copy only and leave the person's real store stale. Then log the sandbox pi in from that copy: `$S/login-cached.sh "$RUN"`.
+- `--live`: copies the kiro-cli DB with `sqlite3 -readonly <real> .backup <scratch>`, and **refuses (exit 3) unless the token the provider would choose has ≥ 10 min left**. A refresh would rotate the refresh token into the scratch copy only and leave the person's real store stale. Then log the sandbox pi in from that copy, **before** Doctor (until then its list-models check fails): `$S/login-cached.sh "$RUN"`.
 
 Ready when `doctor.sh` passes. Teardown is in Cleanup.
 
@@ -93,7 +93,12 @@ jq -c 'select(.path=="/generateAssistantResponse") | {ts, reply, model: .body.co
 
 Script format (each `generateAssistantResponse` request gets the next reply, and the last reply repeats): `{"events":[{"type":"<ChatResponseStream member>","payload":{…}}]}`, `{"status":429,"body":{…},"headers":{…}}`, or `{"events":[…],"exception":{"type":"throttlingError","payload":{…}}}`. In a text payload, `{{toolResult}}` is replaced by the tool result the request carried. Event member names are in `src/event-parser.ts` (`KIRO_EVENT_KEYS`).
 
-**Live:** the same commands after `sandbox.sh --live` and `login-cached.sh`. Use one prompt per proof, and pick a cheap model (`kiro/claude-haiku-4-5`) unless the PR is about a specific model.
+**Live:** the same commands after `sandbox.sh --live`, `login-cached.sh` and `doctor.sh`. Use one prompt per proof, and pick a cheap model (`kiro/claude-haiku-4-5`) unless the PR is about a specific model. The live catalog is what the profile gets, not the static list: check `pi.sh "$RUN" --list-models kiro` before using a model from these examples (on 2026-10-24 the Google profile had 8 models and no `claude-sonnet-4-6`). The request side has no fake log in live mode. Read it from the provider debug log:
+
+```bash
+node $S/requests.mjs "$RUN" | jq -c '{ts, toolResultCount, m: .request.conversationState.currentMessage.userInputMessage | {content: (.content|.[0:40]), modelId, toolResults: .userInputMessageContext.toolResults}, hist: [.request.conversationState.history[]? | keys[0]]}'
+node $S/requests.mjs "$RUN" response.done | jq -c '{ts, stopReason, emittedToolCalls}'
+```
 
 Feature recipes: `features/README.md`. **A proof that drives one entry point is incomplete while the map lists others for that feature.**
 
@@ -102,11 +107,12 @@ Feature recipes: `features/README.md`. **A proof that drives one entry point is 
 Everything goes under `$RUN/`, which lives in `~/.cache/verify-pi-provider-kiro/` (override with `KIRO_VERIFY_ROOT`) and survives cleanup and worktree removal:
 
 - `evidence/<name>.jsonl` and `.stderr`: pi `--mode json` streams, one per drive. Name them after the claim (`chat.jsonl`, `tool.jsonl`, `rate-limit.jsonl`).
-- `evidence/fake-kiro-requests.jsonl`: every request the provider sent, with the full body. This is the request-side proof, for history shape, `modelId`, `toolResults` and `profileArn`.
+- `evidence/fake-kiro-requests.jsonl`: every request the provider sent, with the full body. This is the request-side proof (fake), for history shape, `modelId`, `toolResults` and `profileArn`.
+- `logs/kiro-debug.log`: the provider's debug log. Every `[request.send]` entry carries the full request body, so it is the request-side proof in live mode (`scripts/requests.mjs` extracts it as JSONL).
 - `evidence/tui-<name>.txt`: TUI screen captures.
 - `evidence/kiro-cli-calls.log`: each time the provider tried to shell out to `kiro-cli` (the stub refused it).
 - `evidence/blocked-refresh.log` (live only): token refreshes the shim blocked.
-- `evidence/real-stores-check.txt`: written by stop, it proves the person's stores were untouched.
+- `evidence/real-stores-check.txt`: written by stop, one `OK`/`CHANGED` line per store (kiro-cli `auth_kv` rows, `~/.pi/agent/auth.json`, `settings.json`). It proves the person's stores were untouched.
 - `sessions/*.jsonl` (pi's session file), `logs/kiro-debug.log` (provider debug log), `logs/fake-kiro.log`.
 
 Proof standard:
@@ -122,7 +128,7 @@ Proof standard:
 $S/stop.sh "$RUN"
 ```
 
-`stop.sh` kills the fake only if the recorded PID still runs `fake-kiro.mjs`, and kills only the tmux sessions this run recorded (`$RUN/tmux-sessions`, socket `kiro-verify`). It then runs `scrub.mjs`, which redacts every credential value found in the scratch DB, `auth.json` and env, plus Bearer, `aoa…`/`aor…` and `ksk_…` patterns, in `evidence/`, `logs/`, `sessions/` and `work/`, and fails if a known secret survives. It re-checks the real-store fingerprints, and deletes `$RUN/home` (the credential copy) and `$RUN/agent` (the scratch config and `auth.json`). Evidence stays. Never `pkill pi` or `pkill node`: the person's own pi and editors run on this host. Run `stop.sh` after every failed iteration too. A refused `--live` leaves only a run dir with `live-token` (key name and minutes), with nothing to stop.
+`stop.sh` kills the fake only if the recorded PID still runs `fake-kiro.mjs`, and kills only the tmux sessions this run recorded (`$RUN/tmux-sessions`, socket `kiro-verify`). It then runs `scrub.mjs`, which redacts every credential value found in the scratch DB, `auth.json` and env, plus Bearer, `aoa…`/`aor…` and `ksk_…` patterns, in `evidence/`, `logs/`, `sessions/` and `work/`, and fails if a known secret survives. It re-checks the real-store fingerprints (`stores.sh check`), and deletes `$RUN/home` (the credential copy) and `$RUN/agent` (the scratch config and `auth.json`). Evidence stays. Never `pkill pi` or `pkill node`: the person's own pi and editors run on this host. Run `stop.sh` after every failed iteration too. A refused `--live` leaves only a run dir with `live-token` (key name and minutes), with nothing to stop.
 
 ## Helpers
 
@@ -135,6 +141,8 @@ All of these are in `scripts/` and executable:
 - `login-cached.sh <runDir>`: `/login kiro` → "Sign in with an account" → "Use existing credentials". It refuses to press Enter on any other row, so it never starts an OAuth or browser flow.
 - `stop.sh <runDir>`: targeted teardown, scrub, store check. Evidence stays.
 - `scrub.mjs <runDir>`: the redaction pass on its own (stop runs it). It prints counts and file names only.
+- `stores.sh snapshot|check <runDir>`: fingerprints the person's real stores (sandbox runs snapshot, doctor and stop run check). Read-only, and it prints hashes and paths only.
+- `requests.mjs <runDir> [tag]`: prints the debug log's `[request.send]` (or another tag's) entries as JSONL, the live request-side proof.
 - `fake-kiro.mjs <port> <scenario|script.json> <log.jsonl>`: the fake. `sandbox.sh` starts it; run it by hand only to debug it.
 - `verify-shim.mjs`: the pi extension `pi.sh` loads first. In fake mode it reroutes `*.kiro.dev`/`*.amazonaws.com` to the fake (loopback only). In live mode it blocks token-refresh endpoints.
 - `bin/kiro-cli`: a stub on the sandbox PATH that logs the call and exits 1.

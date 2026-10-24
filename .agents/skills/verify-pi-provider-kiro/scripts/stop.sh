@@ -38,12 +38,13 @@ node "$here/scrub.mjs" "$run"
 
 # Prove the person's real stores were not modified by this run.
 if [ -s "$run/real-stores.sha256" ]; then
-	if sha256sum --quiet -c <(awk '{print $1"  "$2}' "$run/real-stores.sha256") >/dev/null 2>&1; then
-		echo "real stores unchanged: $(awk '{print $2}' "$run/real-stores.sha256" | tr '\n' ' ')" | tee "$run/evidence/real-stores-check.txt"
+	if "$here/stores.sh" check "$run" >"$run/evidence/real-stores-check.txt"; then
+		echo "real stores unchanged:" | cat - "$run/evidence/real-stores-check.txt" >"$run/evidence/real-stores-check.tmp"
 	else
-		echo "WARNING: a real store changed during the run (may be the person's own pi/kiro-cli use):" | tee "$run/evidence/real-stores-check.txt"
-		sha256sum -c <(awk '{print $1"  "$2}' "$run/real-stores.sha256") 2>&1 | tee -a "$run/evidence/real-stores-check.txt" || true
+		echo "WARNING: a real store changed during the run (may be the person's own pi/kiro-cli use):" | cat - "$run/evidence/real-stores-check.txt" >"$run/evidence/real-stores-check.tmp"
 	fi
+	mv "$run/evidence/real-stores-check.tmp" "$run/evidence/real-stores-check.txt"
+	cat "$run/evidence/real-stores-check.txt"
 fi
 
 rm -rf "$run/home" "$run/agent"

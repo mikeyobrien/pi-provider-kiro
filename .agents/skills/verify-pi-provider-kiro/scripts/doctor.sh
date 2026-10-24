@@ -39,8 +39,8 @@ v="$("$pi_bin" --version 2>/dev/null)" && pass "pi $v at $pi_bin" || bad "pi not
 grep -q "^HOME=$run/home$" "$run/env" && grep -q "^PI_CODING_AGENT_DIR=$run/agent$" "$run/env" &&
 	pass "isolated HOME and PI_CODING_AGENT_DIR under run dir" || bad "env file does not isolate HOME/agent dir"
 if [ -s "$run/real-stores.sha256" ]; then
-	sha256sum --quiet -c <(awk '{print $1"  "$2}' "$run/real-stores.sha256") >/dev/null 2>&1 &&
-		pass "person's real stores unchanged" || bad "a real store changed since sandbox start (see stop.sh output)"
+	"$here/stores.sh" check "$run" >/dev/null 2>&1 &&
+		pass "person's real stores unchanged" || bad "a real store changed since sandbox start: $("$here/stores.sh" check "$run" | grep CHANGED | tr '\n' ' ')"
 fi
 
 # 4. Credentials / backend.
