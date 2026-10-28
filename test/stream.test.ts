@@ -252,6 +252,17 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
+  it("does not turn tool-shaped prose into calls when recovery is disabled", async () => {
+    const prose = '[Called read with args: {"path":"example.txt"}]';
+    vi.stubGlobal("fetch", mockFetchOk(JSON.stringify({ content: prose }) + '{"contextUsagePercentage":5}'));
+    const model = { ...makeModel({ reasoning: false }), recoverTextToolCalls: false };
+    const events = await collect(streamKiro(model, makeContext(), { apiKey: "synthetic-token" }));
+    const done = events.find((event) => event.type === "done");
+    expect(done?.type === "done" && done.message.content).toEqual([{ type: "text", text: prose }]);
+    expect(events.some((event) => event.type === "toolcall_end")).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
   it("emits error when no credentials provided", async () => {
     const stream = streamKiro(makeModel(), makeContext(), {});
     const events = await collect(stream);
@@ -3805,7 +3816,7 @@ describe("Feature 9: Streaming Integration", () => {
   // Content deduplication (Task 2.2)
   // =========================================================================
 
-  it("deduplicates consecutive identical content events", async () => {
+  it("preserves consecutive identical content events", async () => {
     const mockFetch = mockFetchChunked([
       '{"content":"Hello"}',
       '{"content":"Hello"}',
@@ -3818,12 +3829,12 @@ describe("Feature 9: Streaming Integration", () => {
     const events = await collect(stream);
 
     const deltas = events.filter((e) => e.type === "text_delta").map((e) => (e as { delta: string }).delta);
-    // Second "Hello" should be deduplicated
-    expect(deltas).toEqual(["Hello", " world"]);
+    // Text deltas have no identity: equal content can be intentional.
+    expect(deltas).toEqual(["Hello", "Hello", " world"]);
 
     const done = events.find((e) => e.type === "done");
     const msg = done?.type === "done" ? done.message : undefined;
-    expect(msg?.content[0].type === "text" && msg.content[0].text).toBe("Hello world");
+    expect(msg?.content[0].type === "text" && msg.content[0].text).toBe("HelloHello world");
 
     vi.unstubAllGlobals();
   });

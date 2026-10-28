@@ -4,7 +4,9 @@ dist/
 
 # Agent/tool state
 .agent/
-.agents/
+.agents/*
+# Project skills are versioned; the rest of .agents/ stays local.
+!.agents/skills/
 .ralph/
 *.tgz
 node_modules
