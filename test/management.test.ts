@@ -5,6 +5,7 @@ import {
   resetKiroProfileArnCache,
   resolveKiroProfileArn,
 } from "../src/management.js";
+import { managementRetryConfig } from "../src/retry.js";
 
 const auth = { accessToken: "test-access-token", region: "us-east-1" };
 const profileArn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/test";
@@ -344,6 +345,75 @@ describe("Kiro management control plane", () => {
       "Kiro management ListAvailableProfiles failed in eu-central-1: 403 Forbidden",
     );
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  describe("transport failures (#181)", () => {
+    const savedDelay = managementRetryConfig.baseDelayMs;
+    afterEach(() => {
+      managementRetryConfig.baseDelayMs = savedDelay;
+    });
+    // undici's shape: a bare "fetch failed" with the real reason in `cause`.
+    const transportError = () => {
+      managementRetryConfig.baseDelayMs = 1;
+      return new TypeError("fetch failed", {
+        cause: Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" }),
+      });
+    };
+
+    it("never retries a 403 on the profile lookup", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: false, status: 403, statusText: "Forbidden" })
+        .mockResolvedValueOnce({ ok: false, status: 403, statusText: "Forbidden" })
+        .mockResolvedValue({ ok: true, json: () => Promise.resolve({ profiles: [{ arn: profileArn }] }) });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(resolveKiroProfileArn(auth)).rejects.toMatchObject({ status: 403 });
+      // One call per region; the success queued behind them is never reached.
+      expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+        "https://management.us-east-1.kiro.dev/List-Available-Profiles",
+        "https://management.eu-central-1.kiro.dev/List-Available-Profiles",
+      ]);
+    });
+
+    it("keeps the original error as cause and names the call when retries run out", async () => {
+      const failure = transportError();
+      const fetchMock = vi.fn().mockRejectedValue(failure);
+      vi.stubGlobal("fetch", fetchMock);
+
+      const error = await resolveKiroProfileArn(auth).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe(
+        "Kiro management ListAvailableProfiles request failed in us-east-1 after 3 attempts: fetch failed: other side closed",
+      );
+      expect((error as Error).cause).toBe(failure);
+      expect(fetchMock).toHaveBeenCalledTimes(managementRetryConfig.maxRetries + 1);
+    });
+
+    it("keeps a region's 403 when a later region fails in transport", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: false, status: 403, statusText: "Forbidden" })
+        .mockRejectedValue(transportError());
+      vi.stubGlobal("fetch", fetchMock);
+
+      // The 403 is what triggers the caller's credential refresh (#107).
+      await expect(resolveKiroProfileArn(auth)).rejects.toThrow(
+        "Kiro management ListAvailableProfiles failed in us-east-1: 403 Forbidden",
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1 + managementRetryConfig.maxRetries + 1);
+    });
+
+    it("retries an API key's GetProfile lookup after a transport failure", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockRejectedValueOnce(transportError())
+        .mockResolvedValue({ ok: true, json: () => Promise.resolve({ profile: { arn: apiKeyProfileArn } }) });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(resolveKiroProfileArn(apiKeyAuth)).resolves.toBe(apiKeyProfileArn);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
   });
 
   it("does not catch non-403 management errors as a region-mismatch signal (#131)", async () => {
