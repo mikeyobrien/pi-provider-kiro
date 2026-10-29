@@ -26,9 +26,19 @@ export interface KiroEndpoints {
   runtime: string;
 }
 
+/**
+ * AWS region codes are case-insensitive as typed but lower-case in every
+ * hostname. Applied wherever a region enters: login input, token files, the
+ * web sign-in callback, profile ARNs, and stored credentials. Blank means none.
+ */
+export function normalizeRegion(region: string | null | undefined): string | undefined {
+  return region?.trim().toLowerCase() || undefined;
+}
+
 export function resolveApiRegion(ssoRegion: string | undefined): string {
-  if (!ssoRegion) return "us-east-1";
-  return API_REGION_MAP[ssoRegion] ?? ssoRegion;
+  const region = normalizeRegion(ssoRegion);
+  if (!region) return "us-east-1";
+  return API_REGION_MAP[region] ?? region;
 }
 
 export function getKiroEndpoints(region: string): KiroEndpoints {
@@ -48,7 +58,7 @@ export function getKiroEndpoints(region: string): KiroEndpoints {
  */
 export function getKiroRegionFromProfileArn(profileArn: string | undefined): string | undefined {
   if (!profileArn) return undefined;
-  const region = profileArn.split(":")[3];
+  const region = normalizeRegion(profileArn.split(":")[3]);
   return region && /^[a-z]{2}(?:-[a-z]+)+-\d$/.test(region) ? region : undefined;
 }
 

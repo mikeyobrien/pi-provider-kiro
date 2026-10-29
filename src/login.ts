@@ -18,6 +18,7 @@ import crypto from "node:crypto";
 import http from "node:http";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { formatSafeError } from "./debug.js";
+import { normalizeRegion } from "./endpoints.js";
 import { hasExtensionContext, showLoginUI, showWaitingUI } from "./login-ui.js";
 import {
   BUILDER_ID_START_URL,
@@ -374,7 +375,7 @@ export async function runSocialLoginFlow(
 
         const issuerUrl = reqUrl.searchParams.get("issuer_url");
         if (issuerUrl) {
-          const idcRegion = reqUrl.searchParams.get("idc_region") || "us-east-1";
+          const idcRegion = normalizeRegion(reqUrl.searchParams.get("idc_region")) ?? "us-east-1";
 
           const result = await tryRegisterAndAuthorize(issuerUrl, idcRegion);
           if (!result) {
