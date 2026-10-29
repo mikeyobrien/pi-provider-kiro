@@ -1,5 +1,7 @@
 # pi-provider-kiro
 
+**Unofficial.** This is a community provider, not a Kiro or AWS product. Before you sign in, check which tools your Kiro subscription covers: [Kiro pricing FAQ](https://kiro.dev/pricing/#with-which-tools-can-i-use-my-kiro-subscription).
+
 A [pi](https://shittycodingagent.ai/) provider extension that connects pi to the **Kiro API** (AWS CodeWhisperer/Q), exposing **12 kiro-cli-verified models** through one provider surface.
 
 ## Why this exists
