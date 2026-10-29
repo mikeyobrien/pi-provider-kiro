@@ -37,4 +37,19 @@ describe("countTokens", () => {
     expect(count).toBeGreaterThan(500);
     expect(count).toBeLessThan(2000);
   });
+
+  // Built at runtime so the source never carries the literal marker spelling.
+  const marker = (name: string) => ["<", "|", name, "|", ">"].join("");
+
+  it("counts a literal control-marker spelling as text instead of throwing", () => {
+    for (const name of ["endoftext", "im_start", "im_end"]) {
+      const text = `model output quoting ${marker(name)} verbatim`;
+      expect(() => countTokens(text)).not.toThrow();
+      expect(countTokens(text)).toBeGreaterThan(countTokens("model output quoting  verbatim"));
+    }
+  });
+
+  it("does not encode the literal spelling as the single control token", () => {
+    expect(countTokens(marker("endoftext"))).toBeGreaterThan(1);
+  });
 });

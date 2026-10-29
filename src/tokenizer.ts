@@ -14,5 +14,8 @@ function getEncoder() {
 
 export function countTokens(text: string): number {
   if (text.length === 0) return 0;
-  return getEncoder().encode(text).length;
+  // Counted text is model output, never encoder controls: a literal control-marker
+  // spelling is ordinary text here. With no allowed and no disallowed special
+  // tokens it encodes as plain BPE instead of throwing.
+  return getEncoder().encode(text, [], []).length;
 }
