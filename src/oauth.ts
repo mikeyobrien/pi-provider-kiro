@@ -16,6 +16,20 @@ import { interactiveLogin, loginViaKiroCli } from "./login.js";
 export const SSO_OIDC_ENDPOINT = "https://oidc.us-east-1.amazonaws.com";
 export const BUILDER_ID_START_URL = "https://view.awsapps.com/start";
 export const BUILDER_ID_PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX";
+
+/**
+ * The profile ARN a Builder ID session uses, or undefined for any other start URL.
+ * Builder ID has no profiles to list (ListAvailableProfiles answers 403), and its
+ * stored sessions carry no ARN, so every Builder ID credential takes this fixed one.
+ */
+export function builderIdProfileArn(startUrl: unknown): string | undefined {
+  if (typeof startUrl !== "string") return undefined;
+  try {
+    return new URL(startUrl).hostname === new URL(BUILDER_ID_START_URL).hostname ? BUILDER_ID_PROFILE_ARN : undefined;
+  } catch {
+    return undefined;
+  }
+}
 export const KIRO_DESKTOP_REFRESH_URL = "https://prod.{region}.auth.desktop.kiro.dev/refreshToken";
 export const SSO_SCOPES = [
   "codewhisperer:completions",

@@ -21,8 +21,8 @@ import { formatSafeError } from "./debug.js";
 import { normalizeRegion } from "./endpoints.js";
 import { hasExtensionContext, showLoginUI, showWaitingUI } from "./login-ui.js";
 import {
-  BUILDER_ID_PROFILE_ARN,
   BUILDER_ID_START_URL,
+  builderIdProfileArn,
   type KiroAuthMethod,
   type KiroCredentials,
   kiroUserAgent,
@@ -297,7 +297,7 @@ async function pollDeviceCode(
             region,
             authMethod: "idc" as KiroAuthMethod,
             startUrl,
-            ...(startUrl === BUILDER_ID_START_URL ? { profileArn: BUILDER_ID_PROFILE_ARN } : {}),
+            profileArn: builderIdProfileArn(startUrl),
           } satisfies KiroCredentials;
         }
         break;

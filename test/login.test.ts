@@ -3,7 +3,7 @@ import type { OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import { interactiveLogin, runSocialLoginFlow } from "../src/login.js";
 import type { KiroCredentials } from "../src/oauth.js";
-import { BUILDER_ID_START_URL } from "../src/oauth.js";
+import { BUILDER_ID_PROFILE_ARN, BUILDER_ID_START_URL } from "../src/oauth.js";
 
 vi.mock("../src/kiro-cli.js", () => ({
   getKiroCliCredentials: vi.fn(() => undefined),
@@ -94,6 +94,7 @@ describe("Feature 10: Interactive Login", () => {
       const creds = await interactiveLogin(makeCallbacks(""));
       expect(JSON.parse(mockFetch.mock.calls[1][1].body).startUrl).toBe(BUILDER_ID_START_URL);
       expect((creds as KiroCredentials).region).toBe("us-east-1");
+      expect((creds as KiroCredentials).profileArn).toBe(BUILDER_ID_PROFILE_ARN);
       vi.unstubAllGlobals();
     });
 
@@ -146,6 +147,7 @@ describe("Feature 10: Interactive Login", () => {
       vi.stubGlobal("fetch", mockIdcAutoDetectFetch());
       const creds = await interactiveLogin(makeCallbacks(""));
       expect((creds as KiroCredentials).region).toBe("eu-west-1");
+      expect((creds as KiroCredentials).profileArn).toBeUndefined();
       vi.unstubAllGlobals();
     });
 

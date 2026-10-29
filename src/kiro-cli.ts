@@ -8,7 +8,7 @@ import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { formatSafeError } from "./debug.js";
 import { normalizeRegion } from "./endpoints.js";
-import type { KiroAuthMethod, KiroCredentials } from "./oauth.js";
+import { builderIdProfileArn, type KiroAuthMethod, type KiroCredentials } from "./oauth.js";
 
 const require = createRequire(import.meta.url);
 
@@ -154,6 +154,11 @@ function tryKiroCliToken(
   if (tokenData.expires_at) expiresAt = new Date(tokenData.expires_at).getTime();
   if (!allowExpired && Date.now() >= expiresAt - 2 * 60 * 1000) return undefined;
   const region = normalizeRegion(tokenData.region) ?? "us-east-1";
+  // Every row type resolves its account the same way. kiro-cli stores no
+  // profile ARN for a Builder ID session, so it takes the fixed Builder ID one;
+  // a stored ARN always wins (#169).
+  const startUrl: string | undefined = typeof tokenData.start_url === "string" ? tokenData.start_url : undefined;
+  const profileArn: string | undefined = tokenData.profile_arn || tokenData.profileArn || builderIdProfileArn(startUrl);
 
   if (authMethod === "desktop") {
     return {
@@ -164,7 +169,8 @@ function tryKiroCliToken(
       clientSecret: "",
       region,
       authMethod: "desktop",
-      profileArn: tokenData.profile_arn || tokenData.profileArn,
+      profileArn,
+      startUrl,
     };
   }
 
@@ -186,7 +192,8 @@ function tryKiroCliToken(
       clientSecret: "",
       region,
       authMethod: "external-idp",
-      profileArn: tokenData.profile_arn || tokenData.profileArn,
+      profileArn,
+      startUrl,
     };
   }
 
@@ -214,7 +221,8 @@ function tryKiroCliToken(
     clientSecret,
     region,
     authMethod: "idc",
-    profileArn: tokenData.profile_arn || tokenData.profileArn,
+    profileArn,
+    startUrl,
   };
 }
 
