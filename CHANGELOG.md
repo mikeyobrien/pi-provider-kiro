@@ -7,12 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-10-29
+
 ### Fixed
 
 - The `max` thinking level now sends a 50,000-token `<max_thinking_length>`, the same as `xhigh`, instead of falling through to the 10,000-token floor. On models without an `xhigh` rung (Claude Sonnet 4.6, Opus 4.6), pi maps `xhigh` to `max`, so both top levels were getting less thinking than `high`. Kiro documents no limit for this hint, so `max` does not go past `xhigh`; the structured `max` effort still sets it apart ([#173](https://github.com/mikeyobrien/pi-provider-kiro/issues/173)).
 - A one-off network failure (connection reset, DNS failure, timeout) on the profile lookup or another Kiro management call no longer ends the turn: the call is retried with backoff, up to 3 attempts. If every attempt fails, the error names the call and the transport cause (`... request failed in us-east-1 after 3 attempts: fetch failed: other side closed`) and keeps the original error as `cause`, so pi can retry the turn. HTTP errors, including 403 and other 4xx, are not retried ([#181](https://github.com/mikeyobrien/pi-provider-kiro/issues/181)).
 - Builder ID credentials shared from kiro-cli now get the Builder ID profile ARN. kiro-cli stores no profile ARN for a Builder ID session, and Builder ID has no profiles to list (`ListAvailableProfiles` answers 403), so every request on such an account failed. The `kirocli:odic:token` row, which is what `kiro-cli login` with Builder ID writes, never got the fixed Builder ID ARN that the provider's own Builder ID login uses. Every kiro-cli token row now resolves it through the same rule (`builderIdProfileArn` in `src/oauth.ts`, matched by the start URL's host). A stored profile ARN still wins, and Identity Center rows still go through profile discovery ([#169](https://github.com/mikeyobrien/pi-provider-kiro/issues/169)).
 - Lower-case and trim AWS region codes wherever they enter: the login region prompt, kiro-cli and Kiro IDE token files, the web sign-in callback, profile ARNs, and stored credentials on refresh. A region typed as `Ap-southeast-1` missed the SSO-to-API region map, so the provider called `management.ap-southeast-1.kiro.dev`, which does not exist, and every request failed ([#180](https://github.com/mikeyobrien/pi-provider-kiro/issues/180)).
+- Token counting no longer throws when a message contains the literal text of a tokenizer control marker, such as a model quoting one in its output. The text is counted as ordinary tokens ([#189](https://github.com/mikeyobrien/pi-provider-kiro/pull/189)).
+- Startup registers the cached model catalog instead of the short built-in bootstrap list, so models discovered on the last run are listed right away, including by hosts that read the model list immediately after startup. With no cache for the region the built-in list is still used, and the background refresh still replaces a stale cache ([#190](https://github.com/mikeyobrien/pi-provider-kiro/pull/190)).
+- A mid-stream throttling retry now waits for the delay the server states in `retryAfterMilliseconds` instead of the computed backoff, capped at the existing 10-second maximum. Retrying inside the throttle window was throttled again and spent the retry for nothing ([#117](https://github.com/mikeyobrien/pi-provider-kiro/pull/117)).
 
 ## [0.12.2] - 2026-10-22
 
@@ -295,7 +300,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release: 17 models across 7 families, OAuth device code flow, kiro-cli SQLite credential fallback, streaming pipeline with thinking tag parser
 
-[Unreleased]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.12.3...HEAD
+[0.12.3]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.12.2...v0.12.3
+[0.12.2]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/mikeyobrien/pi-provider-kiro/compare/v0.10.2...v0.11.0
