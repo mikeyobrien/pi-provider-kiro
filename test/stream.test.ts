@@ -11,7 +11,7 @@ import type {
   ToolResultMessage,
 } from "@earendil-works/pi-ai";
 import { isContextOverflow, isRetryableAssistantError } from "@earendil-works/pi-ai/compat";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { findJsonEnd } from "../src/bracket-tool-parser.js";
 import { resetCacheEstimatorForTests } from "../src/cache-estimator.js";
 import { validateKiroConversation, validateKiroToolStructure } from "../src/history-validator.js";
@@ -228,6 +228,7 @@ function mockFetchChunked(chunks: string[]) {
 }
 
 describe("Feature 9: Streaming Integration", () => {
+  const inheritedProfileArn = process.env.KIRO_PROFILE_ARN;
   const trackedStream = (usdPerCredit = 0.04) =>
     createKiroStream({
       estimateDollarValue: true,
@@ -237,8 +238,14 @@ describe("Feature 9: Streaming Integration", () => {
     } satisfies KiroUsageTracking);
 
   beforeEach(() => {
+    delete process.env.KIRO_PROFILE_ARN;
     // Mark profileArn as already resolved so tests don't see an extra fetch
     resetProfileArnCache(true);
+  });
+
+  afterEach(() => {
+    if (inheritedProfileArn === undefined) delete process.env.KIRO_PROFILE_ARN;
+    else process.env.KIRO_PROFILE_ARN = inheritedProfileArn;
   });
 
   it("does not turn tool-shaped prose into calls when recovery is disabled", async () => {
@@ -725,6 +732,32 @@ describe("Feature 9: Streaming Integration", () => {
 
     vi.unstubAllGlobals();
   });
+  it("prefers KIRO_PROFILE_ARN over a model-projected profileArn", async () => {
+    resetProfileArnCache(false);
+    const metadataProfileArn = "arn:aws:codewhisperer:us-east-1:123:profile/METADATA";
+    const envProfileArn = "arn:aws:codewhisperer:us-east-1:456:profile/ENV";
+    const previousProfileArn = process.env.KIRO_PROFILE_ARN;
+    process.env.KIRO_PROFILE_ARN = envProfileArn;
+    const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":5}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    try {
+      const events = await collect(
+        streamKiro(makeModel({ kiroProfileArn: metadataProfileArn }), makeContext(), {
+          apiKey: "persisted-social-token",
+        }),
+      );
+
+      expect(mockFetch).toHaveBeenCalledOnce();
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body).profileArn).toBe(envProfileArn);
+      expect(events.find((event) => event.type === "done")).toBeDefined();
+    } finally {
+      if (previousProfileArn === undefined) delete process.env.KIRO_PROFILE_ARN;
+      else process.env.KIRO_PROFILE_ARN = previousProfileArn;
+      vi.unstubAllGlobals();
+    }
+  });
+
 
   it("fails before inference when profile discovery returns no profile", async () => {
     resetProfileArnCache(false);
