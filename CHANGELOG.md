@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Builder ID credentials shared from kiro-cli now get the Builder ID profile ARN. kiro-cli stores no profile ARN for a Builder ID session, and Builder ID has no profiles to list (`ListAvailableProfiles` answers 403), so every request on such an account failed. The `kirocli:odic:token` row, which is what `kiro-cli login` with Builder ID writes, never got the fixed Builder ID ARN that the provider's own Builder ID login uses. Every kiro-cli token row now resolves it through the same rule (`builderIdProfileArn` in `src/oauth.ts`, matched by the start URL's host). A stored profile ARN still wins, and Identity Center rows still go through profile discovery ([#169](https://github.com/mikeyobrien/pi-provider-kiro/issues/169)).
+
 ## [0.12.2] - 2026-10-22
 
 ### Changed
