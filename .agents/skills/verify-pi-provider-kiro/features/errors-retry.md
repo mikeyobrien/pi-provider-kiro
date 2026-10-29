@@ -9,6 +9,7 @@ When Kiro answers with a rate limit, an oversize error or a broken stream, the u
 - Mid-stream exception frame (`:message-type: exception`, `throttlingError` / `validationError` / `serviceUnavailableError` / `error`): the stream is cancelled, retried with backoff, and the partial text from the failed attempt is discarded.
 - First-token and idle timeouts, and the response-header timeout: retried with backoff (not mapped yet, needs `delayMs` scripts).
 - 403: refresh from kiro-cli or the store, then retry (see credentials.md, the stub refuses kiro-cli).
+- Profile lookup / management call transport failure (connection reset, DNS, timeout; no HTTP response): retried in `src/management.ts` (`managementRetryConfig`, 3 attempts), then the error names the call and the cause, e.g. `Kiro management ListAvailableProfiles request failed in us-east-1 after 3 attempts: fetch failed: other side closed`. HTTP errors (4xx, 403, 5xx) are not retried there. Drive with `curl -s -X POST "$FAKE/__verify/drop-profile?count=1"` before the prompt: the fake log shows one `reply.dropped` then a normal profile lookup and the chat ends `stop`. With a large count the turn ends `error` with that message, and pi's own auto-retry (`auto_retry_start` events) runs on top (#181).
 
 ## How to get to it (user POV)
 

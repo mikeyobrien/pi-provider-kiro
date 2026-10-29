@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A one-off network failure (connection reset, DNS failure, timeout) on the profile lookup or another Kiro management call no longer ends the turn: the call is retried with backoff, up to 3 attempts. If every attempt fails, the error names the call and the transport cause (`... request failed in us-east-1 after 3 attempts: fetch failed: other side closed`) and keeps the original error as `cause`, so pi can retry the turn. HTTP errors, including 403 and other 4xx, are not retried ([#181](https://github.com/mikeyobrien/pi-provider-kiro/issues/181)).
+
 ## [0.12.2] - 2026-10-22
 
 ### Changed

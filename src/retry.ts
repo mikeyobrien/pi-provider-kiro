@@ -30,6 +30,16 @@ export function exponentialBackoff(attempt: number, baseMs: number, maxMs: numbe
 }
 
 export const MAX_RETRY_DELAY = 10_000;
+
+/**
+ * Retries for a management call whose `fetch` rejected — a transport failure
+ * (connection reset, DNS, timeout) with no HTTP response. HTTP errors, 4xx and
+ * 5xx alike, are never retried here. Mutable for tests.
+ */
+export const managementRetryConfig = {
+  maxRetries: 2,
+  baseDelayMs: 500,
+};
 /** Fallback used when a request-window response carries no valid server hint. */
 export const REQUEST_RATE_FALLBACK_DELAY_MS = 10_000;
 

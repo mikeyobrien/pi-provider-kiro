@@ -13,7 +13,9 @@
 //   Switch scenario on a running fake (resets the reply counter):
 //     curl -s -X POST "$FAKE/__verify/scenario?name=tool"
 //     curl -s -X POST "$FAKE/__verify/scenario" --data-binary @script.json
-//   A text payload may contain {{toolResult}}: replaced by the first tool result text the
+//   Drop the next N profile lookups (List-Available-Profiles / GetProfile) by resetting
+//   the connection with no response, like a network blip:
+//     curl -s -X POST "$FAKE/__verify/drop-profile?count=1" may contain {{toolResult}}: replaced by the first tool result text the
 //   request carried (proves the round trip reached the fake).
 //
 // WEAKER THAN LIVE: this proves pi + this provider's request shaping, event-stream decoding,
@@ -116,6 +118,7 @@ const CATALOG = {
 };
 
 let served = 0;
+let dropProfileLookups = 0;
 
 function redactHeaders(headers) {
   const out = {};
@@ -217,6 +220,21 @@ const server = createServer(async (req, res) => {
       served = 0;
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true, scenario: scenarioName, replies: script.length }));
+      return;
+    }
+    if (url.pathname === "/__verify/drop-profile" && req.method === "POST") {
+      dropProfileLookups = Number(url.searchParams.get("count") ?? "1");
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, dropProfileLookups }));
+      return;
+    }
+    const isProfileLookup =
+      url.pathname === "/List-Available-Profiles" ||
+      req.headers["x-amz-target"] === "AmazonCodeWhispererService.GetProfile";
+    if (isProfileLookup && dropProfileLookups > 0) {
+      dropProfileLookups--;
+      entry.reply = { dropped: "connection reset" };
+      req.socket.destroy();
       return;
     }
     if (url.pathname === "/generateAssistantResponse") {

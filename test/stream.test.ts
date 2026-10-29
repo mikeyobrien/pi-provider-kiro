@@ -1,3 +1,5 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import type {
   Api,
   AssistantMessage,
@@ -725,6 +727,75 @@ describe("Feature 9: Streaming Integration", () => {
     expect(error?.type === "error" && error.error.errorMessage).toContain("ListAvailableProfiles failed");
 
     vi.unstubAllGlobals();
+  });
+
+  it("completes the turn when the profile lookup's connection is reset once (#181)", async () => {
+    resetProfileArnCache(false);
+    const testArn = "arn:aws:codewhisperer:us-east-1:123:profile/BLIP";
+    // A real local endpoint that drops the first connection without a
+    // response, then answers normally — the shape of a one-off network blip.
+    let managementHits = 0;
+    const server = createServer((req, res) => {
+      managementHits++;
+      if (managementHits === 1) {
+        req.socket.destroy();
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ profiles: [{ arn: testArn }] }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    const realFetch = globalThis.fetch;
+    const runtimeResponse = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":5}');
+    const mockFetch = vi.fn((url: string, init: RequestInit) =>
+      url.startsWith("https://management.")
+        ? realFetch(`http://127.0.0.1:${port}${new URL(url).pathname}`, init)
+        : runtimeResponse(url, init),
+    );
+    vi.stubGlobal("fetch", mockFetch);
+
+    try {
+      const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+
+      const error = events.find((event) => event.type === "error");
+      expect(error?.type === "error" ? error.error.errorMessage : undefined).toBeUndefined();
+      expect(events.find((event) => event.type === "done")).toBeDefined();
+      expect(managementHits).toBe(2);
+      expect(JSON.parse(runtimeResponse.mock.calls[0][1].body).profileArn).toBe(testArn);
+    } finally {
+      vi.unstubAllGlobals();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("ends the turn with the transport cause after the capped profile-lookup attempts (#181)", async () => {
+    resetProfileArnCache(false);
+    const { managementRetryConfig } = await import("../src/retry.js");
+    const savedDelay = managementRetryConfig.baseDelayMs;
+    managementRetryConfig.baseDelayMs = 1;
+    // undici's shape: a bare "fetch failed" with the real reason in `cause`.
+    const reset = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+    const mockFetch = vi.fn().mockRejectedValue(new TypeError("fetch failed", { cause: reset }));
+    vi.stubGlobal("fetch", mockFetch);
+
+    try {
+      const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+
+      expect(mockFetch).toHaveBeenCalledTimes(managementRetryConfig.maxRetries + 1);
+      for (const [url] of mockFetch.mock.calls) {
+        expect(url).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
+      }
+      const error = events.find((event) => event.type === "error");
+      expect(error?.type === "error" && error.error.errorMessage).toBe(
+        "Kiro management ListAvailableProfiles request failed in us-east-1 after 3 attempts: fetch failed: read ECONNRESET",
+      );
+      // The host can now see this is a transport blip and retry the turn.
+      expect(error?.type === "error" && isRetryableAssistantError(error.error)).toBe(true);
+    } finally {
+      managementRetryConfig.baseDelayMs = savedDelay;
+      vi.unstubAllGlobals();
+    }
   });
 
   it("derives the runtime and management region from baseUrl when kiroRegion is absent", async () => {
