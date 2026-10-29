@@ -16,6 +16,7 @@ import type {
   SimpleStreamOptions,
   TextContent,
   ThinkingContent,
+  ThinkingLevel,
   Tool,
   ToolCall,
   ToolResultMessage,
@@ -123,6 +124,22 @@ export interface KiroCredentialAccessor {
 export interface KiroStreamOptions extends SimpleStreamOptions {
   credentialAccessor?: KiroCredentialAccessor;
 }
+
+/** `<max_thinking_length>` hint per pi thinking level. Keyed by pi's own
+ *  `ThinkingLevel` union so a level pi adds later fails the type check instead
+ *  of silently falling to the smallest budget, which is how `max` ended up
+ *  below `xhigh` (#173). Kiro documents no limit for this hint, only the
+ *  per-model `max_tokens` ceiling, so `max` has no documented basis for going
+ *  past `xhigh`; the structured `max` effort still sets it apart where the
+ *  model's schema accepts one. */
+const THINKING_BUDGET_BY_LEVEL = {
+  minimal: 10000,
+  low: 10000,
+  medium: 20000,
+  high: 30000,
+  xhigh: 50000,
+  max: 50000,
+} as const satisfies Record<ThinkingLevel, number>;
 
 const CAPACITY_LOG_DIR = join(homedir(), ".pi", "logs");
 const CAPACITY_LOG_FILE = join(CAPACITY_LOG_DIR, "capacity-retries.log");
@@ -684,14 +701,7 @@ function streamKiroWithUsageTracking(
       // present. Keep both controls: structured fields select effort, while these
       // markers preserve the <thinking> content consumed by ThinkingTagParser.
       if (thinkingEnabled && effortConfig?.field !== "reasoning") {
-        const budget =
-          options?.reasoning === "xhigh"
-            ? 50000
-            : options?.reasoning === "high"
-              ? 30000
-              : options?.reasoning === "medium"
-                ? 20000
-                : 10000;
+        const budget = THINKING_BUDGET_BY_LEVEL[options?.reasoning ?? "minimal"];
         systemPrompt = `<thinking_mode>enabled</thinking_mode><max_thinking_length>${budget}</max_thinking_length>${systemPrompt ? `\n${systemPrompt}` : ""}`;
       }
       let retryCount = 0;

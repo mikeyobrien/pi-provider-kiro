@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The `max` thinking level now sends a 50,000-token `<max_thinking_length>`, the same as `xhigh`, instead of falling through to the 10,000-token floor. On models without an `xhigh` rung (Claude Sonnet 4.6, Opus 4.6), pi maps `xhigh` to `max`, so both top levels were getting less thinking than `high`. Kiro documents no limit for this hint, so `max` does not go past `xhigh`; the structured `max` effort still sets it apart ([#173](https://github.com/mikeyobrien/pi-provider-kiro/issues/173)).
+
 ## [0.12.2] - 2026-10-22
 
 ### Changed
