@@ -167,8 +167,9 @@ export function whenStartupCatalogSettled(): Promise<void> {
  * starts, and not every host awaits an async extension factory before then, so
  * awaiting catalog discovery here left `kiro-api` unregistered while cached
  * models were still offered in the picker — the first user message then crashed
- * with `No API provider registered for api: kiro-api`. Discovery is kicked off
- * afterwards and the host's `refreshModels` hook fills in the rest.
+ * with `No API provider registered for api: kiro-api`. On Pi, discovery is
+ * kicked off afterwards and the host's `refreshModels` hook fills in the rest;
+ * OMP drives discovery itself through `fetchDynamicModels`.
  */
 export default function (pi: ExtensionAPI) {
   // Capture ctx for the custom TUI login component
@@ -185,22 +186,45 @@ export default function (pi: ExtensionAPI) {
     fetchUsage: fetchKiroUsage,
   });
 
-  const credential = resolveLocalCredential();
+  // Oh My Pi (OMP) loads Pi extensions through its own ExtensionAPI, which
+  // injects a `typebox` module that Pi's API object never carries. OMP ignores
+  // `refreshModels`, awaiting `fetchDynamicModels` instead, and resolves `apiKey`
+  // as a bare env var name — kept as a literal (outranking OAuth) when unset.
+  const omp = "typebox" in pi;
+  // OMP hands discovery only the resolved access string; the OAuth hooks below
+  // see the full credential, so remember it to keep its region and profile ARN.
+  let oauthForCatalog: KiroCredentials | undefined;
+  const fetchDynamicModels = (apiKey: string | undefined): Promise<KiroModel[]> => {
+    const local = resolveLocalCredential();
+    const matchingOAuth = [oauthForCatalog, getPiHostKiroCredentials(), local].find(
+      (credential) => credential && "access" in credential && credential.access === apiKey,
+    );
+    return refreshCatalog(matchingOAuth ?? (apiKey ? { type: "api_key", key: apiKey } : local), {
+      allowNetwork: true,
+      force: true,
+    });
+  };
+  const ompApiKeyEnv = ["KIRO_API_KEY", "OMP_KIRO_PROVIDER_KEY"].find((name) => process.env[name]);
   const streamSimple = createKiroStream(loadKiroUsageTracking());
   pi.registerProvider("kiro", {
     baseUrl: getKiroEndpoints("us-east-1").runtime,
     api: "kiro-api",
-    apiKey: "$KIRO_API_KEY",
+    ...(omp
+      ? { ...(ompApiKeyEnv ? { apiKey: ompApiKeyEnv } : {}), fetchDynamicModels }
+      : { apiKey: "$KIRO_API_KEY", refreshModels: refreshKiroModels }),
     models: kiroModels,
-    refreshModels: refreshKiroModels,
     oauth: {
       // Name reflects all supported auth methods: AWS Builder ID, Google, GitHub
       name: "Kiro (Builder ID / Google / GitHub)",
       login: loginKiro,
       refreshToken: refreshKiroToken,
-      getApiKey: (cred: OAuthCredentials) => cred.access,
+      getApiKey: (cred: OAuthCredentials) => {
+        oauthForCatalog = cred as KiroCredentials;
+        return cred.access;
+      },
       getCliCredentials: getKiroCliCredentials,
       modifyModels: (models: Model<Api>[], cred: OAuthCredentials) => {
+        oauthForCatalog = cred as KiroCredentials;
         const apiRegion = resolveApiRegion((cred as KiroCredentials).region);
         const cachedKiro = getCachedModels(apiRegion);
         const nonKiro = models.filter((m: Model<Api>) => m.provider !== "kiro");
@@ -218,8 +242,10 @@ export default function (pi: ExtensionAPI) {
       // biome-ignore lint/suspicious/noExplicitAny: ProviderConfig.oauth doesn't include getCliCredentials but OAuthProviderInterface does
     } as any,
     streamSimple,
-  });
+  } as Parameters<ExtensionAPI["registerProvider"]>[1]);
 
+  if (omp) return;
+  const credential = resolveLocalCredential();
   startupCatalogRefresh = refreshCatalog(credential, { allowNetwork: true })
     .then(() => {})
     .catch((error) => {
