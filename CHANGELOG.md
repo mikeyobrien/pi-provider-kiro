@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Lower-case and trim AWS region codes wherever they enter: the login region prompt, kiro-cli and Kiro IDE token files, the web sign-in callback, profile ARNs, and stored credentials on refresh. A region typed as `Ap-southeast-1` was used verbatim in Kiro and OIDC hostnames and skipped the SSO-to-API region map, so every request failed ([#180](https://github.com/mikeyobrien/pi-provider-kiro/issues/180)).
+- The `max` thinking level now sends a 50,000-token `<max_thinking_length>`, the same as `xhigh`, instead of falling through to the 10,000-token floor. On models without an `xhigh` rung (Claude Sonnet 4.6, Opus 4.6), pi maps `xhigh` to `max`, so both top levels were getting less thinking than `high`. Kiro documents no limit for this hint, so `max` does not go past `xhigh`; the structured `max` effort still sets it apart ([#173](https://github.com/mikeyobrien/pi-provider-kiro/issues/173)).
+- Lower-case and trim AWS region codes wherever they enter: the login region prompt, kiro-cli and Kiro IDE token files, the web sign-in callback, profile ARNs, and stored credentials on refresh. A region typed as `Ap-southeast-1` missed the SSO-to-API region map, so the provider called `management.ap-southeast-1.kiro.dev`, which does not exist, and every request failed ([#180](https://github.com/mikeyobrien/pi-provider-kiro/issues/180)).
 
 ## [0.12.2] - 2026-10-22
 
