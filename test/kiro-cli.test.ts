@@ -14,7 +14,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function makeTokenDb(profileArn?: string, authMethod: "idc" | "desktop" = "idc"): string {
+function makeTokenDb(profileArn?: string, authMethod: "idc" | "desktop" = "idc", region = "eu-central-1"): string {
   tempDir = mkdtempSync(join(tmpdir(), "kiro-cli-test-"));
   const dbPath = join(tempDir, "data.sqlite3");
   const db = new DatabaseSync(dbPath);
@@ -22,7 +22,7 @@ function makeTokenDb(profileArn?: string, authMethod: "idc" | "desktop" = "idc")
   const token = JSON.stringify({
     access_token: "test-access",
     refresh_token: "test-refresh",
-    region: "eu-central-1",
+    region,
     expires_at: new Date(Date.now() + 3600000).toISOString(),
     ...(profileArn ? { profile_arn: profileArn } : {}),
   });
@@ -59,6 +59,13 @@ describe("tryKiroCliToken (#110)", () => {
     const dbPath = makeTokenDb(undefined, "idc");
     const result = tryKiroCliToken(dbPath, "kirocli:odic:token", "idc");
     expect(result?.profileArn).toBeUndefined();
+  });
+
+  // Issue #180: the region lands in Kiro and OIDC hostnames.
+  it.each(["idc", "desktop"] as const)("lower-cases and trims a mis-cased %s token region", (authMethod) => {
+    const dbPath = makeTokenDb(undefined, authMethod, " Eu-West-1");
+    const key = authMethod === "idc" ? "kirocli:odic:token" : "kirocli:social:token";
+    expect(tryKiroCliToken(dbPath, key, authMethod)?.region).toBe("eu-west-1");
   });
 });
 

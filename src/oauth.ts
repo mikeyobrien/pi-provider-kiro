@@ -9,7 +9,7 @@
 
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { formatSafeError } from "./debug.js";
-import { resolveApiRegion } from "./endpoints.js";
+import { normalizeRegion, resolveApiRegion } from "./endpoints.js";
 import { getKiroIdeCredentials, getKiroIdeCredentialsAllowExpired } from "./kiro-ide.js";
 import { interactiveLogin, loginViaKiroCli } from "./login.js";
 
@@ -348,7 +348,7 @@ async function refreshKiroTokenDirect(credentials: OAuthCredentials): Promise<OA
   const parts = credentials.refresh.split("|");
   const refreshToken = parts[0] ?? "";
   const authMethod = (parts[parts.length - 1] ?? "idc") as KiroAuthMethod;
-  const region = (credentials as KiroCredentials).region || "us-east-1";
+  const region = normalizeRegion((credentials as KiroCredentials).region) ?? "us-east-1";
 
   if (authMethod === "apikey") {
     // API keys are long-lived bearer tokens — no refresh needed.

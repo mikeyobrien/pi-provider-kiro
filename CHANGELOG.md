@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Lower-case and trim AWS region codes wherever they enter: the login region prompt, kiro-cli and Kiro IDE token files, the web sign-in callback, profile ARNs, and stored credentials on refresh. A region typed as `Ap-southeast-1` was used verbatim in Kiro and OIDC hostnames and skipped the SSO-to-API region map, so every request failed ([#180](https://github.com/mikeyobrien/pi-provider-kiro/issues/180)).
+
 ## [0.12.2] - 2026-10-22
 
 ### Changed

@@ -9,6 +9,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { normalizeRegion } from "./endpoints.js";
 import type { KiroCredentials } from "./oauth.js";
 
 // ~/.aws/sso/cache is the standard AWS SSO cache directory on all platforms.
@@ -42,7 +43,7 @@ function readKiroIdeToken(allowExpired: boolean): KiroCredentials | undefined {
     const expiresAt = new Date(tokenData.expiresAt).getTime();
     if (!allowExpired && Date.now() >= expiresAt - 2 * 60 * 1000) return undefined;
 
-    const region = tokenData.region ?? "us-east-1";
+    const region = normalizeRegion(tokenData.region) ?? "us-east-1";
 
     // Load the OIDC client registration so refreshKiroTokenDirect can call the
     // AWS OIDC /token endpoint with a refresh_token grant without prompting the user.

@@ -9,6 +9,7 @@
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { DynamicBorder, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Container, Input, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
+import { normalizeRegion } from "./endpoints.js";
 
 export type LoginChoice =
   | { method: "cached" }
@@ -111,8 +112,8 @@ export async function showLoginUI(hasCached?: boolean): Promise<LoginChoice> {
       const regionHint = new Text(theme.fg("dim", "enter submit • esc back"), 1, 0);
 
       regionInput.onSubmit = (value) => {
-        const region = value.trim();
-        done({ method: "idc", startUrl: enteredStartUrl, region: region || undefined });
+        const region = normalizeRegion(value);
+        done({ method: "idc", startUrl: enteredStartUrl, region });
       };
       regionInput.onEscape = () => {
         switchToUrlInput();

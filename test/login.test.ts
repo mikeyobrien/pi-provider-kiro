@@ -1,6 +1,7 @@
+import { get } from "node:http";
 import type { OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
-import { interactiveLogin } from "../src/login.js";
+import { interactiveLogin, runSocialLoginFlow } from "../src/login.js";
 import type { KiroCredentials } from "../src/oauth.js";
 import { BUILDER_ID_START_URL } from "../src/oauth.js";
 
@@ -261,6 +262,49 @@ describe("Feature 10: Interactive Login", () => {
           }),
       );
       expect(((await interactiveLogin(makeCallbacks(""))) as KiroCredentials).access).toBe("at");
+      vi.unstubAllGlobals();
+    });
+  });
+
+  // Issue #180: the web sign-in hands back the Identity Center region the user
+  // chose there; it goes into OIDC hostnames and the stored credential.
+  describe("web login IAM Identity Center callback", () => {
+    it("uses a mis-cased idc_region lower-cased", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ clientId: "c1", clientSecret: "s1" }) })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              verificationUri: "u",
+              verificationUriComplete: "u?code=X",
+              userCode: "X",
+              deviceCode: "dc",
+              interval: 1,
+              expiresIn: 10,
+            }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ accessToken: "at", refreshToken: "rt", expiresIn: 3600 }),
+        });
+      vi.stubGlobal("fetch", fetchMock);
+      const callbacks = makeCallbacks();
+      callbacks.onAuth.mockImplementationOnce(({ url }: { url: string }) => {
+        const state = new URL(url).searchParams.get("state") ?? "";
+        const query = new URLSearchParams({
+          state,
+          issuer_url: "https://example-tenant.awsapps.com/start",
+          idc_region: "Eu-West-1",
+        });
+        get(`http://127.0.0.1:3128/?${query}`, (res) => res.resume());
+      });
+
+      const creds = (await runSocialLoginFlow(callbacks)) as KiroCredentials;
+
+      expect(fetchMock.mock.calls[0][0]).toBe("https://oidc.eu-west-1.amazonaws.com/client/register");
+      expect(creds.region).toBe("eu-west-1");
       vi.unstubAllGlobals();
     });
   });

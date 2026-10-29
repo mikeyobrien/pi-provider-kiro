@@ -148,6 +148,26 @@ describe("fetchKiroUsage", () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
+  // Issue #180: a region typed as `Ap-southeast-1` at login was used verbatim,
+  // so every management call went to a host that does not exist and failed
+  // with "ListAvailableProfiles request failed in Ap-southeast-1".
+  it("routes a stored credential whose SSO region has capitals to its Kiro API region (#180)", async () => {
+    const liveHosts = new Set(["management.us-east-1.kiro.dev", "management.eu-central-1.kiro.dev"]);
+    const fetchMock = vi.fn(async (rawUrl: string) => {
+      // Behave like DNS: only the Kiro API regions resolve.
+      if (!liveHosts.has(new URL(rawUrl).hostname)) throw new TypeError("fetch failed");
+      const body = rawUrl.endsWith("/List-Available-Profiles") ? { profiles: [{ arn: profileArn }] } : usageResponse();
+      return { ok: true, json: () => Promise.resolve(body) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const usage = await fetchKiroUsage({ ...creds, region: "Ap-southeast-1" });
+
+    expect(usage.subscriptionTitle).toBe("KIRO FREE");
+    expect(fetchMock.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
+    expectUsageRequest(fetchMock.mock.calls[1][0], profileArn);
+  });
+
   it("surfaces usage failures without another profile lookup", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,

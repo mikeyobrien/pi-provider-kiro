@@ -204,6 +204,27 @@ describe("Feature 3: OAuth — Token Refresh", () => {
       vi.unstubAllGlobals();
     });
 
+    // Issue #180: a credential stored by an older version can carry the region
+    // as the user typed it. Refresh must use the real host and store it fixed.
+    it("refreshes a stored credential with a mis-cased region against the lower-case host", async () => {
+      const mockFetch = vi.fn().mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ accessToken: "new_at", refreshToken: "new_rt", expiresIn: 3600 }),
+      });
+      vi.stubGlobal("fetch", mockFetch);
+
+      const refreshed = (await refreshKiroToken({
+        refresh: "old_rt|cid|csec|idc",
+        access: "old_at",
+        expires: 0,
+        region: "Ap-southeast-1",
+      } as KiroCredentials)) as KiroCredentials;
+
+      expect(mockFetch.mock.calls[0][0]).toBe("https://oidc.ap-southeast-1.amazonaws.com/token");
+      expect(refreshed.region).toBe("ap-southeast-1");
+      vi.unstubAllGlobals();
+    });
+
     it("uses expired kiro-cli creds as fallback when direct refresh fails", async () => {
       const { getKiroCliCredentialsAllowExpired } = await import("../src/kiro-cli.js");
       vi.mocked(getKiroCliCredentialsAllowExpired).mockReturnValueOnce({
