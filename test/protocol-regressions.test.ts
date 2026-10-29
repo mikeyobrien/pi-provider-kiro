@@ -55,22 +55,41 @@ describe("response protocol regressions", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it("honors output truncation even with a tool call", async () => {
+  it("keeps toolUse over a modeled MAX_TOKENS once a tool call was emitted", async () => {
+    // The tool-call deltas are already on the stream and cannot be retracted, so
+    // the caller must be told to run them; `"length"` would leave an executed-
+    // looking call unanswered. The truncation stays visible as the modeled value
+    // on the kiro_turn_provenance diagnostic. (#124 precedence; supersedes the
+    // #174 pin that emitted "length" here.)
     const { message } = await run([
       { name: "read", toolUseId: "t1", input: '{"path":"test"}', stop: true },
       { contextUsagePercentage: 5 },
       { stopReason: "MAX_TOKENS" },
     ]);
-    expect(message.stopReason).toBe("length");
+    expect(message.stopReason).toBe("toolUse");
+    const record = message.diagnostics?.find((d) => d.type === "kiro_turn_provenance");
+    expect((record?.details?.stopReason as { modeled?: string; source?: string }).modeled).toBe("MAX_TOKENS");
+    expect((record?.details?.stopReason as { source?: string }).source).toBe("inferred");
   });
 
   it.each([
     "CONTENT_FILTERED",
     "MODEL_CONTEXT_WINDOW_EXCEEDED",
     "PAUSE_TURN",
-  ])("surfaces %s without provider retries", async (stopReason) => {
+  ])("completes %s as stop without provider retries, modeled value on the diagnostic", async (stopReason) => {
+    // These members have no faithful pi member at this peer (see
+    // mapModeledStopReason). They complete as `"stop"` — for the overflow case
+    // that is what routes a 200-delivered overflow into pi's compaction rather
+    // than a non-converging truncation loop — and the verbatim wire member plus
+    // stopDetails ride the kiro_turn_provenance diagnostic. (#124 semantics;
+    // supersedes the #174 pin that surfaced these as "error".)
     const { message, fetch } = await run([{ stopReason, stopDetails: { reason: "synthetic" } }]);
-    expect(message.stopReason).toBe("error");
+    expect(message.stopReason).toBe("stop");
     expect(fetch).toHaveBeenCalledTimes(1);
+    const record = message.diagnostics?.find((d) => d.type === "kiro_turn_provenance");
+    const recorded = record?.details?.stopReason as { modeled?: string; details?: unknown; contextOverflow?: true };
+    expect(recorded.modeled).toBe(stopReason);
+    expect(recorded.details).toEqual({ reason: "synthetic" });
+    expect(recorded.contextOverflow).toBe(stopReason === "MODEL_CONTEXT_WINDOW_EXCEEDED" ? true : undefined);
   });
 });

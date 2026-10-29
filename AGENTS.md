@@ -104,6 +104,7 @@ npm run test:watch # vitest (watch mode)
 - `kiro-cli.ts` uses `sqlite3` CLI via `execSync`, not a Node native module
 - Output token count is estimated (`content.length / 4`), not from the API
 - `contextUsagePercentage` is the only usage metric Kiro provides; input tokens are back-calculated
+- A `MODEL_CONTEXT_WINDOW_EXCEEDED` turn emitted as `"stop"` gets `usage.input` raised to `contextWindow + 1` (after cost and cache estimate), `usage.contextOverflowDeclared = true`, and provenance `input: "declared"`. That floor is the only way it trips pi's `isContextOverflow()` silent-overflow case and auto-compaction; it is not a measurement. No other stop reason touches usage.
 - Social login (Google/GitHub) requires `kiro-cli` to be installed — pi delegates the auth flow to it
 
 ## Maintaining this file
