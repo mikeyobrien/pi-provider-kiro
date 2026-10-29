@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getKiroCliCredentials, getKiroCliDbPath, refreshViaKiroCli, tryKiroCliToken } from "../src/kiro-cli.js";
+import { BUILDER_ID_PROFILE_ARN, BUILDER_ID_START_URL } from "../src/oauth.js";
 
 let tempDir: string | undefined;
 afterEach(() => {
@@ -60,6 +61,67 @@ describe("tryKiroCliToken (#110)", () => {
     const result = tryKiroCliToken(dbPath, "kirocli:odic:token", "idc");
     expect(result?.profileArn).toBeUndefined();
   });
+});
+
+describe("Builder ID profile ARN default (#169)", () => {
+  // kiro-cli stores no profile_arn for a Builder ID session; the only marker is
+  // the Builder ID start_url. Made-up token values.
+  const ORG_START_URL = "https://example-org.awsapps.com/start";
+  const ORG_PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:111122223333:profile/EXAMPLEORG";
+
+  function makeRowDb(key: string, fields: Record<string, unknown>): string {
+    tempDir = mkdtempSync(join(tmpdir(), "kiro-cli-test-"));
+    const dbPath = join(tempDir, "data.sqlite3");
+    const db = new DatabaseSync(dbPath);
+    db.exec(`CREATE TABLE auth_kv (key TEXT PRIMARY KEY, value TEXT)`);
+    const token = JSON.stringify({
+      access_token: "test-access",
+      refresh_token: "test-refresh",
+      region: "us-east-1",
+      expires_at: new Date(Date.now() + 3600000).toISOString(),
+      ...fields,
+    });
+    db.prepare(`INSERT INTO auth_kv (key, value) VALUES (?, ?)`).run(key, token);
+    db.close();
+    return dbPath;
+  }
+
+  const builderIdRows = [
+    // The row #169 reports: `kiro-cli login` with Builder ID (device code).
+    { key: "kirocli:odic:token", authMethod: "idc", fields: { oauth_flow: "DeviceCode" } },
+    { key: "kirocli:social:token", authMethod: "desktop", fields: {} },
+  ] as const;
+
+  for (const row of builderIdRows) {
+    describe(`${row.key} row`, () => {
+      it("gets the Builder ID profile ARN when the Builder ID row stores none", () => {
+        const dbPath = makeRowDb(row.key, { ...row.fields, start_url: BUILDER_ID_START_URL });
+        const result = tryKiroCliToken(dbPath, row.key, row.authMethod);
+        expect(result?.authMethod).toBe(row.authMethod);
+        expect(result?.profileArn).toBe(BUILDER_ID_PROFILE_ARN);
+        expect(result?.startUrl).toBe(BUILDER_ID_START_URL);
+      });
+
+      it("gets it for an expired Builder ID row read for refresh", () => {
+        const dbPath = makeRowDb(row.key, {
+          ...row.fields,
+          start_url: `${BUILDER_ID_START_URL}/`,
+          expires_at: new Date(Date.now() - 60000).toISOString(),
+        });
+        expect(tryKiroCliToken(dbPath, row.key, row.authMethod, true)?.profileArn).toBe(BUILDER_ID_PROFILE_ARN);
+      });
+
+      it("keeps the stored profile ARN of an Identity Center row", () => {
+        const dbPath = makeRowDb(row.key, { ...row.fields, start_url: ORG_START_URL, profile_arn: ORG_PROFILE_ARN });
+        expect(tryKiroCliToken(dbPath, row.key, row.authMethod)?.profileArn).toBe(ORG_PROFILE_ARN);
+      });
+
+      it("leaves an Identity Center row without a stored ARN to profile discovery", () => {
+        const dbPath = makeRowDb(row.key, { ...row.fields, start_url: ORG_START_URL });
+        expect(tryKiroCliToken(dbPath, row.key, row.authMethod)?.profileArn).toBeUndefined();
+      });
+    });
+  }
 });
 
 describe("external IdP tokens", () => {
@@ -128,6 +190,11 @@ describe("external IdP tokens", () => {
     });
     expect(tryKiroCliToken(dbPath, "kirocli:external-idp:token", "external-idp")).toBeUndefined();
     expect(tryKiroCliToken(dbPath, "kirocli:external-idp:token", "external-idp", true)?.access).toBe("idp-access");
+  });
+
+  it("never takes the Builder ID profile ARN (#169)", () => {
+    const dbPath = makeExternalIdpDb({ ...baseToken, expires_at: new Date(Date.now() + 3600000).toISOString() });
+    expect(tryKiroCliToken(dbPath, "kirocli:external-idp:token", "external-idp")?.profileArn).toBeUndefined();
   });
 
   it("is returned by the credential probe order when it is the only stored token", () => {
