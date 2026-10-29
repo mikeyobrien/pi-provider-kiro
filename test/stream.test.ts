@@ -13,6 +13,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { findJsonEnd } from "../src/bracket-tool-parser.js";
 import { resetCacheEstimatorForTests } from "../src/cache-estimator.js";
 import { validateKiroConversation, validateKiroToolStructure } from "../src/history-validator.js";
+import { kiroModels } from "../src/models.js";
 import { capacityRetryConfig, retryConfig } from "../src/retry.js";
 import { createKiroStream, resetProfileArnCache, streamKiro } from "../src/stream.js";
 import { EMPTY_CONTENT_PLACEHOLDER, type KiroHistoryEntry } from "../src/transform.js";
@@ -471,6 +472,42 @@ describe("Feature 9: Streaming Integration", () => {
     );
 
     vi.unstubAllGlobals();
+  });
+
+  it("never gives a higher thinking level a smaller max_thinking_length, for every catalog model", async () => {
+    const levels = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
+    const ladders: string[] = [];
+    const violations: string[] = [];
+
+    for (const model of kiroModels.filter((candidate) => candidate.reasoning)) {
+      const budgets: (number | undefined)[] = [];
+      for (const reasoning of levels) {
+        const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":10}');
+        vi.stubGlobal("fetch", mockFetch);
+        try {
+          await collect(streamKiro(model, makeContext(), { apiKey: "test-token", reasoning }));
+          const content: string = JSON.parse(mockFetch.mock.calls[0][1].body).conversationState.currentMessage
+            .userInputMessage.content;
+          const match = content.match(/<max_thinking_length>(\d+)<\/max_thinking_length>/);
+          budgets.push(match ? Number(match[1]) : undefined);
+        } finally {
+          vi.unstubAllGlobals();
+        }
+      }
+      // A model whose effort goes only through the structured `reasoning` field sends no budget at all.
+      if (budgets.every((budget) => budget === undefined)) continue;
+      ladders.push(`${model.id}: ${budgets.join(" ")}`);
+      for (let index = 1; index < levels.length; index++) {
+        const below = budgets[index - 1];
+        const at = budgets[index];
+        if (below === undefined || at === undefined || at < below) {
+          violations.push(`${model.id}: ${levels[index]}=${at} < ${levels[index - 1]}=${below}`);
+        }
+      }
+    }
+
+    expect(ladders.length).toBeGreaterThan(0);
+    expect(violations).toEqual([]);
   });
 
   it("does not guess a known-model effort mechanism over a present catalog schema", async () => {
