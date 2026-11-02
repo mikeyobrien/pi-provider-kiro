@@ -17,6 +17,7 @@ const pkg = JSON.parse(readFileSync(`${repoRoot}package.json`, "utf8")) as {
   peerDependencies?: Record<string, string>;
   peerDependenciesMeta?: Record<string, { optional?: boolean }>;
   pi?: { extensions?: string[] };
+  omp?: { extensions?: string[] };
 };
 
 // Read from disk rather than a hardcoded list: a new source file must not be
@@ -62,6 +63,13 @@ describe("published package surface", () => {
     expect(pkg.types).toBe("./dist/index.d.ts");
     expect(pkg.files).toContain("dist");
     expect(pkg.pi?.extensions).toEqual(["./dist/index.js"]);
+  });
+
+  // Oh My Pi runs TypeScript directly and Bun skips `prepare` on git installs,
+  // so OMP loads the source entry — which only resolves if `src` is published.
+  it("publishes the source entry Oh My Pi loads", () => {
+    expect(pkg.omp?.extensions).toEqual(["./src/index.ts"]);
+    expect(pkg.files).toContain("src");
   });
 
   it("emits declarations alongside the bundle", () => {

@@ -21,6 +21,7 @@
   ],
   "files": [
     "dist",
+    "src",
     "README.md"
   ],
   "scripts": {
@@ -37,6 +38,11 @@
   "pi": {
     "extensions": [
       "./dist/index.js"
+    ]
+  },
+  "omp": {
+    "extensions": [
+      "./src/index.ts"
     ]
   },
   "dependencies": {
