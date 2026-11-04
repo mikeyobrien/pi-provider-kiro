@@ -252,6 +252,28 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
+  it("awaits payload and response hooks in order", async () => {
+    const order: string[] = [];
+    const fetch = mockFetchOk('{"content":"hello"}{"contextUsagePercentage":5}');
+    vi.stubGlobal("fetch", fetch);
+    const events = await collect(
+      streamKiro(makeModel({ reasoning: false }), makeContext(), {
+        apiKey: "synthetic-token",
+        onPayload: async (payload) => {
+          order.push("payload");
+          return { ...(payload as object), marker: "replacement" };
+        },
+        onResponse: async () => {
+          order.push("response");
+        },
+      }),
+    );
+    expect(JSON.parse(fetch.mock.calls[0][1].body).marker).toBe("replacement");
+    expect(order).toEqual(["payload", "response"]);
+    expect(events.some((event) => event.type === "done")).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
   it("emits error when no credentials provided", async () => {
     const stream = streamKiro(makeModel(), makeContext(), {});
     const events = await collect(stream);
