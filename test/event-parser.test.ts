@@ -47,10 +47,10 @@ describe("Feature 8: Stream Event Parsing", () => {
       });
     });
 
-    it("ignores a reasoningContentEvent carrying only redactedContent", () => {
+    it("preserves opaque reasoningContentEvent redactedContent", () => {
       expect(parseKiroEvent("reasoningContentEvent", { redactedContent: "encrypted" })).toEqual({
-        type: "ignored",
-        data: { key: "reasoningContentEvent" },
+        type: "thinkingRedacted",
+        data: "encrypted",
       });
     });
 

@@ -54,6 +54,7 @@ import {
 } from "./management.js";
 import { resolveKiroModel } from "./models.js";
 import { kiroAuthHeaders } from "./oauth.js";
+import { type KiroThinking, reasoningDigest, reasoningForHistory } from "./reasoning.js";
 import {
   capacityRetryConfig,
   exponentialBackoff,
@@ -753,6 +754,7 @@ function streamKiroWithUsageTracking(
         if (options?.signal?.aborted) throw options.signal.reason;
         resetAttemptUsage();
         const effectiveSystemPrompt = systemPrompt;
+        const requestDigest = reasoningDigest(effectiveSystemPrompt, currentTools);
         // Relocate a tool result that arrived behind a later assistant turn than
         // the one that called it, before anything positional runs. Interleaved
         // concurrent tool executions produce that shape, and `sanitizeHistory`
@@ -764,7 +766,7 @@ function streamKiroWithUsageTracking(
           history: rawHistory,
           systemPrepended,
           currentMsgStartIdx,
-        } = buildHistory(normalized, kiroModelId, effectiveSystemPrompt);
+        } = buildHistory(normalized, kiroModelId, effectiveSystemPrompt, requestDigest);
         // Preserve semantic context locally; Pi owns lossy compaction.
         const history = prepareHistory(rawHistory, model.input.includes("image"));
         const dynamicHistoryLimit = Math.floor((model.contextWindow / HISTORY_LIMIT_CONTEXT_WINDOW) * HISTORY_LIMIT);
@@ -821,6 +823,7 @@ function streamKiroWithUsageTracking(
                 assistantResponseMessage: {
                   content: armContent,
                   ...(armToolUses.length > 0 ? { toolUses: armToolUses } : {}),
+                  reasoningContent: reasoningForHistory(am, kiroModelId, requestDigest),
                 },
               });
             }
@@ -1241,9 +1244,14 @@ function streamKiroWithUsageTracking(
         let nativeThinkingBlockIndex: number | null = null;
         let nativeThinkingEnded = false;
         const ensureNativeThinkingBlock = (): { block: ThinkingContent; contentIndex: number } => {
-          if (nativeThinkingBlockIndex === null) {
+          if (nativeThinkingBlockIndex === null || nativeThinkingEnded) {
+            nativeThinkingEnded = false;
             nativeThinkingBlockIndex = output.content.length;
-            output.content.push({ type: "thinking", thinking: "" });
+            output.content.push({
+              type: "thinking",
+              thinking: "",
+              kiroReasoning: { modelId: kiroModelId, requestDigest },
+            } as KiroThinking);
             stream.push({ type: "thinking_start", contentIndex: nativeThinkingBlockIndex, partial: output });
           }
           return {
@@ -1455,6 +1463,12 @@ function streamKiroWithUsageTracking(
               endNativeThinking();
               break;
             }
+            case "thinkingRedacted": {
+              const { block } = ensureNativeThinkingBlock();
+              (block as KiroThinking).kiroReasoning!.redactedContent = event.data;
+              endNativeThinking();
+              break;
+            }
             case "content": {
               if (event.data === "") break;
               endNativeThinking();
@@ -1473,6 +1487,7 @@ function streamKiroWithUsageTracking(
               break;
             }
             case "toolUse": {
+              endNativeThinking();
               const tc = event.data;
               sawAnyToolCalls = true;
               if (!currentToolCall || currentToolCall.toolUseId !== tc.toolUseId) {
