@@ -121,10 +121,13 @@ export type KiroErrorPlane = "management" | "runtime";
  * This diagnostic is the machine-readable channel that survives that
  * flattening: its `details` carry `plane`, `status`, and `refreshAttempted`.
  *
- * Only management-plane failures are tagged. A runtime failure — and any local
- * precondition failure, such as absent credentials — emits no diagnostic of
- * this type, so a management error is identified by its presence and everything
- * else by its absence, without parsing `errorMessage`.
+ * Only management-plane HTTP failures are tagged — a non-2xx response, carried
+ * as a `KiroManagementHttpError`. A management call that fails without an HTTP
+ * status (transport retries exhausted, invalid JSON, an empty profile or model
+ * catalog) throws a plain `Error` and emits no diagnostic of this type, as do
+ * runtime failures and local precondition failures such as absent credentials.
+ * So the diagnostic's presence identifies a management HTTP failure; its
+ * absence does not by itself mean the failure came from the runtime plane.
  */
 export const KIRO_AUTH_PLANE_DIAGNOSTIC = "kiro_auth_plane";
 
