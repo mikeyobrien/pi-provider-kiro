@@ -19,6 +19,10 @@ import { createKiroStream } from "./stream.js";
 import { fetchKiroUsage } from "./usage.js";
 import { loadKiroUsageTracking } from "./usage-tracking.js";
 
+// The provenance diagnostic's vocabulary, so a consumer can name the value
+// union it switches on rather than re-declaring it.
+export type { KiroTurnProvenanceInput, KiroUsageProvenance, KiroUsageSource } from "./diagnostics.js";
+export { createKiroTurnProvenanceDiagnostic, KIRO_TURN_PROVENANCE_DIAGNOSTIC } from "./diagnostics.js";
 export { resolveApiRegion } from "./endpoints.js";
 export type { KiroProviderAttempts } from "./errors.js";
 export { KiroApiError } from "./errors.js";

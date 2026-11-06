@@ -14,6 +14,7 @@ import { isContextOverflow, isRetryableAssistantError } from "@earendil-works/pi
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { findJsonEnd } from "../src/bracket-tool-parser.js";
 import { resetCacheEstimatorForTests } from "../src/cache-estimator.js";
+import type { KiroUsageProvenance } from "../src/diagnostics.js";
 import { validateKiroConversation, validateKiroToolStructure } from "../src/history-validator.js";
 import { kiroModels } from "../src/models.js";
 import { capacityRetryConfig, retryConfig } from "../src/retry.js";
@@ -28,6 +29,37 @@ import {
   encodeRawExceptionMessage,
 } from "./helpers/event-stream.js";
 import { RECORD_279_COMMAND, RECORD_279_SUMMARY, RECORD_279_TEXT } from "./helpers/invoke-fixture.js";
+
+/**
+ * Lets one test make the diagnostics append throw, to exercise the provider's
+ * fail-open guard.
+ *
+ * `vi.spyOn` cannot seam this: `stream.ts` reaches the helper through
+ * `import * as PiAi`, and an ES module namespace object has non-configurable
+ * properties, so redefining one throws `Cannot redefine property`. Hence a
+ * module mock — but a pass-through one, spreading the real exports and
+ * delegating to the real implementation unless `fail` is set. Every other test
+ * in this file therefore runs against unmodified pi-ai.
+ *
+ * `vi.hoisted` because `vi.mock` is hoisted above ordinary declarations.
+ */
+const diagnosticsAppend = vi.hoisted(() => ({ fail: false }));
+vi.mock("@earendil-works/pi-ai", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@earendil-works/pi-ai")>();
+  return {
+    ...actual,
+    appendAssistantMessageDiagnostic: (
+      ...args: Parameters<typeof actual.appendAssistantMessageDiagnostic>
+    ): ReturnType<typeof actual.appendAssistantMessageDiagnostic> => {
+      if (diagnosticsAppend.fail) {
+        // Shaped like the real failure: on a host older than the 0.80.10 peer
+        // minimum the export is absent, so the call site throws this.
+        throw new TypeError("PiAi.appendAssistantMessageDiagnostic is not a function");
+      }
+      return actual.appendAssistantMessageDiagnostic(...args);
+    },
+  };
+});
 
 const ts = Date.now();
 const zeroUsage = {
@@ -6606,4 +6638,367 @@ describe("Feature 9: Streaming Integration", () => {
       vi.unstubAllGlobals();
     });
   }
+});
+
+describe("turn provenance diagnostic", () => {
+  beforeEach(() => {
+    resetProfileArnCache(true);
+    diagnosticsAppend.fail = false;
+  });
+
+  /** The single provenance diagnostic on a terminal message. */
+  function provenanceOf(msg: AssistantMessage | undefined) {
+    expect(msg).toBeDefined();
+    if (!msg) throw new Error("Expected a terminal assistant message");
+    const found = (msg.diagnostics ?? []).filter((d) => d.type === "kiro_turn_provenance");
+    expect(found).toHaveLength(1);
+    return found[0];
+  }
+
+  async function run(chunks: string[]) {
+    const mockFetch = mockFetchChunked(chunks);
+    vi.stubGlobal("fetch", mockFetch);
+    const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+    vi.unstubAllGlobals();
+    const done = events.find((e) => e.type === "done");
+    const error = events.find((e) => e.type === "error");
+    return {
+      msg: done?.type === "done" ? done.message : error?.type === "error" ? error.error : undefined,
+      terminal: done ? "done" : "error",
+    };
+  }
+
+  it("records every slot as measured when the wire supplied every count", async () => {
+    const { msg } = await run([
+      '{"content":"Hello"}',
+      JSON.stringify({
+        tokenUsage: {
+          uncachedInputTokens: 1_200,
+          outputTokens: 340,
+          totalTokens: 9_540,
+          cacheReadInputTokens: 8_000,
+          cacheWriteInputTokens: 0,
+        },
+      }),
+    ]);
+
+    // The numbers and their provenance are written at the same site, so the
+    // record must describe exactly the figures on the message.
+    expect(msg?.usage.input).toBe(1_200);
+    expect(msg?.usage.output).toBe(340);
+    expect(msg?.usage.totalTokens).toBe(9_540);
+    expect(msg?.usage.cacheRead).toBe(8_000);
+    expect(msg?.usage.cacheWrite).toBe(0);
+    expect(provenanceOf(msg).details).toEqual({
+      usage: {
+        input: "measured",
+        output: "measured",
+        totalTokens: "measured",
+        cache: "measured",
+      } satisfies KiroUsageProvenance,
+    });
+  });
+
+  it("marks input and cache as estimated when the opt-in cache estimate moved tokens between them", async () => {
+    // The estimate runs only when the service reported neither cache leg, then
+    // moves repeated input into cacheRead. Recording the pre-estimate provenance
+    // would call a locally reduced `input` measured and leave `cache` absent
+    // ("never told") beside a non-zero cacheRead.
+    resetCacheEstimatorForTests();
+    const estimatedStream = createKiroStream({
+      estimateDollarValue: false,
+      usdPerCredit: 0.04,
+      estimateCacheUsage: true,
+      estimatedCacheTimeout: 300_000,
+    });
+    const turn = async (chunks: string[]) => {
+      vi.stubGlobal("fetch", mockFetchChunked(chunks));
+      const events = await collect(
+        estimatedStream(makeModel(), makeContext(), { apiKey: "tok", sessionId: "provenance-estimate-session" }),
+      );
+      vi.unstubAllGlobals();
+      const done = events.find((e) => e.type === "done");
+      return done?.type === "done" ? done.message : undefined;
+    };
+
+    const first = await turn([
+      '{"content":"First"}',
+      '{"tokenUsage":{"uncachedInputTokens":500,"outputTokens":200,"totalTokens":700}}',
+    ]);
+    // Nothing to estimate from on the first turn: the wire figures stand.
+    expect(first?.usage.cacheRead).toBe(0);
+    expect(provenanceOf(first).details?.usage).toEqual({
+      input: "measured",
+      output: "measured",
+      totalTokens: "measured",
+    } satisfies KiroUsageProvenance);
+
+    const second = await turn([
+      '{"content":"Second"}',
+      '{"tokenUsage":{"uncachedInputTokens":900,"outputTokens":100,"totalTokens":1000}}',
+    ]);
+    expect(second?.usage.input).toBe(200);
+    expect(second?.usage.cacheRead).toBe(700);
+    expect(provenanceOf(second).details?.usage).toEqual({
+      input: "estimated",
+      output: "measured",
+      totalTokens: "measured",
+      cache: "estimated",
+    } satisfies KiroUsageProvenance);
+  });
+
+  it("marks a contextUsage-derived input and a tiktoken output as such, and the sum as estimated", async () => {
+    // The most common shape a host sees: no metadataEvent at all. Every number
+    // on the message is real, but none of them was reported by the service.
+    const { msg } = await run(['{"content":"Hello"}', '{"contextUsagePercentage":10}']);
+
+    expect(msg?.usage.input).toBe(Math.round(0.1 * makeModel().contextWindow));
+    expect(msg?.usage.output).toBeGreaterThan(0);
+    expect(provenanceOf(msg).details?.usage).toEqual({
+      input: "derived",
+      output: "estimated",
+      totalTokens: "estimated",
+    } satisfies KiroUsageProvenance);
+  });
+
+  it("lets a measured input displace a derived one, and calls a sum of four measured terms derived", async () => {
+    // contextUsage arrives first and back-computes input; the metadataEvent then
+    // reports the real uncached count. The later measurement wins and the
+    // provenance follows it. No wire total, so the total is summed — but every
+    // addend was reported, hence derived rather than estimated.
+    const { msg } = await run([
+      '{"content":"Hello"}',
+      '{"contextUsagePercentage":50}',
+      JSON.stringify({
+        tokenUsage: { uncachedInputTokens: 10, outputTokens: 5, cacheReadInputTokens: 7, cacheWriteInputTokens: 0 },
+      }),
+    ]);
+
+    expect(msg?.usage.input).toBe(10);
+    expect(msg?.usage.output).toBe(5);
+    expect(msg?.usage.totalTokens).toBe(22);
+    expect(provenanceOf(msg).details?.usage).toEqual({
+      input: "measured",
+      output: "measured",
+      totalTokens: "derived",
+      cache: "measured",
+    } satisfies KiroUsageProvenance);
+  });
+
+  it("calls a summed total estimated when a cache leg was never reported", async () => {
+    // Measured input and output, but no cache fields at all (first case) or only
+    // one leg (second). The sum silently treats the missing leg as 0 — an
+    // assumption, not a count — so the total cannot be called derived.
+    const none = await run([
+      '{"content":"Hello"}',
+      JSON.stringify({ tokenUsage: { uncachedInputTokens: 10, outputTokens: 5 } }),
+    ]);
+    expect(none.msg?.usage.totalTokens).toBe(15);
+    expect(provenanceOf(none.msg).details?.usage).toEqual({
+      input: "measured",
+      output: "measured",
+      totalTokens: "estimated",
+    } satisfies KiroUsageProvenance);
+
+    const oneLeg = await run([
+      '{"content":"Hello"}',
+      JSON.stringify({ tokenUsage: { uncachedInputTokens: 10, outputTokens: 5, cacheReadInputTokens: 7 } }),
+    ]);
+    expect(oneLeg.msg?.usage.totalTokens).toBe(22);
+    expect(provenanceOf(oneLeg.msg).details?.usage).toEqual({
+      input: "measured",
+      output: "measured",
+      totalTokens: "estimated",
+      cache: "measured",
+    } satisfies KiroUsageProvenance);
+  });
+
+  it("leaves input absent when neither contextUsage nor tokenUsage reported it", async () => {
+    // A bare metadataEvent that only carries outputTokens. `usage.input` is the
+    // attempt-reset 0, and the record must say nobody wrote it rather than
+    // claim a measurement.
+    const { msg } = await run(['{"content":"Hello"}', JSON.stringify({ tokenUsage: { outputTokens: 5 } })]);
+
+    expect(msg?.usage.input).toBe(0);
+    const usage = provenanceOf(msg).details?.usage as KiroUsageProvenance;
+    expect("input" in usage).toBe(false);
+    expect(usage.output).toBe("measured");
+    expect(usage.totalTokens).toBe("estimated");
+  });
+
+  it("keeps the cache leg absent when no metadataEvent arrives", async () => {
+    // A fabricated 0/0 must stay distinguishable from a service-reported 0%
+    // cache hit, or a host computing a cache hit rate reports an invented one.
+    const { msg } = await run(['{"content":"Hello"}', '{"contextUsagePercentage":10}']);
+
+    expect(msg?.usage.cacheRead).toBe(0);
+    expect(msg?.usage.cacheWrite).toBe(0);
+    const usage = provenanceOf(msg).details?.usage as KiroUsageProvenance;
+    expect(usage.cache).toBeUndefined();
+    expect("cache" in usage).toBe(false);
+  });
+
+  it("does not write the provenance onto usage itself", async () => {
+    // pi's `Usage` has no slot for it; the diagnostic is the only channel. A
+    // consumer that reads `usage.provenance` must find nothing, so it cannot
+    // grow a dependency on a field pi never promised.
+    const { msg } = await run([
+      '{"content":"Hello"}',
+      JSON.stringify({ tokenUsage: { uncachedInputTokens: 10, outputTokens: 5, totalTokens: 15 } }),
+    ]);
+
+    expect("provenance" in (msg?.usage as object)).toBe(false);
+    expect(provenanceOf(msg).details?.usage).toEqual({
+      input: "measured",
+      output: "measured",
+      totalTokens: "measured",
+    });
+  });
+
+  it("attaches exactly one record even when an earlier attempt was retried", async () => {
+    // The record describes the turn that completed, not each attempt.
+    const empty = mockFetchOk("");
+    const ok = mockFetchChunked(['{"content":"Recovered"}', '{"contextUsagePercentage":5}']);
+    const mockFetch = vi
+      .fn()
+      .mockImplementationOnce(() => empty())
+      .mockImplementationOnce(() => ok());
+    vi.stubGlobal("fetch", mockFetch);
+
+    const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+    vi.unstubAllGlobals();
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    // provenanceOf asserts exactly one.
+    expect(provenanceOf(msg).details?.usage).toMatchObject({ input: "derived" });
+  });
+
+  it("does not carry a discarded attempt's usage provenance across the retry boundary", async () => {
+    // First attempt reports a contextUsage frame (stamping input as derived) and
+    // nothing else, so it is retried as empty. The completing attempt reports
+    // no context frame at all. If provenance were not reset with the numbers,
+    // `input: "derived"` would describe an input the completing attempt reset
+    // to 0 and never wrote.
+    const stale = mockFetchChunked(['{"contextUsagePercentage":90}']);
+    const ok = mockFetchChunked(['{"content":"Recovered"}', JSON.stringify({ tokenUsage: { outputTokens: 3 } })]);
+    const mockFetch = vi
+      .fn()
+      .mockImplementationOnce(() => stale())
+      .mockImplementationOnce(() => ok());
+    vi.stubGlobal("fetch", mockFetch);
+
+    const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+    vi.unstubAllGlobals();
+    const done = events.find((e) => e.type === "done");
+    const msg = done?.type === "done" ? done.message : undefined;
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(msg?.usage.input).toBe(0);
+    const usage = provenanceOf(msg).details?.usage as KiroUsageProvenance;
+    expect("input" in usage).toBe(false);
+    expect(usage).toEqual({ output: "measured", totalTokens: "estimated" });
+  });
+
+  it("does not attach a provenance record to a failed turn", async () => {
+    // The error path has its own diagnostic; this record describes a turn whose
+    // numbers settled.
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: "Internal Server Error",
+      text: async () => "boom",
+      headers: new Headers(),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+    vi.unstubAllGlobals();
+    const error = events.find((e) => e.type === "error");
+    const msg = error?.type === "error" ? error.error : undefined;
+
+    expect(msg?.stopReason).toBe("error");
+    expect((msg?.diagnostics ?? []).some((d) => d.type === "kiro_turn_provenance")).toBe(false);
+  });
+
+  it("does not attach a provenance record when a modeled stop reason fails the turn", async () => {
+    // MODEL_CONTEXT_WINDOW_EXCEEDED surfaces as an error (pi's overflow path
+    // compacts on it), so the turn's numbers never settle into a success record.
+    const model = makeModel();
+    const { msg, terminal } = await run([
+      '{"content":"Partial"}',
+      '{"contextUsagePercentage":100}',
+      '{"stopReason":"MODEL_CONTEXT_WINDOW_EXCEEDED"}',
+    ]);
+
+    expect(terminal).toBe("error");
+    expect(msg && isContextOverflow(msg, model.contextWindow)).toBe(true);
+    expect((msg?.diagnostics ?? []).some((d) => d.type === "kiro_turn_provenance")).toBe(false);
+  });
+
+  it("does not attach a provenance record to an aborted turn", async () => {
+    // An abort mid-stream leaves the turn's numbers unsettled: usage was never
+    // finalized, so there is nothing truthful to record. Distinct from the 500
+    // case above because the abort arrives *after* content streamed, i.e. the
+    // furthest a turn can get and still not reach the append.
+    const ac = new AbortController();
+    let readCount = 0;
+    const readMock = vi.fn().mockImplementation(async () => {
+      readCount++;
+      if (readCount === 1) return { done: false, value: encodeBody('{"content":"partial"}') };
+      ac.abort();
+      throw new DOMException("The operation was aborted", "AbortError");
+    });
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      // The reader needs `cancel`: the provider cancels the body read when the
+      // caller's signal fires mid-stream, and this test fires it mid-stream.
+      body: {
+        getReader: () => ({ read: readMock, releaseLock: () => {}, cancel: async () => {} }),
+        cancel: async () => {},
+      },
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const events = await collect(
+      streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok", signal: ac.signal }),
+    );
+    vi.unstubAllGlobals();
+
+    const error = events.find((e) => e.type === "error");
+    const msg = error?.type === "error" ? error.error : undefined;
+    expect(msg?.stopReason).toBe("aborted");
+    expect((msg?.diagnostics ?? []).some((d) => d.type === "kiro_turn_provenance")).toBe(false);
+    // No terminal done either — the record and the done event share one site.
+    expect(events.some((e) => e.type === "done")).toBe(false);
+  });
+
+  it("completes the turn when the diagnostics append throws", async () => {
+    // Fail open. The record is observational, so it must never cost the caller a
+    // turn that otherwise finished. This is reachable in production, not
+    // hypothetical: pi-ai is a devDependency here and the HOST supplies it at
+    // runtime, so a host older than the 0.80.10 peer minimum has no
+    // `appendAssistantMessageDiagnostic` and the call throws TypeError. Without
+    // the guard, `streamKiro`'s outer catch turns a complete answer into
+    // stopReason:"error" with no content.
+    diagnosticsAppend.fail = true;
+    const mockFetch = mockFetchChunked(['{"content":"Answer"}', '{"contextUsagePercentage":12}']);
+    vi.stubGlobal("fetch", mockFetch);
+
+    const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "tok" }));
+    vi.unstubAllGlobals();
+
+    // The turn still ends normally: done, not error.
+    expect(events.some((e) => e.type === "error")).toBe(false);
+    const done = events.find((e) => e.type === "done");
+    expect(done).toBeDefined();
+    const msg = done?.type === "done" ? done.message : undefined;
+    expect(msg?.stopReason).toBe("stop");
+    expect((msg?.content[0] as TextContent).text).toBe("Answer");
+    // Usage still finalized — the throw happens after it, and must not undo it.
+    expect((msg?.usage as unknown as Record<string, unknown>).contextPercent).toBe(12);
+    // Only the diagnostic is lost.
+    expect(msg?.diagnostics ?? []).toEqual([]);
+  });
 });
