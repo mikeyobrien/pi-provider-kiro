@@ -184,12 +184,58 @@ export function getContentText(msg: Message): string {
   return "";
 }
 
+/**
+ * Kiro's Claude/Bedrock backend rejects a tool whose `input_schema` carries a
+ * **top-level** `anyOf` / `oneOf` / `allOf` combinator with
+ * `400 TOOL_SCHEMA_INVALID` — "input_schema does not support oneOf, allOf, or
+ * anyOf at the top level". Observed live against real Kiro Claude-backed models:
+ * any session whose toolset includes such a tool (e.g. pi's
+ * `agent_browser_action` / `agent_browser_qa` / `agent_browser_electron`, whose
+ * parameters are an object body that also declares a top-level `anyOf`) crashes
+ * the whole request because `convertToolsToKiro` forwards the schema verbatim.
+ *
+ * This strips ONLY the top-level combinator while preserving the object body so
+ * the tool stays callable. Nested combinators (inside a property, in `items`,
+ * etc.) are left untouched — Bedrock allows those, and rewriting them would
+ * change the tool's accepted arguments.
+ *
+ *  - Object schema that also carries a combinator → drop just the combinator,
+ *    keep `type`/`properties`/`required`/everything else.
+ *  - Pure combinator (no object body of its own) → collapse to the first
+ *    object-y branch if present, else a permissive object, so the tool still
+ *    has a valid top-level object schema.
+ *  - No top-level combinator → returned unchanged (backward compatible).
+ */
+export function stripTopLevelCombinators(schema: Record<string, unknown>): Record<string, unknown> {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return schema;
+  if (!("anyOf" in schema || "oneOf" in schema || "allOf" in schema)) return schema;
+
+  // Object schema that ALSO carries a combinator → drop just the combinator,
+  // keep the body. This is the agent_browser_action shape.
+  if (schema.type === "object" && schema.properties) {
+    const { anyOf: _anyOf, oneOf: _oneOf, allOf: _allOf, ...rest } = schema;
+    return rest;
+  }
+
+  // Pure combinator → collapse to the first object-y branch, else a permissive object.
+  const branches = (schema.anyOf ?? schema.oneOf ?? schema.allOf) as unknown;
+  const objBranch = Array.isArray(branches)
+    ? (branches.find(
+        (b): b is Record<string, unknown> =>
+          !!b && typeof b === "object" && (b as Record<string, unknown>).type === "object" && "properties" in b,
+      ) ?? null)
+    : null;
+  const { anyOf: _anyOf, oneOf: _oneOf, allOf: _allOf, ...rest } = schema;
+  if (objBranch) return { ...rest, ...objBranch };
+  return { type: "object", ...rest, additionalProperties: true };
+}
+
 export function convertToolsToKiro(tools: Tool[]): KiroToolSpec[] {
   return tools.map((tool) => ({
     toolSpecification: {
       name: tool.name,
       description: tool.description,
-      inputSchema: { json: tool.parameters as Record<string, unknown> },
+      inputSchema: { json: stripTopLevelCombinators(tool.parameters as Record<string, unknown>) },
     },
   }));
 }

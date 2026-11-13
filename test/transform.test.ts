@@ -9,6 +9,7 @@ import {
   normalizeMessages,
   relocateDisplacedToolResults,
   sanitizeSurrogates,
+  stripTopLevelCombinators,
   TOOL_RESULT_LIMIT,
   truncate,
 } from "../src/transform.js";
@@ -120,6 +121,90 @@ describe("Feature 5: Message Transformation", () => {
       const r = convertToolsToKiro(tools);
       expect(r[0].toolSpecification.name).toBe("bash");
       expect(r[0].toolSpecification.inputSchema.json).toEqual(tools[0].parameters);
+    });
+
+    it("strips a top-level anyOf from a tool's input schema but keeps its object body", () => {
+      // Mirrors pi's agent_browser_action shape: object body + a 2-member
+      // top-level anyOf. Kiro's Claude/Bedrock backend 400s on the top-level
+      // combinator (TOOL_SCHEMA_INVALID), so it must be stripped on the wire.
+      const tools: Tool[] = [
+        {
+          name: "agent_browser_action",
+          description: "Browse",
+          parameters: {
+            type: "object",
+            properties: { url: { type: "string" }, selector: { type: "string" } },
+            required: ["url"],
+            anyOf: [{ required: ["url"] }, { required: ["selector"] }],
+          } as unknown as Tool["parameters"],
+        },
+      ];
+      const json = convertToolsToKiro(tools)[0].toolSpecification.inputSchema.json;
+      expect(json.anyOf).toBeUndefined();
+      expect(json.oneOf).toBeUndefined();
+      expect(json.allOf).toBeUndefined();
+      expect(json.type).toBe("object");
+      expect(json.properties).toEqual({ url: { type: "string" }, selector: { type: "string" } });
+      expect(json.required).toEqual(["url"]);
+    });
+  });
+
+  describe("stripTopLevelCombinators", () => {
+    it("drops a top-level anyOf but preserves the object body (properties + required)", () => {
+      const schema = {
+        type: "object",
+        properties: { a: { type: "string" }, b: { type: "number" } },
+        required: ["a"],
+        anyOf: [{ required: ["a"] }, { required: ["b"] }],
+      };
+      const out = stripTopLevelCombinators(schema);
+      expect(out.anyOf).toBeUndefined();
+      expect(out.type).toBe("object");
+      expect(out.properties).toEqual({ a: { type: "string" }, b: { type: "number" } });
+      expect(out.required).toEqual(["a"]);
+    });
+
+    it("collapses a pure top-level anyOf to its first object branch", () => {
+      const schema = {
+        anyOf: [{ type: "object", properties: { x: { type: "string" } }, required: ["x"] }, { type: "string" }],
+      };
+      const out = stripTopLevelCombinators(schema);
+      expect(out.anyOf).toBeUndefined();
+      expect(out.type).toBe("object");
+      expect(out.properties).toEqual({ x: { type: "string" } });
+      expect(out.required).toEqual(["x"]);
+    });
+
+    it("collapses a pure top-level combinator with no object branch to a permissive object", () => {
+      const schema = { oneOf: [{ type: "string" }, { type: "number" }] };
+      const out = stripTopLevelCombinators(schema);
+      expect(out.oneOf).toBeUndefined();
+      expect(out.type).toBe("object");
+      expect(out.additionalProperties).toBe(true);
+    });
+
+    it("passes a schema with no top-level combinator through unchanged", () => {
+      const schema = { type: "object", properties: { a: { type: "string" } }, required: ["a"] };
+      const out = stripTopLevelCombinators(schema);
+      expect(out).toEqual(schema);
+      // Same reference: nothing was rewritten.
+      expect(out).toBe(schema);
+    });
+
+    it("leaves a NESTED combinator (inside a property) untouched", () => {
+      const schema = {
+        type: "object",
+        properties: {
+          value: { anyOf: [{ type: "string" }, { type: "number" }] },
+        },
+        required: ["value"],
+      };
+      const out = stripTopLevelCombinators(schema);
+      // No top-level combinator to strip -> unchanged, nested anyOf preserved.
+      expect(out).toEqual(schema);
+      expect((out.properties as Record<string, unknown>).value).toEqual({
+        anyOf: [{ type: "string" }, { type: "number" }],
+      });
     });
   });
 
