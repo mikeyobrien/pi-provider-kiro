@@ -357,6 +357,17 @@ export async function listAvailableModels(
   return response;
 }
 
+/**
+ * Region a profile-scoped management call must go to. The profile ARN carries its
+ * own region, which wins; otherwise use the region discovery found it in, then the
+ * SSO-derived region. API keys always live in the key-issuing region.
+ */
+export function resolveProfileManagementRegion(auth: KiroManagementAuth, profileArn: string): string {
+  if (isApiKey(auth.accessToken)) return API_KEY_REGION;
+  const arnRegion = /^arn:[^:]*:[^:]*:([a-z]{2}(?:-[a-z]+)+-\d):/.exec(profileArn)?.[1];
+  return arnRegion ?? profileRegionCache.get(profileCacheKey(auth)) ?? auth.region;
+}
+
 export async function fetchKiroModelCatalog(
   auth: KiroManagementAuth,
   providedProfileArn?: string,

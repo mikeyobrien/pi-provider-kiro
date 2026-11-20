@@ -3,7 +3,12 @@
 
 import type { OAuthCredentials } from "@earendil-works/pi-ai";
 import { resolveApiRegion } from "./endpoints.js";
-import { getUsageLimits, type KiroManagementAuth, resolveKiroProfileArn } from "./management.js";
+import {
+  getUsageLimits,
+  type KiroManagementAuth,
+  resolveKiroProfileArn,
+  resolveProfileManagementRegion,
+} from "./management.js";
 import type { KiroCredentials } from "./oauth.js";
 
 const MANAGE_USAGE_URL = "https://app.kiro.dev/account/usage";
@@ -145,7 +150,9 @@ function mapBucket(bucket: KiroUsageBreakdown, index: number): KiroProviderUsage
 
 async function fetchRawUsage(auth: KiroManagementAuth, profileArn?: string): Promise<KiroGetUsageLimitsResponse> {
   const resolvedProfileArn = await resolveKiroProfileArn(auth, profileArn);
-  return getUsageLimits<KiroGetUsageLimitsResponse>(auth, {
+  // GetUsageLimits is regional to the profile, not to the SSO-derived login region.
+  const region = resolveProfileManagementRegion(auth, resolvedProfileArn);
+  return getUsageLimits<KiroGetUsageLimitsResponse>(region === auth.region ? auth : { ...auth, region }, {
     profileArn: resolvedProfileArn,
     origin: "KIRO_CLI",
     resourceType: "CREDIT",

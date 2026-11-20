@@ -168,6 +168,50 @@ describe("fetchKiroUsage", () => {
     expectUsageRequest(fetchMock.mock.calls[1][0], profileArn);
   });
 
+  // The management API is regional to the profile, not to the login region. A
+  // eu-central-1 login whose profile lives in us-east-1 got 403 from GetUsageLimits.
+  it("sends GetUsageLimits to the region in the profile ARN, not the login region", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(usageResponse()) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchKiroUsage({ ...creds, region: "eu-central-1", profileArn });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expectUsageRequest(fetchMock.mock.calls[0][0], profileArn);
+  });
+
+  it("sends GetUsageLimits to the region where profile discovery found the profile", async () => {
+    const fetchMock = vi.fn(async (rawUrl: string) => {
+      const url = new URL(rawUrl);
+      if (url.pathname === "/List-Available-Profiles") {
+        if (url.hostname === "management.eu-central-1.kiro.dev") {
+          return { ok: false, status: 403, statusText: "Forbidden" };
+        }
+        return { ok: true, json: () => Promise.resolve({ profiles: [{ arn: profileArn }] }) };
+      }
+      // Mimic the live service: usage is only authorized in the profile's region.
+      if (url.hostname !== "management.us-east-1.kiro.dev") return { ok: false, status: 403, statusText: "Forbidden" };
+      return { ok: true, json: () => Promise.resolve(usageResponse()) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const usage = await fetchKiroUsage({ ...creds, region: "eu-central-1" });
+
+    expect(usage.subscriptionTitle).toBe("KIRO FREE");
+    const usageCall = fetchMock.mock.calls.at(-1)?.[0] as string;
+    expectUsageRequest(usageCall, profileArn);
+  });
+
+  it("falls back to the login region when the profile ARN carries no region", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(usageResponse()) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchKiroUsage({ ...creds, region: "eu-central-1", profileArn: "opaque-profile-id" });
+
+    const url = new URL(fetchMock.mock.calls[0][0]);
+    expect(url.hostname).toBe("management.eu-central-1.kiro.dev");
+  });
+
   it("surfaces usage failures without another profile lookup", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,
